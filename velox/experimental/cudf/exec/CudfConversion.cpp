@@ -119,7 +119,10 @@ RowVectorPtr CudfFromVelox::getOutput() {
 
   // Combine selected RowVectors into a single RowVector
   auto input = mergeRowVectors(selectedInputs, inputs_[0]->pool());
-
+  // print physical type of each column in output
+  for (auto i = 0; i < input->type()->size(); i++) {
+    std::cout << "input column " << i << " type: " << input->childAt(i)->type()->toString() << " " << input->childAt(i)->type()->kindName() << std::endl;
+  }
   // Remove processed inputs
   inputs_.erase(inputs_.begin(), inputs_.begin() + selectedInputs.size());
   currentOutputSize_ -= totalSize;
@@ -134,6 +137,10 @@ RowVectorPtr CudfFromVelox::getOutput() {
 
   // Convert RowVector to cudf table
   auto tbl = with_arrow::toCudfTable(input, input->pool(), stream);
+    // print types of tbl->view()
+  for (auto i = 0; i < tbl->num_columns(); i++) {
+    std::cout << "input cudf column " << i << " type: " << static_cast<int>(tbl->get_column(i).type().id()) << std::endl;
+  }
 
   stream.synchronize();
 
@@ -206,8 +213,23 @@ RowVectorPtr CudfToVelox::getOutput() {
   }
   RowVectorPtr output =
       with_arrow::toVeloxColumn(tbl->view(), pool(), "", stream);
+
+  // print types of tbl->view()
+  for (auto i = 0; i < tbl->num_columns(); i++) {
+    std::cout << "cudf column " << i << " type: " << static_cast<int>(tbl->get_column(i).type().id()) << std::endl;
+  }
   stream.synchronize();
   finished_ = noMoreInput_ && inputs_.empty();
+  std::cout << "output.type: " << output->type()->toString() << std::endl;
+  std::cout << "outputType_: " << outputType_->toString() << std::endl;
+  // print physical type of each column in output
+  for (auto i = 0; i < output->type()->size(); i++) {
+    std::cout << "column " << i << " type: " << output->childAt(i)->type()->toString() << " " << output->childAt(i)->type()->kindName() << std::endl;
+  }
+  // print physical type of each column in outputType_
+  for (auto i = 0; i < outputType_->size(); i++) {
+    std::cout << "column " << i << " type: " <<  outputType_->childAt(i)->toString() << " " << outputType_->childAt(i)->kindName() << std::endl;
+  }
   output->setType(outputType_);
   return output;
 }

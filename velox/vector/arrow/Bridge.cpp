@@ -26,6 +26,8 @@
 #include "velox/vector/VectorTypeUtils.h"
 #include "velox/vector/arrow/Abi.h"
 
+#include <iostream>
+
 namespace facebook::velox {
 
 namespace {
@@ -1234,16 +1236,16 @@ TypePtr parseDecimalFormat(const char* format) {
 
     // Parse "d:".
     int precision = std::stoi(&format[2], &sz);
-    int scale = std::stoi(&format[firstCommaIdx + 1], &sz);
-    // If bitwidth is provided, check if it is equal to 128.
+    std::cout << "pformat: " << format << std::endl;
+    std::cout << "precision: " << precision << " scale: " << scale << std::endl;
     if (secondCommaIdx != std::string::npos) {
       int bitWidth = std::stoi(&format[secondCommaIdx + 1], &sz);
       VELOX_USER_CHECK_EQ(
           bitWidth,
           128,
           "Conversion failed for '{}'. Velox decimal does not support custom bitwidth.",
-          format);
-    }
+    std::cout << "pformat: " << format << std::endl;
+    std::cout << "precision: " << precision << " scale: " << scale << std::endl;
     return DECIMAL(precision, scale);
   } catch (std::invalid_argument&) {
     VELOX_USER_FAIL(invalidFormatMsg, format);
@@ -1254,6 +1256,8 @@ TypePtr importFromArrowImpl(
     const char* format,
     const ArrowSchema& arrowSchema) {
   VELOX_CHECK_NOT_NULL(format);
+
+  std::cout << "format: " << format << std::endl;
 
   switch (format[0]) {
     case 'b':

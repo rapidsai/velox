@@ -84,6 +84,34 @@ cudf::type_id velox_to_cudf_type_id(const TypePtr& type) {
 }
 namespace with_arrow {
 
+
+  // Print ArrowSchema format strings recursively
+  void printArrowSchemaFormat(const ArrowSchema& arrowSchema, int depth = 0) {
+    std::string indent(depth * 2, ' ');
+    if (depth == 0) {
+      std::cout << "arrowSchema.format: " << arrowSchema.format << std::endl;
+    }
+    
+    for (int64_t i = 0; i < arrowSchema.n_children; ++i) {
+      const ArrowSchema* child = arrowSchema.children[i];
+      if (child != nullptr) {
+        std::cout << indent << "  child[" << i << "].format: " 
+                  << child->format << std::endl;
+        if (child->n_children > 0) {
+          printArrowSchemaFormat(*child, depth + 1);
+        }
+      }
+    }
+    
+    if (arrowSchema.dictionary != nullptr) {
+      std::cout << indent << "  dictionary.format: " 
+                << arrowSchema.dictionary->format << std::endl;
+      if (arrowSchema.dictionary->n_children > 0) {
+        printArrowSchemaFormat(*arrowSchema.dictionary, depth + 1);
+      }
+    }
+  }
+  
 std::unique_ptr<cudf::table> toCudfTable(
     const facebook::velox::RowVectorPtr& veloxTable,
     facebook::velox::memory::MemoryPool* pool,
@@ -102,6 +130,7 @@ std::unique_ptr<cudf::table> toCudfTable(
       std::dynamic_pointer_cast<facebook::velox::BaseVector>(veloxTable),
       arrowSchema,
       arrowOptions);
+  printArrowSchemaFormat(arrowSchema);
   auto tbl = cudf::from_arrow(&arrowSchema, &arrowArray, stream);
 
   // Release Arrow resources
