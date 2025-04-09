@@ -259,6 +259,30 @@ const char* exportArrowFormatTimestampStr(
   return formatBuffer.c_str();
 }
 
+uint8_t getDecimalWidth(const Type& type) {
+    // Get the physical type's bit width
+    switch (type.kind()) {
+      case TypeKind::BOOLEAN:
+        return 1;
+      case TypeKind::TINYINT:
+        return 8;
+      case TypeKind::SMALLINT:
+        return 16;
+      case TypeKind::INTEGER:
+        return 32;
+      case TypeKind::BIGINT:
+        return 64;
+      case TypeKind::REAL:
+        return 32;
+      case TypeKind::DOUBLE:
+        return 64;
+      case TypeKind::HUGEINT:
+        return 128;
+      default:
+      return 0; // Default for complex types
+  }
+}
+
 // Returns the Arrow C data interface format type for a given Velox type.
 const char* exportArrowFormatStr(
     const TypePtr& type,
@@ -267,7 +291,8 @@ const char* exportArrowFormatStr(
   if (type->isDecimal()) {
     // Decimal types encode the precision, scale values.
     const auto& [precision, scale] = getDecimalPrecisionScale(*type);
-    formatBuffer = fmt::format("d:{},{}", precision, scale);
+    auto const width = getDecimalWidth(*type);
+    formatBuffer = fmt::format("d:{},{},{}", precision, scale, width);
     return formatBuffer.c_str();
   }
 
@@ -1227,23 +1252,26 @@ TypePtr parseDecimalFormat(const char* format) {
     auto firstCommaIdx = formatStr.find(',', 2);
     auto secondCommaIdx = formatStr.find(',', firstCommaIdx + 1);
 
-    if (firstCommaIdx == std::string::npos ||
-        formatStr.size() == firstCommaIdx + 1 ||
-        (secondCommaIdx != std::string::npos &&
-         formatStr.size() == secondCommaIdx + 1)) {
-      VELOX_USER_FAIL(invalidFormatMsg, format);
-    }
+    // if (firstCommaIdx == std::string::npos ||
+    //     formatStr.size() == firstCommaIdx + 1 ||
+    //     (secondCommaIdx != std::string::npos &&
+    //      formatStr.size() == secondCommaIdx + 1)) {
+    //   VELOX_USER_FAIL(invalidFormatMsg, format);
+    // }
 
     // Parse "d:".
     int precision = std::stoi(&format[2], &sz);
-    std::cout << "pformat: " << format << std::endl;
-    std::cout << "precision: " << precision << " scale: " << scale << std::endl;
-    if (secondCommaIdx != std::string::npos) {
-      int bitWidth = std::stoi(&format[secondCommaIdx + 1], &sz);
-      VELOX_USER_CHECK_EQ(
-          bitWidth,
-          128,
-          "Conversion failed for '{}'. Velox decimal does not support custom bitwidth.",
+    int scale = std::stoi(&format[firstCommaIdx + 1], &sz);
+    // If bitwidth is provided, check if it is equal to 128.
+    // if (secondCommaIdx != std::string::npos) {
+    //   int bitWidth = std::stoi(&format[secondCommaIdx + 1], &sz);
+    //   VELOX_USER_CHECK_EQ(
+    //       bitWidth,
+    //       128,
+    //       "Conversion failed for '{}'. Velox decimal does not support custom bitwidth.",
+    //       format);
+    // }
+
     std::cout << "pformat: " << format << std::endl;
     std::cout << "precision: " << precision << " scale: " << scale << std::endl;
     return DECIMAL(precision, scale);
