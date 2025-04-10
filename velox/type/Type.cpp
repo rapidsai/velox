@@ -135,8 +135,8 @@ static int32_t typeKindSize(TypeKind kind) {
 } // namespace
 
 uint8_t getDecimalBitWidth(const Type& type) {
-    // Get the physical type's bit width
-    return typeKindSize(type.kind()) * 8;
+  // Get the physical type's bit width
+  return typeKindSize(type.kind()) * 8;
 }
 
 std::pair<uint8_t, uint8_t> getDecimalPrecisionScale(const Type& type) {

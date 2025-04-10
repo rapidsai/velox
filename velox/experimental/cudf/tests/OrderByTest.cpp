@@ -415,7 +415,7 @@ TEST_F(OrderByTest, outputBatchRows) {
 TEST_F(OrderByTest, allTypesWithIntegerKey) {
   vector_size_t batchSize = 500;
   std::vector<RowVectorPtr> vectors;
-  
+
   // Define the types we'll use
   auto keyType = INTEGER();
   auto boolType = BOOLEAN();
@@ -430,17 +430,18 @@ TEST_F(OrderByTest, allTypesWithIntegerKey) {
   auto timestampType = TIMESTAMP();
   auto arrayType = ARRAY(INTEGER());
   auto rowType = ROW({{"nested1", BOOLEAN()}, {"nested2", INTEGER()}});
-  auto shortDecimalType = DECIMAL(10, 2); // Unsupported due to a bug in ArrowSchema in Velox
+  auto shortDecimalType =
+      DECIMAL(10, 2); // Unsupported due to a bug in ArrowSchema in Velox
   auto longDecimalType = DECIMAL(38, 10);
   auto dateType = DATE();
   auto intervalDayTimeType = INTERVAL_DAY_TIME();
   auto intervalYearMonthType = INTERVAL_YEAR_MONTH(); // Unsupported
   // MAP, VARBINARY, UKNOWN, FUNCTION, OPAQUE // Unsupported
-  
+
   for (int32_t i = 0; i < 3; ++i) {
     std::vector<VectorPtr> children;
     std::vector<std::string> names;
-    
+
     // Integer key column for ordering
     auto c0 = makeFlatVector<int32_t>(
         batchSize,
@@ -452,8 +453,8 @@ TEST_F(OrderByTest, allTypesWithIntegerKey) {
 
     // BOOLEAN
     auto c1 = makeFlatVector<bool>(
-        batchSize, 
-        [](vector_size_t row) { return row % 2 == 0; }, 
+        batchSize,
+        [](vector_size_t row) { return row % 2 == 0; },
         nullEvery(5),
         boolType);
     children.push_back(c1);
@@ -461,8 +462,8 @@ TEST_F(OrderByTest, allTypesWithIntegerKey) {
 
     // TINYINT
     auto c2 = makeFlatVector<int8_t>(
-        batchSize, 
-        [](vector_size_t row) { return row % 127; }, 
+        batchSize,
+        [](vector_size_t row) { return row % 127; },
         nullEvery(9),
         tinyintType);
     children.push_back(c2);
@@ -470,17 +471,17 @@ TEST_F(OrderByTest, allTypesWithIntegerKey) {
 
     // SMALLINT
     auto c3 = makeFlatVector<int16_t>(
-        batchSize, 
-        [](vector_size_t row) { return row % 32767; }, 
+        batchSize,
+        [](vector_size_t row) { return row % 32767; },
         nullEvery(11),
         smallintType);
     children.push_back(c3);
     names.push_back("c3");
-    
+
     // BIGINT
     auto c4 = makeFlatVector<int64_t>(
-        batchSize, 
-        [](vector_size_t row) { return row * 10000; }, 
+        batchSize,
+        [](vector_size_t row) { return row * 10000; },
         nullEvery(13),
         bigintType);
     children.push_back(c4);
@@ -488,16 +489,16 @@ TEST_F(OrderByTest, allTypesWithIntegerKey) {
 
     // HUGEINT Note:(not supported by ArrowSchema)
     // auto c5 = makeFlatVector<int128_t>(
-    //     batchSize, 
-    //     [](vector_size_t row) { return row * 1000000000000000000ull; }, 
+    //     batchSize,
+    //     [](vector_size_t row) { return row * 1000000000000000000ull; },
     //     nullEvery(17),
     //     hugeIntType);
     // children.push_back(c5);
 
     // REAL (float)
     auto c6 = makeFlatVector<float>(
-        batchSize, 
-        [](vector_size_t row) { return row * 0.1f; }, 
+        batchSize,
+        [](vector_size_t row) { return row * 0.1f; },
         nullEvery(15),
         realType);
     children.push_back(c6);
@@ -505,13 +506,13 @@ TEST_F(OrderByTest, allTypesWithIntegerKey) {
 
     // DOUBLE
     auto c7 = makeFlatVector<double>(
-        batchSize, 
-        [](vector_size_t row) { return row * 0.01; }, 
+        batchSize,
+        [](vector_size_t row) { return row * 0.01; },
         nullEvery(17),
         doubleType);
     children.push_back(c7);
     names.push_back("c7");
-    
+
     // VARCHAR
     auto c8 = makeFlatVector<StringView>(
         batchSize,
@@ -533,7 +534,7 @@ TEST_F(OrderByTest, allTypesWithIntegerKey) {
     //     varbinaryType);
     // children.push_back(c9);
     // names.push_back("c9");
-    
+
     // TIMESTAMP
     auto c10 = makeFlatVector<Timestamp>(
         batchSize,
@@ -550,7 +551,7 @@ TEST_F(OrderByTest, allTypesWithIntegerKey) {
     auto c11 = makeArrayVector<int32_t>(
         batchSize,
         [](vector_size_t row) { return row % 5 + 1; }, // array sizes
-        [](vector_size_t idx) { return idx * 2; },      // array contents
+        [](vector_size_t idx) { return idx * 2; }, // array contents
         nullEvery(13));
     children.push_back(c11);
     names.push_back("c11");
@@ -566,38 +567,35 @@ TEST_F(OrderByTest, allTypesWithIntegerKey) {
         [](vector_size_t row) { return row * 5; },
         nullEvery(13),
         INTEGER());
-    auto c12 = makeRowVector(
-        {"nested1", "nested2"},
-        {nestedBool, nestedInt});
+    auto c12 = makeRowVector({"nested1", "nested2"}, {nestedBool, nestedInt});
     children.push_back(c12);
     names.push_back("c12");
 
     // DECIMAL(10, 2) - short decimal
     // auto c13 = makeFlatVector<int64_t>(
     //     batchSize,
-    //     [](vector_size_t row) { return row * 123; }, // Will be interpreted as row*1.23
-    //     nullEvery(27),
-    //     shortDecimalType);
+    //     [](vector_size_t row) { return row * 123; }, // Will be interpreted
+    //     as row*1.23 nullEvery(27), shortDecimalType);
     // children.push_back(c13);
     // names.push_back("c13");
 
     // DECIMAL(38, 10) - long decimal
     auto c14 = makeFlatVector<int128_t>(
         batchSize,
-        [](vector_size_t row) { 
-          return static_cast<int128_t>(row) * 1234567890; 
+        [](vector_size_t row) {
+          return static_cast<int128_t>(row) * 1234567890;
         },
         nullEvery(29),
         longDecimalType);
     children.push_back(c14);
     names.push_back("c14");
-    
+
     // DATE
     auto c15 = makeFlatVector<int32_t>(
         batchSize,
-        [](vector_size_t row) { 
+        [](vector_size_t row) {
           // Days since epoch, starting from 2020-01-01 (18262) plus row offset
-          return 18262 + row % 1000; 
+          return 18262 + row % 1000;
         },
         nullEvery(31),
         dateType);
@@ -607,19 +605,20 @@ TEST_F(OrderByTest, allTypesWithIntegerKey) {
     // INTERVAL_DAY_TIME - stored as int64_t
     auto c16 = makeFlatVector<int64_t>(
         batchSize,
-        [](vector_size_t row) { 
-          // Interval of days and milliseconds: row days and row*100 milliseconds
-          return row * 86400000 + row * 100; 
+        [](vector_size_t row) {
+          // Interval of days and milliseconds: row days and row*100
+          // milliseconds
+          return row * 86400000 + row * 100;
         },
         nullEvery(33),
         intervalDayTimeType);
     children.push_back(c16);
     names.push_back("c16");
-    
+
     // INTERVAL_YEAR_MONTH - stored as int32_t
     // auto c17 = makeFlatVector<int32_t>(
     //     batchSize,
-    //     [](vector_size_t row) { 
+    //     [](vector_size_t row) {
     //       // Interval of months: row months
     //       return row % 120; // 0-120 months (0-10 years)
     //     },
@@ -627,90 +626,96 @@ TEST_F(OrderByTest, allTypesWithIntegerKey) {
     //     intervalYearMonthType);
     // children.push_back(c17);
     // names.push_back("c17");
-    
+
     // Dictionary vector
-    auto flatVector = makeFlatVector<double>(batchSize, [](vector_size_t row) { return row; });
-    auto indices = makeIndices(batchSize, [](vector_size_t i) { return i % 100; });
-    auto nulls = makeNulls(batchSize, [](vector_size_t row) { return row % 3 == 0; });
-    
-    auto c18 = BaseVector::wrapInDictionary(nulls, indices, batchSize, flatVector);
+    auto flatVector = makeFlatVector<double>(
+        batchSize, [](vector_size_t row) { return row; });
+    auto indices =
+        makeIndices(batchSize, [](vector_size_t i) { return i % 100; });
+    auto nulls =
+        makeNulls(batchSize, [](vector_size_t row) { return row % 3 == 0; });
+
+    auto c18 =
+        BaseVector::wrapInDictionary(nulls, indices, batchSize, flatVector);
     // For comparison, create a dictionary without nulls
-    // auto dictWithoutNulls = BaseVector::wrapInDictionary(nullptr, indices, batchSize, flatVector);
+    // auto dictWithoutNulls = BaseVector::wrapInDictionary(nullptr, indices,
+    // batchSize, flatVector);
     children.push_back(c18);
     names.push_back("c18");
 
     vectors.push_back(makeRowVector(names, children));
   }
-  
+
   createDuckDbTable(vectors);
-  
+
   // Test ordering by the integer key
   testSingleKey(vectors, "c0");
-  
+
   // Test with a filter
   testSingleKey(vectors, "c0", "c0 % 100 = 0");
-  
+
   // Test descending order
   core::PlanNodeId orderById;
   auto plan = PlanBuilder()
-                .values(vectors)
-                .orderBy({"c0 DESC NULLS LAST"}, false)
-                .capturePlanNodeId(orderById)
-                .planNode();
+                  .values(vectors)
+                  .orderBy({"c0 DESC NULLS LAST"}, false)
+                  .capturePlanNodeId(orderById)
+                  .planNode();
   runTest(
       plan, orderById, "SELECT * FROM tmp ORDER BY c0 DESC NULLS LAST", {0});
-      
+
   // Test with secondary key
   testTwoKeys(vectors, "c0", "c1");
-  
+
   // Test ordering by boolean column
   testSingleKey(vectors, "c1");
-  
+
   // Test ordering by tinyint column
   testSingleKey(vectors, "c2");
-  
+
   // Test ordering by smallint column
   testSingleKey(vectors, "c3");
-  
+
   // Test ordering by bigint column
   testSingleKey(vectors, "c4");
-  
+
   // Test ordering by date column
   testSingleKey(vectors, "c15");
-  
+
   // Test ordering by interval column
   testSingleKey(vectors, "c16");
-  
+
   // Test ordering by dictionary column
   testSingleKey(vectors, "c18");
-  
+
   // Test multiple ordering directions
   core::PlanNodeId multiOrderById;
-  auto multiOrderPlan = PlanBuilder()
-                .values(vectors)
-                .orderBy({"c0 ASC NULLS FIRST", "c1 DESC NULLS LAST"}, false)
-                .capturePlanNodeId(multiOrderById)
-                .planNode();
+  auto multiOrderPlan =
+      PlanBuilder()
+          .values(vectors)
+          .orderBy({"c0 ASC NULLS FIRST", "c1 DESC NULLS LAST"}, false)
+          .capturePlanNodeId(multiOrderById)
+          .planNode();
   runTest(
-      multiOrderPlan, 
-      multiOrderById, 
-      "SELECT * FROM tmp ORDER BY c0 ASC NULLS FIRST, c1 DESC NULLS LAST", 
+      multiOrderPlan,
+      multiOrderById,
+      "SELECT * FROM tmp ORDER BY c0 ASC NULLS FIRST, c1 DESC NULLS LAST",
       {0, 1});
-      
+
   // Test with complex filter
   testSingleKey(vectors, "c0", "c1 = true AND c2 < 100");
-  
+
   // Test with three keys
   core::PlanNodeId threeKeysOrderById;
   auto threeKeysPlan = PlanBuilder()
-                .values(vectors)
-                .orderBy({"c0 ASC", "c1 DESC", "c2 ASC"}, false)
-                .capturePlanNodeId(threeKeysOrderById)
-                .planNode();
+                           .values(vectors)
+                           .orderBy({"c0 ASC", "c1 DESC", "c2 ASC"}, false)
+                           .capturePlanNodeId(threeKeysOrderById)
+                           .planNode();
   runTest(
-      threeKeysPlan, 
-      threeKeysOrderById, 
-      "SELECT * FROM tmp ORDER BY c0 ASC, c1 DESC, c2 ASC", 
+      threeKeysPlan,
+      threeKeysOrderById,
+      "SELECT * FROM tmp ORDER BY c0 ASC, c1 DESC, c2 ASC",
       {0, 1, 2});
 }
 } // namespace

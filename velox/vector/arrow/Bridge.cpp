@@ -1244,8 +1244,8 @@ TypePtr parseDecimalFormat(const char* format) {
     //   VELOX_USER_CHECK_EQ(
     //       bitWidth,
     //       128,
-    //       "Conversion failed for '{}'. Velox decimal does not support custom bitwidth.",
-    //       format);
+    //       "Conversion failed for '{}'. Velox decimal does not support custom
+    //       bitwidth.", format);
     // }
 
     std::cout << "pformat: " << format << std::endl;
