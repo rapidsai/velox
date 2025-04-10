@@ -424,7 +424,7 @@ TEST_F(OrderByTest, allTypesWithIntegerKey) {
   auto bigintType = BIGINT();
   auto realType = REAL();
   auto doubleType = DOUBLE();
-  auto hugeIntType = HUGEINT(); // Note:(not supported by ArrowSchema)
+  auto hugeIntType = HUGEINT(); // Note: not supported by ArrowSchema
   auto varcharType = VARCHAR();
   auto varbinaryType = VARBINARY(); // Unsupported
   auto timestampType = TIMESTAMP();
@@ -441,7 +441,7 @@ TEST_F(OrderByTest, allTypesWithIntegerKey) {
     std::vector<VectorPtr> children;
     std::vector<std::string> names;
     
-    // Integer key column - used for ordering
+    // Integer key column for ordering
     auto c0 = makeFlatVector<int32_t>(
         batchSize,
         [&](vector_size_t row) { return batchSize * i + row; },
@@ -449,6 +449,7 @@ TEST_F(OrderByTest, allTypesWithIntegerKey) {
         keyType);
     children.push_back(c0);
     names.push_back("c0");
+
     // BOOLEAN
     auto c1 = makeFlatVector<bool>(
         batchSize, 
@@ -457,6 +458,7 @@ TEST_F(OrderByTest, allTypesWithIntegerKey) {
         boolType);
     children.push_back(c1);
     names.push_back("c1");
+
     // TINYINT
     auto c2 = makeFlatVector<int8_t>(
         batchSize, 
@@ -465,6 +467,7 @@ TEST_F(OrderByTest, allTypesWithIntegerKey) {
         tinyintType);
     children.push_back(c2);
     names.push_back("c2");
+
     // SMALLINT
     auto c3 = makeFlatVector<int16_t>(
         batchSize, 
@@ -535,13 +538,14 @@ TEST_F(OrderByTest, allTypesWithIntegerKey) {
     auto c10 = makeFlatVector<Timestamp>(
         batchSize,
         [](vector_size_t row) {
-          // Create timestamps with increasing seconds
+          // seconds, nanoseconds
           return Timestamp(1600000000 + row, row * 1000);
         },
         nullEvery(23),
         timestampType);
     children.push_back(c10);
     names.push_back("c10");
+
     // ARRAY(INTEGER())
     auto c11 = makeArrayVector<int32_t>(
         batchSize,
@@ -581,8 +585,6 @@ TEST_F(OrderByTest, allTypesWithIntegerKey) {
     auto c14 = makeFlatVector<int128_t>(
         batchSize,
         [](vector_size_t row) { 
-          // Creating a simple int128 value that increases with row number
-          // Use a smaller multiplier to avoid overflow
           return static_cast<int128_t>(row) * 1234567890; 
         },
         nullEvery(29),
@@ -625,14 +627,12 @@ TEST_F(OrderByTest, allTypesWithIntegerKey) {
     //     intervalYearMonthType);
     // children.push_back(c17);
     // names.push_back("c17");
-    // Create a flat vector to wrap in a dictionary
+    
+    // Dictionary vector
     auto flatVector = makeFlatVector<double>(batchSize, [](vector_size_t row) { return row; });
-    // Create indices
     auto indices = makeIndices(batchSize, [](vector_size_t i) { return i % 100; });
-    // Create a null buffer where every 3rd entry is null
     auto nulls = makeNulls(batchSize, [](vector_size_t row) { return row % 3 == 0; });
     
-    // Create dictionary with nulls - note we pass the nulls buffer as first parameter
     auto c18 = BaseVector::wrapInDictionary(nulls, indices, batchSize, flatVector);
     // For comparison, create a dictionary without nulls
     // auto dictWithoutNulls = BaseVector::wrapInDictionary(nullptr, indices, batchSize, flatVector);
@@ -650,7 +650,7 @@ TEST_F(OrderByTest, allTypesWithIntegerKey) {
   // Test with a filter
   testSingleKey(vectors, "c0", "c0 % 100 = 0");
   
-  // Test different ordering directions
+  // Test descending order
   core::PlanNodeId orderById;
   auto plan = PlanBuilder()
                 .values(vectors)
@@ -660,7 +660,7 @@ TEST_F(OrderByTest, allTypesWithIntegerKey) {
   runTest(
       plan, orderById, "SELECT * FROM tmp ORDER BY c0 DESC NULLS LAST", {0});
       
-  // Test with another column as secondary key
+  // Test with secondary key
   testTwoKeys(vectors, "c0", "c1");
   
   // Test ordering by boolean column
