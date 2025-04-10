@@ -259,30 +259,6 @@ const char* exportArrowFormatTimestampStr(
   return formatBuffer.c_str();
 }
 
-uint8_t getDecimalWidth(const Type& type) {
-    // Get the physical type's bit width
-    switch (type.kind()) {
-      case TypeKind::BOOLEAN:
-        return 1;
-      case TypeKind::TINYINT:
-        return 8;
-      case TypeKind::SMALLINT:
-        return 16;
-      case TypeKind::INTEGER:
-        return 32;
-      case TypeKind::BIGINT:
-        return 64;
-      case TypeKind::REAL:
-        return 32;
-      case TypeKind::DOUBLE:
-        return 64;
-      case TypeKind::HUGEINT:
-        return 128;
-      default:
-      return 0; // Default for complex types
-  }
-}
-
 // Returns the Arrow C data interface format type for a given Velox type.
 const char* exportArrowFormatStr(
     const TypePtr& type,
@@ -291,7 +267,7 @@ const char* exportArrowFormatStr(
   if (type->isDecimal()) {
     // Decimal types encode the precision, scale values.
     const auto& [precision, scale] = getDecimalPrecisionScale(*type);
-    auto const width = getDecimalWidth(*type);
+    auto const width = getDecimalBitWidth(*type);
     formatBuffer = fmt::format("d:{},{},{}", precision, scale, width);
     return formatBuffer.c_str();
   }

@@ -119,6 +119,26 @@ std::string mapTypeKindToName(const TypeKind& typeKind) {
   return found->second;
 }
 
+namespace {
+template <TypeKind Kind>
+static int32_t kindSize() {
+  return sizeof(typename KindToFlatVector<Kind>::HashRowType);
+}
+
+static int32_t typeKindSize(TypeKind kind) {
+  if (kind == TypeKind::UNKNOWN) {
+    return sizeof(UnknownValue);
+  }
+
+  return VELOX_DYNAMIC_TYPE_DISPATCH(kindSize, kind);
+}
+} // namespace
+
+uint8_t getDecimalBitWidth(const Type& type) {
+    // Get the physical type's bit width
+    return typeKindSize(type.kind()) * 8;
+}
+
 std::pair<uint8_t, uint8_t> getDecimalPrecisionScale(const Type& type) {
   if (type.isShortDecimal()) {
     const auto& decimalType = static_cast<const ShortDecimalType&>(type);
