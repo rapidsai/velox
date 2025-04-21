@@ -26,6 +26,8 @@
 #include "velox/vector/VectorTypeUtils.h"
 #include "velox/vector/arrow/Abi.h"
 
+#include <iostream>
+
 namespace facebook::velox {
 
 namespace {
@@ -265,7 +267,8 @@ const char* exportArrowFormatStr(
   if (type->isDecimal()) {
     // Decimal types encode the precision, scale values.
     const auto& [precision, scale] = getDecimalPrecisionScale(*type);
-    formatBuffer = fmt::format("d:{},{}", precision, scale);
+    auto const width = getDecimalBitWidth(*type);
+    formatBuffer = fmt::format("d:{},{},{}", precision, scale, width);
     return formatBuffer.c_str();
   }
 
@@ -1225,25 +1228,28 @@ TypePtr parseDecimalFormat(const char* format) {
     auto firstCommaIdx = formatStr.find(',', 2);
     auto secondCommaIdx = formatStr.find(',', firstCommaIdx + 1);
 
-    if (firstCommaIdx == std::string::npos ||
-        formatStr.size() == firstCommaIdx + 1 ||
-        (secondCommaIdx != std::string::npos &&
-         formatStr.size() == secondCommaIdx + 1)) {
-      VELOX_USER_FAIL(invalidFormatMsg, format);
-    }
+    // if (firstCommaIdx == std::string::npos ||
+    //     formatStr.size() == firstCommaIdx + 1 ||
+    //     (secondCommaIdx != std::string::npos &&
+    //      formatStr.size() == secondCommaIdx + 1)) {
+    //   VELOX_USER_FAIL(invalidFormatMsg, format);
+    // }
 
     // Parse "d:".
     int precision = std::stoi(&format[2], &sz);
     int scale = std::stoi(&format[firstCommaIdx + 1], &sz);
     // If bitwidth is provided, check if it is equal to 128.
-    if (secondCommaIdx != std::string::npos) {
-      int bitWidth = std::stoi(&format[secondCommaIdx + 1], &sz);
-      VELOX_USER_CHECK_EQ(
-          bitWidth,
-          128,
-          "Conversion failed for '{}'. Velox decimal does not support custom bitwidth.",
-          format);
-    }
+    // if (secondCommaIdx != std::string::npos) {
+    //   int bitWidth = std::stoi(&format[secondCommaIdx + 1], &sz);
+    //   VELOX_USER_CHECK_EQ(
+    //       bitWidth,
+    //       128,
+    //       "Conversion failed for '{}'. Velox decimal does not support custom
+    //       bitwidth.", format);
+    // }
+
+    std::cout << "pformat: " << format << std::endl;
+    std::cout << "precision: " << precision << " scale: " << scale << std::endl;
     return DECIMAL(precision, scale);
   } catch (std::invalid_argument&) {
     VELOX_USER_FAIL(invalidFormatMsg, format);
@@ -1254,6 +1260,8 @@ TypePtr importFromArrowImpl(
     const char* format,
     const ArrowSchema& arrowSchema) {
   VELOX_CHECK_NOT_NULL(format);
+
+  std::cout << "format: " << format << std::endl;
 
   switch (format[0]) {
     case 'b':
