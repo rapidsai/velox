@@ -376,13 +376,11 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
   }
   VELOX_NVTX_OPERATOR_FUNC_RANGE();
 
-  if (finished_) {
+  if (finished_ or !hashObject_.has_value()) {
     return nullptr;
   }
+
   if (!input_) {
-    return nullptr;
-  }
-  if (!hashObject_.has_value()) {
     return nullptr;
   }
   auto cudfInput = std::dynamic_pointer_cast<CudfVector>(input_);
