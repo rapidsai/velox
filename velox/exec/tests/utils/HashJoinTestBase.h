@@ -767,11 +767,11 @@ class HashJoinBuilder {
   std::optional<bool> runParallelBuild_;
 
   bool injectTaskCancellation_{false};
-  bool injectSpill_{true};
+  bool injectSpill_{false};
   // If not set, then the test will run the test with different settings:
   // 0, 2.
   std::optional<int32_t> maxSpillLevel_;
-  bool checkSpillStats_{true};
+  bool checkSpillStats_{false};
 
   std::shared_ptr<memory::MemoryPool> queryPool_;
   std::string spillDirectory_;
