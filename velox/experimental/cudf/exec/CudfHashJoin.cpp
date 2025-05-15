@@ -25,6 +25,7 @@
 #include <cudf/copying.hpp>
 #include <cudf/join/join.hpp>
 #include <cudf/join/mixed_join.hpp>
+#include <cudf/null_mask.hpp>
 
 #include <nvtx3/nvtx3.hpp>
 
@@ -102,6 +103,17 @@ void CudfHashJoinBuild::addInput(RowVectorPtr input) {
   if (input->size() > 0) {
     auto cudfInput = std::dynamic_pointer_cast<CudfVector>(input);
     VELOX_CHECK_NOT_NULL(cudfInput);
+    // Count nulls in join key columns
+    cudf::size_type null_count{};
+    std::tie(std::ignore, null_count) = cudf::bitmask_and(
+        cudfInput->getTableView(),
+        cudfInput->stream(),
+        cudf::get_current_device_resource_ref());
+    {
+      // Update statistics for null keys in join operator.
+      auto lockedStats = stats_.wlock();
+      lockedStats->numNullKeys += null_count;
+    }
     inputs_.push_back(std::move(cudfInput));
   }
 }
@@ -370,6 +382,19 @@ void CudfHashJoinProbe::addInput(RowVectorPtr input) {
   if (skipInput_) {
     VELOX_CHECK_NULL(input_);
     return;
+  }
+  auto cudfInput = std::dynamic_pointer_cast<CudfVector>(input);
+  VELOX_CHECK_NOT_NULL(cudfInput);
+  // Count nulls in join key columns
+  cudf::size_type null_count{};
+  std::tie(std::ignore, null_count) = cudf::bitmask_and(
+      cudfInput->getTableView(), 
+      cudfInput->stream(),
+      cudf::get_current_device_resource_ref());
+  {
+    // Update statistics for null keys in join operator.
+    auto lockedStats = stats_.wlock();
+    lockedStats->numNullKeys += null_count;
   }
   input_ = std::move(input);
 }

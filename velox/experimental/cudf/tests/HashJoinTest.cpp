@@ -1588,10 +1588,10 @@ TEST_P(MultiThreadedHashJoinTest, leftJoin) {
 
         for (auto& pipeline : task->taskStats().pipelineStats) {
           for (auto op : pipeline.operatorStats) {
-            if (op.operatorType == "HashBuild") {
+            if (op.operatorType == "CudfHashJoinBuild") {
               nullJoinBuildKeyCount += op.numNullKeys;
             }
-            if (op.operatorType == "HashProbe") {
+            if (op.operatorType == "CudfHashJoinProbe") {
               nullJoinProbeKeyCount += op.numNullKeys;
             }
           }
@@ -1643,17 +1643,19 @@ TEST_P(MultiThreadedHashJoinTest, nullStatsWithEmptyBuild) {
 
         for (auto& pipeline : task->taskStats().pipelineStats) {
           for (auto op : pipeline.operatorStats) {
-            if (op.operatorType == "HashBuild") {
+            if (op.operatorType == "CudfHashJoinBuild") {
               nullJoinBuildKeyCount += op.numNullKeys;
             }
-            if (op.operatorType == "HashProbe") {
+            if (op.operatorType == "CudfHashJoinProbe") {
               nullJoinProbeKeyCount += op.numNullKeys;
             }
           }
         }
         // Due to inaccurate stats tracking in case of empty build side,
         // we will report 0 null keys on probe side.
-        ASSERT_EQ(nullJoinProbeKeyCount, 0);
+        // CudfHashJoinProbe will reports correct null keys 
+        // since early exit is not implemented.
+        ASSERT_EQ(nullJoinProbeKeyCount, 6 * GetParam().numDrivers);
         ASSERT_EQ(nullJoinBuildKeyCount, 1 * GetParam().numDrivers);
       })
       .checkSpillStats(false)
