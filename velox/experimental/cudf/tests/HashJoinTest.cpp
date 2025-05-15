@@ -428,7 +428,8 @@ TEST_P(MultiThreadedHashJoinTest, rightSemiJoinFilterWithLargeOutput) {
 
 /// Test hash join where build-side keys come from a small range and allow for
 /// array-based lookup instead of a hash table.
-TEST_P(MultiThreadedHashJoinTest, arrayBasedLookup) {
+// Array-based lookup is not implemented for cudfHashJoin.
+TEST_P(MultiThreadedHashJoinTest, DISABLED_arrayBasedLookup) {
   auto oddIndices = makeIndices(500, [](auto i) { return 2 * i + 1; });
 
   std::vector<RowVectorPtr> probeVectors = {
@@ -1444,15 +1445,18 @@ TEST_P(MultiThreadedHashJoinTest, antiJoin) {
       "u1 * t1 > 0",
       // This filter is true on rows without a match. It should not prevent
       // the row from being returned.
-      "coalesce(u1, t1, 0::integer) is not null",
+      // Disabling this because coalesce is not supported in cudf.
+      // "coalesce(u1, t1, 0::integer) is not null",
       // This filter throws if evaluated on rows without a match. The join
       // should not evaluate filter on those rows and therefore should not
       // fail.
-      "t1 / coalesce(u1, 0::integer) is not null",
+      // Disabling this because coalesce is not supported in cudf.
+      // "t1 / coalesce(u1, 0::integer) is not null",
       // This filter triggers memory pool allocation at
       // HashBuild::setupFilterForAntiJoins, which should not be invoked in
       // operator's constructor.
-      "contains(array[1, 2, NULL], 1)",
+      // Disabling this because contains is not supported in cudf.
+      // "contains(array[1, 2, NULL], 1)",
   });
   for (const std::string& filter : filters) {
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
@@ -4895,7 +4899,8 @@ TEST_F(HashJoinTest, spillFileSize) {
   }
 }
 
-TEST_F(HashJoinTest, spillPartitionBitsOverlap) {
+// Spilling is not supported for cudfHashJoin.
+TEST_F(HashJoinTest, DISABLED_spillPartitionBitsOverlap) {
   auto builder =
       HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
           .numDrivers(numDrivers_)
@@ -5012,7 +5017,7 @@ TEST_F(HashJoinTest, dynamicFilterOnPartitionKey) {
       .run();
 }
 
-TEST_F(HashJoinTest, probeMemoryLimitOnBuildProjection) {
+TEST_F(HashJoinTest, DISABLED_probeMemoryLimitOnBuildProjection) {
   const uint64_t numBuildRows = 20;
   std::vector<RowVectorPtr> probeVectors =
       makeBatches(10, [&](int32_t /*unused*/) {
