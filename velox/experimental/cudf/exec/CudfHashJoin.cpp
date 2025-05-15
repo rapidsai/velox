@@ -501,6 +501,11 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
           cudf::get_current_device_resource_ref());
     }
   } else if (joinNode_->isAntiJoin()) {
+    if (joinNode_->isNullAware()) {
+      VELOX_NYI("Null-aware anti join is not supported");
+      //  TODO implement null-aware anti join 
+      // https://facebookincubator.github.io/velox/develop/anti-join.html
+    }
     if (joinNode_->filter()) {
       leftJoinIndices = cudf::mixed_left_anti_join(
           leftTableView.select(leftKeyIndices_),

@@ -118,6 +118,10 @@ bool CompileState::compile() {
     if (!CudfHashJoinProbe::isSupportedJoinType(planNode->joinType())) {
       return false;
     }
+    // disabling null-aware anti join until we implement it right
+    if (planNode->joinType() == core::JoinType::kAnti and planNode->isNullAware()) {
+      return false;
+    }
     return true;
   };
 
