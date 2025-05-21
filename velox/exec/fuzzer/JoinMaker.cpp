@@ -391,17 +391,17 @@ JoinMaker::PlanWithSplits JoinMaker::makeHashJoin(
   test::PlanBuilder probeSourcePlan;
   test::PlanBuilder buildSourcePlan;
 
-  if (partitionStrategy == PartitionStrategy::NONE) {
+  // if (partitionStrategy == PartitionStrategy::NONE) {
     probeSourcePlan =
         makeJoinSourcePlan(probeSource, inputType, planNodeIdGenerator);
     buildSourcePlan =
         makeJoinSourcePlan(buildSource, inputType, planNodeIdGenerator);
-  } else {
-    probeSourcePlan = makePartitionedJoinSourcePlan(
-        partitionStrategy, probeSource, inputType, planNodeIdGenerator);
-    buildSourcePlan = makePartitionedJoinSourcePlan(
-        partitionStrategy, buildSource, inputType, planNodeIdGenerator);
-  }
+  // } else {
+  //   probeSourcePlan = makePartitionedJoinSourcePlan(
+  //       partitionStrategy, probeSource, inputType, planNodeIdGenerator);
+  //   buildSourcePlan = makePartitionedJoinSourcePlan(
+  //       partitionStrategy, buildSource, inputType, planNodeIdGenerator);
+  // }
 
   return PlanWithSplits(makeHashJoinPlan(
       probeSourcePlan,

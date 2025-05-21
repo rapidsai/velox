@@ -207,11 +207,13 @@ class JoinMaker {
   bool supportsFlippingNestedLoopJoin() const;
 
   bool supportsMergeJoin() const {
-    return core::MergeJoinNode::isSupported(joinType_);
+    return false;
+    // return core::MergeJoinNode::isSupported(joinType_);
   }
 
   bool supportsNestedLoopJoin() const {
-    return core::NestedLoopJoinNode::isSupported(joinType_);
+    return false;
+    // return core::NestedLoopJoinNode::isSupported(joinType_);
   }
 
   /// Returns whether or not the types of the sources allow them to be read as

@@ -116,6 +116,7 @@ bool CompileState::compile() {
       return false;
     }
     if (!CudfHashJoinProbe::isSupportedJoinType(planNode->joinType())) {
+      std::cout << "Unsupported join type: " << planNode->toString() << joinTypeName(planNode->joinType()) << std::endl;
       return false;
     }
     return true;

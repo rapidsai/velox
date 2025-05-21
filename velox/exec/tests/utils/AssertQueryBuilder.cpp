@@ -226,6 +226,14 @@ RowVectorPtr AssertQueryBuilder::copyResults(memory::MemoryPool* pool) {
   return copyResults(pool, unused);
 }
 
+std::pair<RowVectorPtr, TaskStats> AssertQueryBuilder::copyResultsWithStats(memory::MemoryPool* pool) {
+  std::shared_ptr<Task> unused;
+  auto result = copyResults(pool, unused);
+  auto stats = unused->taskStats();
+  return std::make_pair(result, stats);
+}
+
+
 RowVectorPtr AssertQueryBuilder::copyResults(
     memory::MemoryPool* pool,
     std::shared_ptr<Task>& task) {

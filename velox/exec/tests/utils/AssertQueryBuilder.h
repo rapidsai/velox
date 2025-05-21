@@ -178,6 +178,8 @@ class AssertQueryBuilder {
   /// query returns empty result.
   RowVectorPtr copyResults(memory::MemoryPool* pool);
 
+  std::pair<RowVectorPtr, TaskStats> copyResultsWithStats(memory::MemoryPool* pool);
+
   /// Similar to above method and also returns the task.
   RowVectorPtr copyResults(
       memory::MemoryPool* pool,

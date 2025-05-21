@@ -22,6 +22,7 @@
 #include "velox/exec/fuzzer/FuzzerUtil.h"
 #include "velox/exec/fuzzer/JoinFuzzer.h"
 #include "velox/exec/fuzzer/ReferenceQueryRunner.h"
+#include "velox/experimental/cudf/exec/ToCudf.h"
 #include "velox/functions/prestosql/registration/RegistrationFunctions.h"
 #include "velox/parse/TypeResolver.h"
 #include "velox/serializers/CompactRowSerializer.h"
@@ -116,5 +117,9 @@ int main(int argc, char** argv) {
     facebook::velox::serializer::spark::UnsafeRowVectorSerde::
         registerNamedVectorSerde();
   }
+  // Register cuDF
+  facebook::velox::cudf_velox::registerCudf();
+
   joinFuzzer(initialSeed, std::move(referenceQueryRunner));
+  facebook::velox::cudf_velox::unregisterCudf();
 }

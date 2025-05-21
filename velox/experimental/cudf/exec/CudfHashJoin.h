@@ -34,7 +34,7 @@ namespace facebook::velox::cudf_velox {
 class CudfHashJoinBridge : public exec::JoinBridge {
  public:
   using hash_type =
-      std::pair<std::shared_ptr<cudf::table>, std::shared_ptr<cudf::hash_join>>;
+      std::tuple<std::shared_ptr<cudf::table>, std::shared_ptr<cudf::hash_join>, std::shared_ptr<std::atomic<bool>>>;
 
   void setHashTable(std::optional<hash_type> hashObject);
 
@@ -89,10 +89,8 @@ class CudfHashJoinProbe : public exec::Operator, public NvtxHelper {
   static bool isSupportedJoinType(core::JoinType joinType) {
     return joinType == core::JoinType::kInner ||
         joinType == core::JoinType::kLeft ||
-        joinType == core::JoinType::kRight ||
         joinType == core::JoinType::kAnti ||
-        joinType == core::JoinType::kLeftSemiFilter ||
-        joinType == core::JoinType::kRightSemiFilter;
+        joinType == core::JoinType::kLeftSemiFilter;
   }
 
   bool isFinished() override;
@@ -113,6 +111,7 @@ class CudfHashJoinProbe : public exec::Operator, public NvtxHelper {
   std::vector<cudf::size_type> rightColumnIndicesToGather_;
   std::vector<size_t> leftColumnOutputIndices_;
   std::vector<size_t> rightColumnOutputIndices_;
+  std::mutex probePrintMutex_;
   bool finished_{false};
 };
 
