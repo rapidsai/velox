@@ -26,6 +26,7 @@
 #include <cudf/join/join.hpp>
 #include <cudf/join/mixed_join.hpp>
 #include <cudf/null_mask.hpp>
+#include <cudf/stream_compaction.hpp>
 
 #include <nvtx3/nvtx3.hpp>
 
@@ -388,7 +389,7 @@ void CudfHashJoinProbe::addInput(RowVectorPtr input) {
   // Count nulls in join key columns
   cudf::size_type null_count{};
   std::tie(std::ignore, null_count) = cudf::bitmask_and(
-      cudfInput->getTableView(), 
+      cudfInput->getTableView(),
       cudfInput->stream(),
       cudf::get_current_device_resource_ref());
   {
@@ -440,6 +441,24 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
           "hb is not nullptr %p hasValue(%d)\n",
           hb.get(),
           hashObject_.has_value());
+  }
+
+  // Special case for null-aware anti join where
+  // build table is not empty, no nulls, and probe table has nulls
+  if (joinNode_->isNullAware() and !joinNode_->filter()) {
+    auto const rightTableHasNulls =
+        cudf::has_nulls(rightTable->view().select(rightKeyIndices_));
+    auto const leftTableHasNulls =
+        cudf::has_nulls(leftTable->view().select(leftKeyIndices_));
+    if (rightTable->num_rows() > 0 and !rightTableHasNulls and
+        leftTableHasNulls) {
+      // drop nulls on probe table
+      leftTable = cudf::drop_nulls(
+          leftTable->view(),
+          leftKeyIndices_,
+          stream,
+          cudf::get_current_device_resource_ref());
+    }
   }
 
   std::unique_ptr<rmm::device_uvector<cudf::size_type>> leftJoinIndices;
@@ -501,11 +520,6 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
           cudf::get_current_device_resource_ref());
     }
   } else if (joinNode_->isAntiJoin()) {
-    if (joinNode_->isNullAware()) {
-      VELOX_NYI("Null-aware anti join is not supported");
-      //  TODO implement null-aware anti join 
-      // https://facebookincubator.github.io/velox/develop/anti-join.html
-    }
     if (joinNode_->filter()) {
       leftJoinIndices = cudf::mixed_left_anti_join(
           leftTableView.select(leftKeyIndices_),
@@ -517,12 +531,21 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
           stream,
           cudf::get_current_device_resource_ref());
     } else {
-      leftJoinIndices = cudf::left_anti_join(
-          leftTableView.select(leftKeyIndices_),
-          rightTableView.select(rightKeyIndices_),
-          cudf::null_equality::UNEQUAL,
-          stream,
-          cudf::get_current_device_resource_ref());
+      auto const rightTableHasNulls =
+          cudf::has_nulls(rightTableView.select(rightKeyIndices_));
+      if (joinNode_->isNullAware() and rightTableHasNulls) {
+        // empty result
+        leftJoinIndices =
+            std::make_unique<rmm::device_uvector<cudf::size_type>>(
+                0, stream, cudf::get_current_device_resource_ref());
+      } else {
+        leftJoinIndices = cudf::left_anti_join(
+            leftTableView.select(leftKeyIndices_),
+            rightTableView.select(rightKeyIndices_),
+            cudf::null_equality::UNEQUAL,
+            stream,
+            cudf::get_current_device_resource_ref());
+      }
     }
   } else if (joinNode_->isLeftSemiFilterJoin()) {
     if (joinNode_->filter()) {
