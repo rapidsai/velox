@@ -119,7 +119,8 @@ bool CompileState::compile() {
       return false;
     }
     // disabling null-aware anti join with filter until we implement it right
-    if (planNode->joinType() == core::JoinType::kAnti and planNode->isNullAware() and planNode->filter()) {
+    if (planNode->joinType() == core::JoinType::kAnti and
+        planNode->isNullAware() and planNode->filter()) {
       return false;
     }
     return true;

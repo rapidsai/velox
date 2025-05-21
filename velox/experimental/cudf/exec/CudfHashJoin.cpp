@@ -668,7 +668,8 @@ exec::BlockingReason CudfHashJoinProbe::isBlocked(ContinueFuture* future) {
   auto& rightTable = hashObject_.value().first;
   if (rightTable->num_rows() == 0) {
   }
-  // should be rightTable->numDistinct() but it needs compute, so we use num_rows()
+  // should be rightTable->numDistinct() but it needs compute, so we use
+  // num_rows()
   if (rightTable->num_rows() == 0) {
     if (skipProbeOnEmptyBuild()) {
       if (operatorCtx_->driverCtx()

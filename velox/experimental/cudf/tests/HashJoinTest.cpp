@@ -15,9 +15,7 @@
  */
 
 #include "velox/experimental/cudf/exec/ToCudf.h"
-#include <re2/re2.h>
 
-#include <fmt/format.h>
 #include "folly/experimental/EventCount.h"
 #include "velox/common/base/tests/GTestUtils.h"
 #include "velox/common/testutil/TestValue.h"
@@ -35,6 +33,9 @@
 #include "velox/exec/tests/utils/TempDirectoryPath.h"
 #include "velox/exec/tests/utils/VectorTestUtil.h"
 #include "velox/vector/fuzzer/VectorFuzzer.h"
+
+#include <fmt/format.h>
+#include <re2/re2.h>
 
 using namespace facebook::velox;
 using namespace facebook::velox::exec;
@@ -1441,8 +1442,7 @@ TEST_P(MultiThreadedHashJoinTest, antiJoin) {
       .run();
 
   std::vector<std::string> filters({
-      "u1 > t1",
-      "u1 * t1 > 0",
+      "u1 > t1", "u1 * t1 > 0",
       // This filter is true on rows without a match. It should not prevent
       // the row from being returned.
       // Disabling this because coalesce is not supported in cudf.
@@ -1657,7 +1657,7 @@ TEST_P(MultiThreadedHashJoinTest, nullStatsWithEmptyBuild) {
         }
         // Due to inaccurate stats tracking in case of empty build side,
         // we will report 0 null keys on probe side.
-        // CudfHashJoinProbe will reports correct null keys 
+        // CudfHashJoinProbe will reports correct null keys
         // since early exit is not implemented.
         ASSERT_EQ(nullJoinProbeKeyCount, 6 * GetParam().numDrivers);
         ASSERT_EQ(nullJoinBuildKeyCount, 1 * GetParam().numDrivers);

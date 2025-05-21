@@ -214,7 +214,7 @@ const std::unordered_map<std::string, Op> prestoBinaryOps = {
     {"and", Op::NULL_LOGICAL_AND},
     {"or", Op::NULL_LOGICAL_OR},
     {"mod", Op::MOD},
-    };
+};
 
 const std::unordered_map<std::string, Op> sparkBinaryOps = {
     {"add", Op::ADD},
@@ -236,7 +236,9 @@ const std::unordered_map<std::string, Op> binaryOps = [] {
   return merged;
 }();
 
-const std::map<std::string, Op> unaryOps = {{"not", Op::NOT}, {"is_null", Op::IS_NULL}};
+const std::map<std::string, Op> unaryOps = {
+    {"not", Op::NOT},
+    {"is_null", Op::IS_NULL}};
 
 const std::unordered_set<std::string> supportedOps = {
     "literal",
