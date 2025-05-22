@@ -17,12 +17,14 @@
 #include "velox/experimental/cudf/exec/ToCudf.h"
 
 #include "velox/dwio/common/tests/utils/BatchMaker.h"
+#include "velox/exec/PlanNodeStats.h"
 #include "velox/exec/tests/utils/AssertQueryBuilder.h"
 #include "velox/exec/tests/utils/OperatorTestBase.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
 
 namespace facebook::velox::exec::test {
 
+using core::QueryConfig;
 using facebook::velox::test::BatchMaker;
 using namespace common::testutil;
 
@@ -475,6 +477,100 @@ TEST_F(AggregationTest, countPartialFinalGlobal) {
                 .planNode();
 
   assertQuery(op, "SELECT count(*) FROM tmp");
+}
+
+/// Tests the spark scenario of having different types of aggs in the same
+/// planNode Specific example being tested is
+/// https://github.com/facebookincubator/velox/issues/12830#issuecomment-2783340233
+TEST_F(AggregationTest, CompanionAggs) {
+  std::vector<int64_t> keys0{1, 1, 1, 2, 1, 1, 2, 2};
+  std::vector<int64_t> keys1{1, 2, 1, 2, 1, 2, 1, 2};
+  std::vector<int64_t> values{1, 2, 3, 4, 5, 6, 7, 8};
+  auto rowVector = makeRowVector(
+      {makeFlatVector<int64_t>(keys0),
+       makeFlatVector<int64_t>(keys1),
+       makeFlatVector<int64_t>(values)});
+
+  createDuckDbTable({rowVector});
+
+  auto op =
+      PlanBuilder()
+          .values({rowVector})
+          .singleAggregation({"c2", "c0"}, {"count_partial(c1)"})
+          .localPartition({"c2", "c0"})
+          .singleAggregation({"c0"}, {"count_merge(a0)", "count_partial(c2)"})
+          .localPartition({"c0"})
+          .singleAggregation({"c0"}, {"count_merge(a0)", "count_merge(a1)"})
+          .planNode();
+  assertQuery(
+      op, "SELECT c0, count(c1), count(distinct c2) FROM tmp GROUP BY c0");
+}
+
+TEST_F(AggregationTest, partialAggregationMemoryLimit) {
+  auto vectors = {
+      makeRowVector({makeFlatVector<int32_t>(
+          100, [](auto row) { return row; }, nullEvery(5))}),
+      makeRowVector({makeFlatVector<int32_t>(
+          110, [](auto row) { return row + 29; }, nullEvery(7))}),
+      makeRowVector({makeFlatVector<int32_t>(
+          90, [](auto row) { return row - 71; }, nullEvery(7))}),
+  };
+
+  createDuckDbTable(vectors);
+
+  // Set an artificially low limit on the amount of data to accumulate in
+  // the partial aggregation.
+
+  // Distinct aggregation.
+  core::PlanNodeId aggNodeId;
+  auto task = AssertQueryBuilder(duckDbQueryRunner_)
+                  .config(QueryConfig::kMaxPartialAggregationMemory, 100)
+                  .plan(PlanBuilder()
+                            .values(vectors)
+                            .partialAggregation({"c0"}, {})
+                            .capturePlanNodeId(aggNodeId)
+                            .finalAggregation()
+                            .planNode())
+                  .assertResults("SELECT distinct c0 FROM tmp");
+
+  auto rowFlushStats = toPlanStats(task->taskStats())
+                           .at(aggNodeId)
+                           .customStats.at("flushRowCount");
+  EXPECT_GT(rowFlushStats.sum, 0);
+  EXPECT_GT(rowFlushStats.max, 0);
+
+  // Count aggregation.
+  task = AssertQueryBuilder(duckDbQueryRunner_)
+             .config(QueryConfig::kMaxPartialAggregationMemory, 1)
+             .plan(PlanBuilder()
+                       .values(vectors)
+                       .partialAggregation({"c0"}, {"count(1)"})
+                       .capturePlanNodeId(aggNodeId)
+                       .finalAggregation()
+                       .planNode())
+             .assertResults("SELECT c0, count(1) FROM tmp GROUP BY 1");
+
+  rowFlushStats = toPlanStats(task->taskStats())
+                      .at(aggNodeId)
+                      .customStats.at("flushRowCount");
+  EXPECT_GT(rowFlushStats.sum, 0);
+  EXPECT_GT(rowFlushStats.max, 0);
+
+  // Global aggregation.
+  task = AssertQueryBuilder(duckDbQueryRunner_)
+             .config(QueryConfig::kMaxPartialAggregationMemory, 1)
+             .plan(PlanBuilder()
+                       .values(vectors)
+                       .partialAggregation({}, {"sum(c0)"})
+                       .capturePlanNodeId(aggNodeId)
+                       .finalAggregation()
+                       .planNode())
+             .assertResults("SELECT sum(c0) FROM tmp");
+  EXPECT_EQ(
+      0,
+      toPlanStats(task->taskStats())
+          .at(aggNodeId)
+          .customStats.count("flushRowCount"));
 }
 
 } // namespace facebook::velox::exec::test
