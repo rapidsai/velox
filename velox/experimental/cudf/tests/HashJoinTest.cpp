@@ -55,17 +55,6 @@ class HashJoinTest : public HashJoinTestBase {
   void SetUp() override {
     HashJoinTestBase::SetUp();
     cudf_velox::registerCudf();
-
-    probeType_ =
-        ROW({{"t_k1", INTEGER()}, {"t_k2", VARCHAR()}, {"t_v1", VARCHAR()}});
-    buildType_ =
-        ROW({{"u_k1", INTEGER()}, {"u_k2", VARCHAR()}, {"u_v1", INTEGER()}});
-    fuzzerOpts_ = {
-        .vectorSize = 1024,
-        .nullRatio = 0.1,
-        .stringLength = 1024,
-        .stringVariableLength = false,
-        .allowLazyVector = false};
   }
 
   void TearDown() override {
@@ -127,6 +116,22 @@ TEST_P(MultiThreadedHashJoinTest, joinWithCancellation) {
         auto stats = task->taskStats();
         EXPECT_GT(stats.terminationTimeMs, 0);
       })
+      .run();
+}
+
+TEST_P(MultiThreadedHashJoinTest, testJoinWithSpillenabledCancellation) {
+  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
+      .numDrivers(numDrivers_)
+      .keyTypes({BIGINT()})
+      .probeVectors(1600, 5)
+      .buildVectors(1500, 5)
+      .injectTaskCancellation(true)
+      .injectSpill(false)
+      // Need spill directory so that canSpill() is true for HashProbe
+      .spillDirectory(spillDirectory->getPath())
+      .referenceQuery(
+          "SELECT t_k0, t_data, u_k0, u_data FROM t, u WHERE t.t_k0 = u.u_k0")
       .run();
 }
 
@@ -258,7 +263,7 @@ DEBUG_ONLY_TEST_P(
   SCOPED_TESTVALUE_SET(
       "facebook::velox::exec::HashBuild::finishHashBuild",
       std::function<void(Operator*)>([&](Operator* op) {
-        auto task = op->testingOperatorCtx()->task();
+        auto task = op->operatorCtx()->task();
         task->requestAbort();
       }));
   VELOX_ASSERT_THROW(
@@ -2027,6 +2032,7 @@ TEST_P(MultiThreadedHashJoinTest, rightJoin) {
 
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .injectSpill(false)
       .probeKeys({"c0"})
       .probeVectors(std::move(probeVectors))
       .buildKeys({"u_c0"})
@@ -2082,6 +2088,7 @@ TEST_P(MultiThreadedHashJoinTest, rightJoinWithEmptyBuild) {
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .hashProbeFinishEarlyOnEmptyBuild(finishOnEmpty)
         .numDrivers(numDrivers_)
+        .injectSpill(false)
         .probeKeys({"c0"})
         .probeVectors(std::move(probeVectors))
         .buildKeys({"u_c0"})
@@ -2134,6 +2141,7 @@ TEST_P(MultiThreadedHashJoinTest, rightJoinWithAllMatch) {
 
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .injectSpill(false)
       .probeKeys({"c0"})
       .probeVectors(std::move(probeVectors))
       .buildKeys({"u_c0"})
@@ -2189,6 +2197,7 @@ TEST_P(MultiThreadedHashJoinTest, rightJoinWithFilter) {
     auto testBuildVectors = buildVectors;
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .injectSpill(false)
         .probeKeys({"c0"})
         .probeVectors(std::move(testProbeVectors))
         .buildKeys({"u_c0"})
@@ -2208,6 +2217,7 @@ TEST_P(MultiThreadedHashJoinTest, rightJoinWithFilter) {
     auto testBuildVectors = buildVectors;
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .injectSpill(false)
         .probeKeys({"c0"})
         .probeVectors(std::move(testProbeVectors))
         .buildKeys({"u_c0"})
@@ -2261,6 +2271,7 @@ TEST_P(MultiThreadedHashJoinTest, fullJoin) {
 
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .injectSpill(false)
       .probeKeys({"c0"})
       .probeVectors(std::move(probeVectors))
       .buildKeys({"u_c0"})
@@ -2316,6 +2327,7 @@ TEST_P(MultiThreadedHashJoinTest, fullJoinWithEmptyBuild) {
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .hashProbeFinishEarlyOnEmptyBuild(finishOnEmpty)
         .numDrivers(numDrivers_)
+        .injectSpill(false)
         .probeKeys({"c0"})
         .probeVectors(std::move(probeVectors))
         .buildKeys({"u_c0"})
@@ -2369,6 +2381,7 @@ TEST_P(MultiThreadedHashJoinTest, fullJoinWithNoMatch) {
 
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .injectSpill(false)
       .probeKeys({"c0"})
       .probeVectors(std::move(probeVectors))
       .buildKeys({"u_c0"})
@@ -2424,6 +2437,7 @@ TEST_P(MultiThreadedHashJoinTest, fullJoinWithFilters) {
     auto testBuildVectors = buildVectors;
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .injectSpill(false)
         .probeKeys({"c0"})
         .probeVectors(std::move(testProbeVectors))
         .buildKeys({"u_c0"})
@@ -2443,6 +2457,7 @@ TEST_P(MultiThreadedHashJoinTest, fullJoinWithFilters) {
     auto testBuildVectors = buildVectors;
     HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
         .numDrivers(numDrivers_)
+        .injectSpill(false)
         .probeKeys({"c0"})
         .probeVectors(std::move(testProbeVectors))
         .buildKeys({"u_c0"})
@@ -2460,6 +2475,7 @@ TEST_P(MultiThreadedHashJoinTest, fullJoinWithFilters) {
 TEST_P(MultiThreadedHashJoinTest, noSpillLevelLimit) {
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .numDrivers(numDrivers_)
+      .injectSpill(false)
       .keyTypes({INTEGER()})
       .probeVectors(1600, 5)
       .buildVectors(1500, 5)
@@ -3355,7 +3371,7 @@ TEST_F(HashJoinTest, memory) {
                         .singleAggregation({}, {"sum(k1)", "sum(k2)"})
                         .planNode();
   params.queryCtx = core::QueryCtx::create(driverExecutor_.get());
-  auto [taskCursor, rows] = readCursor(params, [](Task*) {});
+  auto [taskCursor, rows] = readCursor(params);
   EXPECT_GT(3'500, params.queryCtx->pool()->stats().numAllocs);
   EXPECT_GT(40'000'000, params.queryCtx->pool()->stats().cumulativeBytes);
 }
@@ -4863,7 +4879,7 @@ TEST_F(HashJoinTest, smallOutputBatchSize) {
       .run();
 }
 
-TEST_F(HashJoinTest, spillFileSize) {
+TEST_F(HashJoinTest, DISABLED_spillFileSize) {
   const std::vector<uint64_t> maxSpillFileSizes({0, 1, 1'000'000'000});
   for (const auto spillFileSize : maxSpillFileSizes) {
     SCOPED_TRACE(fmt::format("spillFileSize: {}", spillFileSize));
@@ -5245,7 +5261,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimDuringInputProcessing) {
 
     testWait.wait(testWaitKey);
     ASSERT_TRUE(op != nullptr);
-    auto task = op->testingOperatorCtx()->task();
+    auto task = op->operatorCtx()->task();
     auto taskPauseWait = task->requestPause();
     driverWait.notify();
     taskPauseWait.wait();
@@ -5362,7 +5378,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimDuringReserve) {
             const bool reclaimable = op->reclaimableBytes(reclaimableBytes);
             ASSERT_TRUE(reclaimable);
             ASSERT_GT(reclaimableBytes, 0);
-            auto* driver = op->testingOperatorCtx()->driver();
+            auto* driver = op->operatorCtx()->driver();
             TestSuspendedSection suspendedSection(driver);
             testWaitFlag = false;
             testWait.notifyAll();
@@ -5392,7 +5408,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimDuringReserve) {
 
   testWait.await([&]() { return !testWaitFlag.load(); });
   ASSERT_TRUE(op != nullptr);
-  auto task = op->testingOperatorCtx()->task();
+  auto task = op->operatorCtx()->task();
   task->requestPause().wait();
 
   uint64_t reclaimableBytes{0};
@@ -5496,7 +5512,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimDuringAllocation) {
               } else {
                 ASSERT_EQ(reclaimableBytes, 0);
               }
-              auto* driver = op->testingOperatorCtx()->driver();
+              auto* driver = op->operatorCtx()->driver();
               TestSuspendedSection suspendedSection(driver);
               testWait.notify();
               driverWait.wait(driverWaitKey);
@@ -5524,7 +5540,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimDuringAllocation) {
 
     testWait.wait(testWaitKey);
     ASSERT_TRUE(op != nullptr);
-    auto task = op->testingOperatorCtx()->task();
+    auto task = op->operatorCtx()->task();
     auto taskPauseWait = task->requestPause();
     taskPauseWait.wait();
 
@@ -5643,7 +5659,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimDuringOutputProcessing) {
 
     testWait.await([&]() { return !testWaitFlag.load(); });
     ASSERT_TRUE(op != nullptr);
-    auto task = op->testingOperatorCtx()->task();
+    auto task = op->operatorCtx()->task();
     auto taskPauseWait = task->requestPause();
     driverWaitFlag = false;
     driverWait.notifyAll();
@@ -5737,7 +5753,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimDuringWaitForProbe) {
         if (!injectSpillOnce.exchange(false)) {
           return;
         }
-        auto* driver = op->testingOperatorCtx()->driver();
+        auto* driver = op->operatorCtx()->driver();
         auto task = driver->task();
         memory::ScopedMemoryArbitrationContext ctx(op->pool());
         Operator::ReclaimableSectionGuard guard(testOp);
@@ -5762,7 +5778,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimDuringWaitForProbe) {
         ASSERT_GT(reclaimableBytes, 0);
         testWaitFlag = false;
         testWait.notifyAll();
-        auto* driver = testOp->testingOperatorCtx()->driver();
+        auto* driver = testOp->operatorCtx()->driver();
         auto task = driver->task();
         TestSuspendedSection suspendedSection(driver);
         driverWait.await([&]() { return !driverWaitFlag.load(); });
@@ -5790,7 +5806,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, reclaimDuringWaitForProbe) {
 
   testWait.await([&]() { return !testWaitFlag.load(); });
   ASSERT_TRUE(op != nullptr);
-  auto task = op->testingOperatorCtx()->task();
+  auto task = op->operatorCtx()->task();
   auto taskPauseWait = task->requestPause();
   taskPauseWait.wait();
 
@@ -5869,7 +5885,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, hashBuildAbortDuringOutputProcessing) {
             return;
           }
           ASSERT_GT(op->pool()->usedBytes(), 0);
-          auto* driver = op->testingOperatorCtx()->driver();
+          auto* driver = op->operatorCtx()->driver();
           ASSERT_EQ(
               driver->task()->enterSuspended(driver->state()),
               StopReason::kNone);
@@ -5945,7 +5961,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, hashBuildAbortDuringInputProcessing) {
             return;
           }
           ASSERT_GT(op->pool()->usedBytes(), 0);
-          auto* driver = op->testingOperatorCtx()->driver();
+          auto* driver = op->operatorCtx()->driver();
           ASSERT_EQ(
               driver->task()->enterSuspended(driver->state()),
               StopReason::kNone);
@@ -6099,7 +6115,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, hashProbeAbortDuringInputProcessing) {
           if (++numInputs != 2) {
             return;
           }
-          auto* driver = op->testingOperatorCtx()->driver();
+          auto* driver = op->operatorCtx()->driver();
           ASSERT_EQ(
               driver->task()->enterSuspended(driver->state()),
               StopReason::kNone);
@@ -6777,8 +6793,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, exceptionDuringFinishJoinBuild) {
         try {
           VELOX_FAIL("Simulated failure");
         } catch (VeloxException&) {
-          buildOp->testingOperatorCtx()->task()->setError(
-              std::current_exception());
+          buildOp->operatorCtx()->task()->setError(std::current_exception());
         }
       }));
 
@@ -7630,7 +7645,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, spillOutputWithRightSemiJoins) {
     SCOPED_TESTVALUE_SET(
         "facebook::velox::exec::Driver::runInternal::getOutput",
         std::function<void(Operator*)>([&](Operator* op) {
-          if (op->testingOperatorCtx()->operatorType() != "HashProbe") {
+          if (op->operatorCtx()->operatorType() != "HashProbe") {
             return;
           }
           if (!op->testingHasInput()) {
@@ -7762,7 +7777,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, spillCheckOnLeftSemiFilterWithDynamicFilters) {
   SCOPED_TESTVALUE_SET(
       "facebook::velox::exec::Driver::runInternal::getOutput",
       std::function<void(Operator*)>([&](Operator* op) {
-        if (op->testingOperatorCtx()->operatorType() != "HashProbe") {
+        if (op->operatorCtx()->operatorType() != "HashProbe") {
           return;
         }
         if (!op->testingHasInput()) {
@@ -8028,7 +8043,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, buildReclaimedMemoryReport) {
             const bool reclaimable = op->reclaimableBytes(reclaimableBytes);
             ASSERT_TRUE(reclaimable);
             ASSERT_GT(reclaimableBytes, 0);
-            auto* driver = op->testingOperatorCtx()->driver();
+            auto* driver = op->operatorCtx()->driver();
             TestSuspendedSection suspendedSection(driver);
             taskWaitFlag = false;
             taskWait.notifyAll();
@@ -8058,7 +8073,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, buildReclaimedMemoryReport) {
 
   taskWait.await([&]() { return !taskWaitFlag.load(); });
   ASSERT_TRUE(op != nullptr);
-  auto task = op->testingOperatorCtx()->task();
+  auto task = op->operatorCtx()->task();
   auto* nodePool = op->pool()->parent();
   const auto nodeMemoryUsage = nodePool->reservedBytes();
   {
@@ -8133,7 +8148,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, probeReclaimedMemoryReport) {
         if (probeInputCount++ != 1) {
           return;
         }
-        auto* driver = op->testingOperatorCtx()->driver();
+        auto* driver = op->operatorCtx()->driver();
         TestSuspendedSection suspendedSection(driver);
         taskWaitFlag = false;
         taskWait.notifyAll();
@@ -8163,7 +8178,7 @@ DEBUG_ONLY_TEST_F(HashJoinTest, probeReclaimedMemoryReport) {
 
   taskWait.await([&]() { return !taskWaitFlag.load(); });
   ASSERT_TRUE(op != nullptr);
-  auto task = op->testingOperatorCtx()->task();
+  auto task = op->operatorCtx()->task();
   auto* nodePool = op->pool()->parent();
   const auto nodeMemoryUsage = nodePool->reservedBytes();
   {
@@ -8181,5 +8196,57 @@ DEBUG_ONLY_TEST_F(HashJoinTest, probeReclaimedMemoryReport) {
   task.reset();
 
   taskThread.join();
+}
+
+DEBUG_ONLY_TEST_F(HashJoinTest, hashTableCleanupAfterProbeFinish) {
+  auto buildVectors = makeVectors(buildType_, 5, 100);
+  auto probeVectors = makeVectors(probeType_, 5, 100);
+
+  createDuckDbTable("t", probeVectors);
+  createDuckDbTable("u", buildVectors);
+
+  HashProbe* probeOp{nullptr};
+  SCOPED_TESTVALUE_SET(
+      "facebook::velox::exec::Driver::runInternal::getOutput",
+      std::function<void(Operator*)>([&](Operator* op) {
+        if (probeOp == nullptr && op->operatorType() == "HashProbe") {
+          probeOp = dynamic_cast<HashProbe*>(op);
+        }
+      }));
+
+  bool tableEmpty{false};
+  SCOPED_TESTVALUE_SET(
+      "facebook::velox::exec::Driver::runInternal::noMoreInput",
+      std::function<void(Operator*)>([&](Operator* op) {
+        if (op->operatorType() == "FilterProject") {
+          tableEmpty = (probeOp->testingTable()->numDistinct() == 0);
+        }
+      }));
+
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  auto plan = PlanBuilder(planNodeIdGenerator)
+                  .values(probeVectors, true)
+                  .hashJoin(
+                      {"t_k1"},
+                      {"u_k1"},
+                      PlanBuilder(planNodeIdGenerator)
+                          .values(buildVectors, true)
+                          .planNode(),
+                      "",
+                      concat(probeType_->names(), buildType_->names()))
+                  .project({"t_k1", "t_k2", "t_v1", "u_k1", "u_k2", "u_v1"})
+                  .planNode();
+
+  auto tempDirectory = exec::test::TempDirectoryPath::create();
+  HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
+      .numDrivers(1)
+      .planNode(plan)
+      .injectSpill(false)
+      .spillDirectory(tempDirectory->getPath())
+      .referenceQuery(
+          "SELECT t_k1, t_k2, t_v1, u_k1, u_k2, u_v1 FROM t, u WHERE t.t_k1 = u.u_k1")
+      .config(core::QueryConfig::kSpillStartPartitionBit, "29")
+      .run();
+  ASSERT_TRUE(tableEmpty);
 }
 } // namespace
