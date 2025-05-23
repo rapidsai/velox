@@ -292,12 +292,6 @@ bool CompileState::compile() {
     }
   }
 
-  if (replacementsMade) {
-    std::cout << "Running in GPU" << std::endl;
-  } else {
-    std::cout << "Running in CPU ****" << std::endl;
-  }
-
   return replacementsMade;
 }
 
