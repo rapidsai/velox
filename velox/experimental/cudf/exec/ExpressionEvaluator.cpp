@@ -245,6 +245,7 @@ const std::unordered_set<std::string> supportedOps = {
     "between",
     "in",
     "cast",
+    "try_cast",
     "switch",
     "year",
     "length",
