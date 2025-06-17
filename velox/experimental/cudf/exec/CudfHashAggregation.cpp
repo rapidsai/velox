@@ -500,6 +500,7 @@ auto toAggregators(
 
   std::vector<std::unique_ptr<cudf_velox::CudfHashAggregation::Aggregator>>
       aggregators;
+  size_t i = 0;
   for (auto const& aggregate : aggregationNode.aggregates()) {
     std::vector<column_index_t> aggInputs;
     std::vector<VectorPtr> aggConstants;
@@ -539,6 +540,7 @@ auto toAggregators(
 
     aggregators.push_back(createAggregator(
         companionStep, kind, inputIndex, constant, isGlobal, resultType));
+    ++i;
   }
   return aggregators;
 }
