@@ -332,6 +332,7 @@ cudf::ast::expression const& AstContext::addPrecomputeInstruction(
   for (size_t sideIdx = 0; sideIdx < inputRowSchema.size(); ++sideIdx) {
     if (inputRowSchema[sideIdx].get()->containsChild(name)) {
       auto columnIndex = inputRowSchema[sideIdx].get()->getChildIdx(name);
+      VELOX_CHECK_NE(columnIndex, -1, "Field not found, " + name);
       auto newColumnIndex = inputRowSchema[sideIdx].get()->size() +
           precomputeInstructions[sideIdx].get().size();
       if (fieldName.empty()) {
