@@ -250,7 +250,8 @@ const std::unordered_set<std::string> supportedOps = {
     "year",
     "length",
     "substr",
-    "like"};
+    "like",
+    "isnotnull"};
 
 namespace detail {
 
@@ -412,6 +413,11 @@ cudf::ast::expression const& AstContext::pushExprToTree(
     VELOX_CHECK_EQ(len, 1);
     auto const& op1 = pushExprToTree(expr->inputs()[0]);
     return tree.push(Operation{unaryOps.at(name), op1});
+  } else if (name == "isnotnull") {
+    VELOX_CHECK_EQ(len, 1);
+    auto const& op1 = pushExprToTree(expr->inputs()[0]);
+    auto const& nullOp = tree.push(Operation{Op::IS_NULL, op1});
+    return tree.push(Operation{Op::NOT, nullOp});
   } else if (name == "between") {
     VELOX_CHECK_EQ(len, 3);
     auto const& value = pushExprToTree(expr->inputs()[0]);
