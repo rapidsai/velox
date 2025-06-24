@@ -433,7 +433,7 @@ cudf::ast::expression const& AstContext::pushExprToTree(
       result = &treeNode;
     }
     return *result;
-  } else if (name == "cast") {
+  } else if (name == "cast" || name == "try_cast") {
     VELOX_CHECK_EQ(len, 1);
     auto const& op1 = pushExprToTree(expr->inputs()[0]);
     if (expr->type()->kind() == TypeKind::INTEGER) {
@@ -461,6 +461,10 @@ cudf::ast::expression const& AstContext::pushExprToTree(
       auto const& op1d = tree.push(Operation{Op::CAST_TO_FLOAT64, op1});
       auto const& op2 = pushExprToTree(expr->inputs()[1]);
       return tree.push(Operation{Op::MUL, op1d, op2});
+    } else if (
+        c1 and c1->toString() == "1:INTEGER" and c2 and
+        c2->toString() == "0:INTEGER") {
+      return pushExprToTree(expr->inputs()[0]);
     } else {
       VELOX_NYI("Unsupported switch complex operation " + expr->toString());
     }
