@@ -68,6 +68,9 @@ ParquetDataSource::ParquetDataSource(
     auto* handle = static_cast<const ParquetColumnHandle*>(it->second.get());
     readColumnNames_.emplace_back(handle->name());
   }
+  auto readColumnType = std::make_shared<RowType>(
+      std::vector<std::string>(readColumnNames_),
+      std::vector<std::shared_ptr<const Type>>(readColumnTypes));
 
   // Dynamic cast tableHandle to ParquetTableHandle
   tableHandle_ = std::dynamic_pointer_cast<ParquetTableHandle>(tableHandle);
@@ -88,7 +91,7 @@ ParquetDataSource::ParquetDataSource(
   if (remainingFilter) {
     remainingFilterExprSet_ = expressionEvaluator_->compile(remainingFilter);
     cudfExpressionEvaluator_ = velox::cudf_velox::ExpressionEvaluator(
-        remainingFilterExprSet_->exprs(), outputType_);
+        remainingFilterExprSet_->exprs(), readColumnType);
     // TODO(kn): Get column names and subfields from remaining filter and add to
     // readColumnNames_
   }
