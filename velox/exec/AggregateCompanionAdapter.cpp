@@ -267,13 +267,10 @@ bool CompanionFunctionsRegistrar::registerPartialFunction(
                  const core::QueryConfig& config)
                  -> std::unique_ptr<Aggregate> {
                if (auto func = getAggregateFunctionEntry(name)) {
-                 core::AggregationNode::Step usedStep{
-                     core::AggregationNode::Step::kPartial};
                  if (!exec::isRawInput(step)) {
-                   usedStep = core::AggregationNode::Step::kIntermediate;
+                   step = core::AggregationNode::Step::kIntermediate;
                  }
-                 auto fn =
-                     func->factory(usedStep, argTypes, resultType, config);
+                 auto fn = func->factory(step, argTypes, resultType, config);
                  VELOX_CHECK_NOT_NULL(fn);
                  return std::make_unique<
                      AggregateCompanionAdapter::PartialFunction>(
@@ -412,51 +409,26 @@ bool CompanionFunctionsRegistrar::registerMergeExtractFunction(
     const std::vector<AggregateFunctionSignaturePtr>& signatures,
     const AggregateFunctionMetadata& metadata,
     bool overwrite) {
-  bool registered = false;
   if (CompanionSignatures::hasSameIntermediateTypesAcrossSignatures(
           signatures)) {
-    registered |=
-        registerMergeExtractFunctionWithSuffix(name, signatures, metadata, overwrite);
+    return registerMergeExtractFunctionWithSuffix(
+        name, signatures, metadata, overwrite);
   }
 
   auto mergeExtractSignatures =
       CompanionSignatures::mergeExtractFunctionSignatures(signatures);
   if (mergeExtractSignatures.empty()) {
-    return registered;
+    return false;
   }
 
   auto mergeExtractFunctionName =
       CompanionSignatures::mergeExtractFunctionName(name);
-  registered |=
-      exec::registerAggregateFunction(
-          mergeExtractFunctionName,
-          std::move(mergeExtractSignatures),
-          [name, mergeExtractFunctionName](
-              core::AggregationNode::Step /*step*/,
-              const std::vector<TypePtr>& argTypes,
-              const TypePtr& resultType,
-              const core::QueryConfig& config) -> std::unique_ptr<Aggregate> {
-            if (auto func = getAggregateFunctionEntry(name)) {
-              auto fn = func->factory(
-                  core::AggregationNode::Step::kFinal,
-                  argTypes,
-                  resultType,
-                  config);
-              VELOX_CHECK_NOT_NULL(fn);
-              return std::make_unique<
-                  AggregateCompanionAdapter::MergeExtractFunction>(
-                  std::move(fn), resultType);
-            }
-            VELOX_FAIL(
-                "Original aggregation function {} not found: {}",
-                name,
-                mergeExtractFunctionName);
-          },
-          metadata,
-          /*registerCompanionFunctions*/ false,
-          overwrite)
-          .mainFunction;
-  return registered;
+  return registerMergeExtractFunctionInternal(
+      name,
+      mergeExtractFunctionName,
+      std::move(mergeExtractSignatures),
+      metadata,
+      overwrite);
 }
 
 VectorFunctionFactory getVectorFunctionFactory(

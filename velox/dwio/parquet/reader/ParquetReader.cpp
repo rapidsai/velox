@@ -722,7 +722,6 @@ TypePtr ReaderBase::convertType(
 
   static std::string_view kTypeMappingErrorFmtStr =
       "Converted type {} is not allowed for requested type {}";
-  const bool enableRequestedTypeCheck = options_.enableRequestedTypeCheck();
   if (schemaElement.__isset.converted_type) {
     switch (schemaElement.converted_type) {
       case thrift::ConvertedType::INT_8:
@@ -732,16 +731,14 @@ TypePtr ReaderBase::convertType(
             thrift::Type::INT32,
             "{} converted type can only be set for value of thrift::Type::INT32",
             schemaElement.converted_type);
-        if (enableRequestedTypeCheck) {
-          VELOX_CHECK(
-              !requestedType || requestedType->kind() == TypeKind::TINYINT ||
-                  requestedType->kind() == TypeKind::SMALLINT ||
-                  requestedType->kind() == TypeKind::INTEGER ||
-                  requestedType->kind() == TypeKind::BIGINT,
-              kTypeMappingErrorFmtStr,
-              "TINYINT",
-              requestedType->toString());
-        }
+        VELOX_CHECK(
+            !requestedType || requestedType->kind() == TypeKind::TINYINT ||
+                requestedType->kind() == TypeKind::SMALLINT ||
+                requestedType->kind() == TypeKind::INTEGER ||
+                requestedType->kind() == TypeKind::BIGINT,
+            kTypeMappingErrorFmtStr,
+            "TINYINT",
+            requestedType->toString());
         return TINYINT();
 
       case thrift::ConvertedType::INT_16:
@@ -751,15 +748,13 @@ TypePtr ReaderBase::convertType(
             thrift::Type::INT32,
             "{} converted type can only be set for value of thrift::Type::INT32",
             schemaElement.converted_type);
-        if (enableRequestedTypeCheck) {
-          VELOX_CHECK(
-              !requestedType || requestedType->kind() == TypeKind::SMALLINT ||
-                  requestedType->kind() == TypeKind::INTEGER ||
-                  requestedType->kind() == TypeKind::BIGINT,
-              kTypeMappingErrorFmtStr,
-              "SMALLINT",
-              requestedType->toString());
-        }
+        VELOX_CHECK(
+            !requestedType || requestedType->kind() == TypeKind::SMALLINT ||
+                requestedType->kind() == TypeKind::INTEGER ||
+                requestedType->kind() == TypeKind::BIGINT,
+            kTypeMappingErrorFmtStr,
+            "SMALLINT",
+            requestedType->toString());
         return SMALLINT();
 
       case thrift::ConvertedType::INT_32:
@@ -769,14 +764,12 @@ TypePtr ReaderBase::convertType(
             thrift::Type::INT32,
             "{} converted type can only be set for value of thrift::Type::INT32",
             schemaElement.converted_type);
-        if (enableRequestedTypeCheck) {
-          VELOX_CHECK(
-              !requestedType || requestedType->kind() == TypeKind::INTEGER ||
-                  requestedType->kind() == TypeKind::BIGINT,
-              kTypeMappingErrorFmtStr,
-              "INTEGER",
-              requestedType->toString());
-        }
+        VELOX_CHECK(
+            !requestedType || requestedType->kind() == TypeKind::INTEGER ||
+                requestedType->kind() == TypeKind::BIGINT,
+            kTypeMappingErrorFmtStr,
+            "INTEGER",
+            requestedType->toString());
         return INTEGER();
 
       case thrift::ConvertedType::INT_64:
@@ -786,13 +779,11 @@ TypePtr ReaderBase::convertType(
             thrift::Type::INT64,
             "{} converted type can only be set for value of thrift::Type::INT32",
             schemaElement.converted_type);
-        if (enableRequestedTypeCheck) {
-          VELOX_CHECK(
-              !requestedType || requestedType->kind() == TypeKind::BIGINT,
-              kTypeMappingErrorFmtStr,
-              "BIGINT",
-              requestedType->toString());
-        }
+        VELOX_CHECK(
+            !requestedType || requestedType->kind() == TypeKind::BIGINT,
+            kTypeMappingErrorFmtStr,
+            "BIGINT",
+            requestedType->toString());
         return BIGINT();
 
       case thrift::ConvertedType::DATE:
@@ -800,13 +791,11 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT32,
             "DATE converted type can only be set for value of thrift::Type::INT32");
-        if (enableRequestedTypeCheck) {
-          VELOX_CHECK(
-              !requestedType || requestedType->isDate(),
-              kTypeMappingErrorFmtStr,
-              "DATE",
-              requestedType->toString());
-        }
+        VELOX_CHECK(
+            !requestedType || requestedType->isDate(),
+            kTypeMappingErrorFmtStr,
+            "DATE",
+            requestedType->toString());
         return DATE();
 
       case thrift::ConvertedType::TIMESTAMP_MICROS:
@@ -815,13 +804,11 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::INT64,
             "TIMESTAMP_MICROS or TIMESTAMP_MILLIS converted type can only be set for value of thrift::Type::INT64");
-        if (enableRequestedTypeCheck) {
-          VELOX_CHECK(
-              !requestedType || requestedType->kind() == TypeKind::TIMESTAMP,
-              kTypeMappingErrorFmtStr,
-              "TIMESTAMP",
-              requestedType->toString());
-        }
+        VELOX_CHECK(
+            !requestedType || requestedType->kind() == TypeKind::TIMESTAMP,
+            kTypeMappingErrorFmtStr,
+            "TIMESTAMP",
+            requestedType->toString());
         return TIMESTAMP();
 
       case thrift::ConvertedType::DECIMAL: {
@@ -830,20 +817,20 @@ TypePtr ReaderBase::convertType(
             "DECIMAL requires a length and scale specifier!");
         const auto schemaElementPrecision = schemaElement.precision;
         const auto schemaElementScale = schemaElement.scale;
-        // A long decimal requested type cannot read a value of a short
-        // decimal. As a result, the mapping from short to long decimal is
-        // currently restricted.
+        // A long decimal requested type cannot read a value of a short decimal.
+        // As a result, the mapping from short to long decimal is currently
+        // restricted.
         auto type = DECIMAL(schemaElementPrecision, schemaElementScale);
-        if (enableRequestedTypeCheck && requestedType) {
+        if (requestedType) {
           VELOX_CHECK(
               requestedType->isDecimal(),
               kTypeMappingErrorFmtStr,
               "DECIMAL",
               requestedType->toString());
-          // Reading short decimals with a long decimal requested type is
-          // not yet possible. To allow for correct interpretation of the
-          // values, the scale of the file type and requested type must
-          // match while precision may be larger.
+          // Reading short decimals with a long decimal requested type is not
+          // yet possible. To allow for correct interpretation of the values,
+          // the scale of the file type and requested type must match while
+          // precision may be larger.
           if (requestedType->isShortDecimal()) {
             const auto& shortDecimalType = requestedType->asShortDecimal();
             VELOX_CHECK(
@@ -871,13 +858,11 @@ TypePtr ReaderBase::convertType(
         switch (schemaElement.type) {
           case thrift::Type::BYTE_ARRAY:
           case thrift::Type::FIXED_LEN_BYTE_ARRAY:
-            if (enableRequestedTypeCheck) {
-              VELOX_CHECK(
-                  !requestedType || requestedType->kind() == TypeKind::VARCHAR,
-                  kTypeMappingErrorFmtStr,
-                  "VARCHAR",
-                  requestedType->toString());
-            }
+            VELOX_CHECK(
+                !requestedType || requestedType->kind() == TypeKind::VARCHAR,
+                kTypeMappingErrorFmtStr,
+                "VARCHAR",
+                requestedType->toString());
             return VARCHAR();
           default:
             VELOX_FAIL(
@@ -888,13 +873,11 @@ TypePtr ReaderBase::convertType(
             schemaElement.type,
             thrift::Type::BYTE_ARRAY,
             "ENUM converted type can only be set for value of thrift::Type::BYTE_ARRAY");
-        if (enableRequestedTypeCheck) {
-          VELOX_CHECK(
-              !requestedType || requestedType->kind() == TypeKind::VARCHAR,
-              kTypeMappingErrorFmtStr,
-              "VARCHAR",
-              requestedType->toString());
-        }
+        VELOX_CHECK(
+            !requestedType || requestedType->kind() == TypeKind::VARCHAR,
+            kTypeMappingErrorFmtStr,
+            "VARCHAR",
+            requestedType->toString());
         return VARCHAR();
       }
       case thrift::ConvertedType::MAP:
@@ -913,85 +896,69 @@ TypePtr ReaderBase::convertType(
   } else {
     switch (schemaElement.type) {
       case thrift::Type::type::BOOLEAN:
-        if (enableRequestedTypeCheck) {
-          VELOX_CHECK(
-              !requestedType || requestedType->kind() == TypeKind::BOOLEAN,
-              kTypeMappingErrorFmtStr,
-              "BOOLEAN",
-              requestedType->toString());
-        }
+        VELOX_CHECK(
+            !requestedType || requestedType->kind() == TypeKind::BOOLEAN,
+            kTypeMappingErrorFmtStr,
+            "BOOLEAN",
+            requestedType->toString());
         return BOOLEAN();
       case thrift::Type::type::INT32:
-        if (enableRequestedTypeCheck) {
-          VELOX_CHECK(
-              !requestedType || requestedType->kind() == TypeKind::INTEGER ||
-                  requestedType->kind() == TypeKind::BIGINT,
-              kTypeMappingErrorFmtStr,
-              "INTEGER",
-              requestedType->toString());
-        }
+        VELOX_CHECK(
+            !requestedType || requestedType->kind() == TypeKind::INTEGER ||
+                requestedType->kind() == TypeKind::BIGINT,
+            kTypeMappingErrorFmtStr,
+            "INTEGER",
+            requestedType->toString());
         return INTEGER();
       case thrift::Type::type::INT64:
         // For Int64 Timestamp in nano precision
         if (schemaElement.__isset.logicalType &&
             schemaElement.logicalType.__isset.TIMESTAMP) {
-          if (enableRequestedTypeCheck) {
-            VELOX_CHECK(
-                !requestedType || requestedType->kind() == TypeKind::TIMESTAMP,
-                kTypeMappingErrorFmtStr,
-                "TIMESTAMP",
-                requestedType->toString());
-          }
-          return TIMESTAMP();
-        }
-        if (enableRequestedTypeCheck) {
-          VELOX_CHECK(
-              !requestedType || requestedType->kind() == TypeKind::BIGINT,
-              kTypeMappingErrorFmtStr,
-              "BIGINT",
-              requestedType->toString());
-        }
-        return BIGINT();
-      case thrift::Type::type::INT96:
-        if (enableRequestedTypeCheck) {
           VELOX_CHECK(
               !requestedType || requestedType->kind() == TypeKind::TIMESTAMP,
               kTypeMappingErrorFmtStr,
               "TIMESTAMP",
               requestedType->toString());
+          return TIMESTAMP();
         }
+        VELOX_CHECK(
+            !requestedType || requestedType->kind() == TypeKind::BIGINT,
+            kTypeMappingErrorFmtStr,
+            "BIGINT",
+            requestedType->toString());
+        return BIGINT();
+      case thrift::Type::type::INT96:
+        VELOX_CHECK(
+            !requestedType || requestedType->kind() == TypeKind::TIMESTAMP,
+            kTypeMappingErrorFmtStr,
+            "TIMESTAMP",
+            requestedType->toString());
         return TIMESTAMP(); // INT96 only maps to a timestamp
       case thrift::Type::type::FLOAT:
-        if (enableRequestedTypeCheck) {
-          VELOX_CHECK(
-              !requestedType || requestedType->kind() == TypeKind::REAL ||
-                  requestedType->kind() == TypeKind::DOUBLE,
-              kTypeMappingErrorFmtStr,
-              "REAL",
-              requestedType->toString());
-        }
+        VELOX_CHECK(
+            !requestedType || requestedType->kind() == TypeKind::REAL ||
+                requestedType->kind() == TypeKind::DOUBLE,
+            kTypeMappingErrorFmtStr,
+            "REAL",
+            requestedType->toString());
         return REAL();
       case thrift::Type::type::DOUBLE:
-        if (enableRequestedTypeCheck) {
-          VELOX_CHECK(
-              !requestedType || requestedType->kind() == TypeKind::DOUBLE,
-              kTypeMappingErrorFmtStr,
-              "DOUBLE",
-              requestedType->toString());
-        }
+        VELOX_CHECK(
+            !requestedType || requestedType->kind() == TypeKind::DOUBLE,
+            kTypeMappingErrorFmtStr,
+            "DOUBLE",
+            requestedType->toString());
         return DOUBLE();
       case thrift::Type::type::BYTE_ARRAY:
       case thrift::Type::type::FIXED_LEN_BYTE_ARRAY:
         if (requestedType && requestedType->isVarchar()) {
           return VARCHAR();
         } else {
-          if (enableRequestedTypeCheck) {
-            VELOX_CHECK(
-                !requestedType || requestedType->isVarbinary(),
-                kTypeMappingErrorFmtStr,
-                "VARBINARY",
-                requestedType->toString());
-          }
+          VELOX_CHECK(
+              !requestedType || requestedType->isVarbinary(),
+              kTypeMappingErrorFmtStr,
+              "VARBINARY",
+              requestedType->toString());
           return VARBINARY();
         }
 
@@ -1099,15 +1066,12 @@ class ParquetRowReader::Impl {
         options_.timestampPrecision());
     requestedType_ = options_.requestedType() ? options_.requestedType()
                                               : readerBase_->schema();
-    columnReaderOptions_ =
-        dwio::common::makeColumnReaderOptions(readerBase_->options());
     columnReader_ = ParquetColumnReader::build(
         columnReaderOptions_,
         requestedType_,
         readerBase_->schemaWithId(), // Id is schema id
         params,
-        *options_.scanSpec(),
-        pool_);
+        *options_.scanSpec());
     columnReader_->setIsTopLevel();
 
     filterRowGroups();
@@ -1117,6 +1081,9 @@ class ParquetRowReader::Impl {
       // table scan.
       advanceToNextRowGroup();
     }
+
+    columnReaderOptions_ =
+        dwio::common::makeColumnReaderOptions(readerBase_->options());
   }
 
   void filterRowGroups() {

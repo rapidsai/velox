@@ -318,9 +318,9 @@ BlockingReason MergeJoinSource::next(
       "facebook::velox::exec::MergeJoinSource::next", this);
   ScopedPromiseNotification notification(1);
   return state_.withWLock([&](auto& state) {
-    if (!state.dataQueue.empty()) {
-      *data = std::move(state.dataQueue.front());
-      state.dataQueue.pop();
+    VELOX_CHECK_LE(!!state.atEnd + !!state.drained, 1);
+    if (state.data != nullptr) {
+      *data = std::move(state.data);
 
       deferNotify(producerPromise_, notification);
       return BlockingReason::kNotBlocked;
@@ -369,9 +369,9 @@ BlockingReason MergeJoinSource::enqueue(
       return BlockingReason::kNotBlocked;
     }
 
-    state.dataQueue.push(std::move(data));
+    VELOX_CHECK_NULL(state.data);
+    state.data = std::move(data);
     deferNotify(consumerPromise_, notification);
-
     return waitForConsumer(future);
   });
 }

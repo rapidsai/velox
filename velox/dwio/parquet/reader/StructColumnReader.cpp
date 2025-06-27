@@ -31,31 +31,16 @@ StructColumnReader::StructColumnReader(
     const TypePtr& requestedType,
     const std::shared_ptr<const dwio::common::TypeWithId>& fileType,
     ParquetParams& params,
-    common::ScanSpec& scanSpec,
-    memory::MemoryPool& pool)
-    : SelectiveStructColumnReader(
-          columnReaderOptions,
-          requestedType,
-          fileType,
-          params,
-          scanSpec,
-          /*isRoot=*/false) {
+    common::ScanSpec& scanSpec)
+    : SelectiveStructColumnReader(requestedType, fileType, params, scanSpec) {
   auto& childSpecs = scanSpec_->stableChildren();
-  const bool useColumnNames =
-      columnReaderOptions.useColumnNamesForColumnMapping_;
-  std::vector<column_index_t> missingFields;
   for (auto i = 0; i < childSpecs.size(); ++i) {
     auto childSpec = childSpecs[i];
-    if (childSpec->isConstant() &&
-        (!useColumnNames && isChildMissing(*childSpec))) {
+    if (childSpec->isConstant() || isChildMissing(*childSpec)) {
       childSpec->setSubscript(kConstantChildSpecSubscript);
       continue;
     }
     if (!childSpecs[i]->readFromFile()) {
-      continue;
-    }
-    if (useColumnNames && isChildMissing(*childSpec)) {
-      missingFields.emplace_back(i);
       continue;
     }
     auto childFileType = fileType_->childByName(childSpec->fieldName());
@@ -66,30 +51,10 @@ StructColumnReader::StructColumnReader(
         childRequestedType,
         childFileType,
         params,
-        *childSpec,
-        pool));
+        *childSpec));
 
     childSpecs[i]->setSubscript(children_.size() - 1);
   }
-
-  // 'missingFields' is not empty only when using column names for column
-  // mapping.
-  if (missingFields.size() > 0) {
-    // Set the struct as null if all the subfields in the requested type are
-    // missing and the number of subfields is more than one.
-    if (childSpecs.size() > 1 && missingFields.size() == childSpecs.size()) {
-      scanSpec_->setConstantValue(
-          BaseVector::createNullConstant(requestedType_, 1, &pool));
-    } else {
-      // Set null constant for the missing subfield of requested type.
-      auto rowTypePtr = asRowType(requestedType_);
-      for (int channel : missingFields) {
-        childSpecs[channel]->setConstantValue(BaseVector::createNullConstant(
-            rowTypePtr->findChild(childSpecs[channel]->fieldName()), 1, &pool));
-      }
-    }
-  }
-
   auto type = reinterpret_cast<const ParquetTypeWithId*>(fileType_.get());
   if (type->parent()) {
     levelMode_ = reinterpret_cast<const ParquetTypeWithId*>(fileType_.get())
@@ -99,10 +64,7 @@ StructColumnReader::StructColumnReader(
     // this and the child.
     auto child = childForRepDefs_;
     for (;;) {
-      if (child == nullptr) {
-        levelMode_ = LevelMode::kNulls;
-        break;
-      }
+      assert(child);
       if (child->fileType().type()->kind() == TypeKind::ARRAY ||
           child->fileType().type()->kind() == TypeKind::MAP) {
         levelMode_ = LevelMode::kStructOverLists;
@@ -139,6 +101,7 @@ StructColumnReader::findBestLeaf() {
       best = child;
     }
   }
+  assert(best);
   return best;
 }
 
