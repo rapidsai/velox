@@ -122,8 +122,6 @@ std::optional<RowVectorPtr> ParquetDataSource::next(
     }
   }
   
- 
-  
   auto* callbackData = new totalScanTimeCallbackData{startTimeUs, ioStats_};
   
   // Launch host callback to calculate timing when scan completes
