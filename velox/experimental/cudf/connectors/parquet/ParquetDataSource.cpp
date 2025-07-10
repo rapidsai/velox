@@ -23,6 +23,8 @@
 #include "velox/experimental/cudf/exec/VeloxCudfInterop.h"
 #include "velox/experimental/cudf/vector/CudfVector.h"
 
+#include "velox/common/time/Timer.h"
+
 #include <cudf/io/parquet.hpp>
 #include <cudf/io/types.hpp>
 #include <cudf/stream_compaction.hpp>
@@ -30,11 +32,11 @@
 #include <cudf/table/table_view.hpp>
 #include <cudf/transform.hpp>
 
+#include <cuda_runtime.h>
+
 #include <filesystem>
 #include <memory>
 #include <string>
-#include <cuda_runtime.h>
-#include "velox/common/time/Timer.h"
 
 namespace facebook::velox::cudf_velox::connector::parquet {
 
@@ -110,7 +112,7 @@ std::optional<RowVectorPtr> ParquetDataSource::next(
 
   // Record start time before reading chunk
   auto startTimeUs = getCurrentTimeMicro();
-  
+
   std::unique_ptr<cudf::table> cudfTable;
   // Read a table chunk
   auto [table, metadata] = splitReader_->read_chunk();
@@ -121,11 +123,14 @@ std::optional<RowVectorPtr> ParquetDataSource::next(
       columnNames_.emplace_back(schema.name);
     }
   }
-  
+
   auto* callbackData = new totalScanTimeCallbackData{startTimeUs, ioStats_};
-  
+
   // Launch host callback to calculate timing when scan completes
-  cudaLaunchHostFunc(stream_.value(), &ParquetDataSource::totalScanTimeCalculator, callbackData);
+  cudaLaunchHostFunc(
+      stream_.value(),
+      &ParquetDataSource::totalScanTimeCalculator,
+      callbackData);
 
   uint64_t filterTimeUs{0};
   // Apply remaining filter if present
@@ -153,8 +158,8 @@ std::optional<RowVectorPtr> ParquetDataSource::next(
         stream_,
         cudf::get_current_device_resource_ref());
   }
-  totalRemainingFilterTime_.fetch_add(filterTimeUs * 1000, std::memory_order_relaxed);
-  
+  totalRemainingFilterTime_.fetch_add(
+      filterTimeUs * 1000, std::memory_order_relaxed);
 
   // Output RowVectorPtr
   const auto nRows = cudfTable->num_rows();
@@ -191,17 +196,17 @@ std::optional<RowVectorPtr> ParquetDataSource::next(
 
 void ParquetDataSource::totalScanTimeCalculator(void* userData) {
   auto* data = static_cast<totalScanTimeCallbackData*>(userData);
-  
+
   // Record end time in callback
   auto endTimeUs = getCurrentTimeMicro();
-  
+
   // Calculate elapsed time in microseconds and convert to nanoseconds
   auto elapsedUs = endTimeUs - data->startTimeUs;
   auto elapsedNs = elapsedUs * 1000; // Convert microseconds to nanoseconds
-  
+
   // Update totalScanTime
   data->ioStats->incTotalScanTime(elapsedNs);
-  
+
   delete data;
 }
 
@@ -283,12 +288,12 @@ void ParquetDataSource::resetSplit() {
   columnNames_.clear();
 }
 
-std::unordered_map<std::string, RuntimeCounter> ParquetDataSource::runtimeStats() {
+std::unordered_map<std::string, RuntimeCounter>
+ParquetDataSource::runtimeStats() {
   auto res = runtimeStats_.toMap();
   res.insert({
       {"totalScanTime",
-       RuntimeCounter(
-           ioStats_->totalScanTime(), RuntimeCounter::Unit::kNanos)},
+       RuntimeCounter(ioStats_->totalScanTime(), RuntimeCounter::Unit::kNanos)},
       {"totalRemainingFilterTime",
        RuntimeCounter(
            totalRemainingFilterTime_.load(std::memory_order_relaxed),
