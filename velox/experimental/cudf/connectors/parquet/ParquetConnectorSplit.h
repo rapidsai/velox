@@ -22,6 +22,7 @@
 #include <cudf/io/types.hpp>
 
 #include <string>
+#include <unordered_map>
 
 namespace facebook::velox::cudf_velox::connector::parquet {
 
@@ -32,13 +33,19 @@ struct ParquetConnectorSplit
       facebook::velox::dwio::common::FileFormat::PARQUET};
   const cudf::io::source_info cudfSourceInfo;
 
+  /// These represent columns like $file_size, $file_modified_time that are
+  /// associated with the HiveSplit.
+  std::unordered_map<std::string, std::string> infoColumns;
+
   ParquetConnectorSplit(
       const std::string& connectorId,
       const std::string& _filePath,
-      int64_t _splitWeight = 0)
+      int64_t _splitWeight = 0,
+      const std::unordered_map<std::string, std::string>& _infoColumns = {})
       : facebook::velox::connector::ConnectorSplit(connectorId, _splitWeight),
         filePath(_filePath),
-        cudfSourceInfo({filePath}) {}
+        cudfSourceInfo({filePath}),
+        infoColumns(_infoColumns) {}
 
   std::string toString() const override;
   std::string getFileName() const;
@@ -54,7 +61,9 @@ struct ParquetConnectorSplit
 class ParquetConnectorSplitBuilder {
  public:
   explicit ParquetConnectorSplitBuilder(std::string filePath)
-      : filePath_{std::move(filePath)} {}
+      : filePath_{std::move(filePath)} {
+    infoColumns_["$path"] = filePath_;
+  }
 
   ParquetConnectorSplitBuilder& splitWeight(int64_t splitWeight) {
     splitWeight_ = splitWeight;
@@ -66,15 +75,23 @@ class ParquetConnectorSplitBuilder {
     return *this;
   }
 
+  ParquetConnectorSplitBuilder& infoColumn(
+      const std::string& name,
+      const std::string& value) {
+    infoColumns_.emplace(std::move(name), std::move(value));
+    return *this;
+  }
+
   std::shared_ptr<ParquetConnectorSplit> build() const {
     return std::make_shared<ParquetConnectorSplit>(
-        connectorId_, filePath_, splitWeight_);
+        connectorId_, filePath_, splitWeight_, infoColumns_);
   }
 
  private:
   const std::string filePath_;
   std::string connectorId_;
   int64_t splitWeight_{0};
+  std::unordered_map<std::string, std::string> infoColumns_ = {};
 };
 
 } // namespace facebook::velox::cudf_velox::connector::parquet

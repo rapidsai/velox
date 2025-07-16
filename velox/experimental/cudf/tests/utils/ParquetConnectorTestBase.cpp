@@ -239,7 +239,10 @@ ParquetConnectorTestBase::makeParquetConnectorSplits(
   std::vector<std::shared_ptr<facebook::velox::connector::ConnectorSplit>>
       splits;
   for (const auto& filePath : filePaths) {
-    splits.push_back(makeParquetConnectorSplit(filePath->getPath()));
+    splits.push_back(makeParquetConnectorSplit(
+        filePath->getPath(),
+        filePath->fileSize(),
+        filePath->fileModifiedTime()));
   }
   return splits;
 }
@@ -247,7 +250,9 @@ ParquetConnectorTestBase::makeParquetConnectorSplits(
 std::vector<std::shared_ptr<connector::parquet::ParquetConnectorSplit>>
 ParquetConnectorTestBase::makeParquetConnectorSplits(
     const std::string& filePath,
-    uint32_t splitCount) {
+    uint32_t splitCount,
+    const std::optional<std::unordered_map<std::string, std::string>>&
+        infoColumns) {
   auto file =
       filesystems::getFileSystem(filePath, nullptr)->openFileForRead(filePath);
   const int64_t fileSize = file->size();
@@ -257,10 +262,27 @@ ParquetConnectorTestBase::makeParquetConnectorSplits(
       splits;
   // Add all the splits.
   for (int i = 0; i < splitCount; i++) {
-    auto split = ParquetConnectorSplitBuilder(filePath).build();
-    splits.push_back(std::move(split));
+    auto splitBuilder = ParquetConnectorSplitBuilder(filePath);
+    if (infoColumns.has_value()) {
+      for (auto infoColumn : infoColumns.value()) {
+        splitBuilder.infoColumn(infoColumn.first, infoColumn.second);
+      }
+    }
+    splits.push_back(splitBuilder.build());
   }
   return splits;
+}
+
+std::shared_ptr<
+    facebook::velox::cudf_velox::connector::parquet::ParquetConnectorSplit>
+ParquetConnectorTestBase::makeParquetConnectorSplit(
+    const std::string& filePath,
+    int64_t fileSize,
+    int64_t fileModifiedTime) {
+  return ParquetConnectorSplitBuilder(filePath)
+      .infoColumn("$file_size", fmt::format("{}", fileSize))
+      .infoColumn("$file_modified_time", fmt::format("{}", fileModifiedTime))
+      .build();
 }
 
 std::shared_ptr<connector::parquet::ParquetConnectorSplit>

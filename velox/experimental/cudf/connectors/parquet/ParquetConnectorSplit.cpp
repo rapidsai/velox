@@ -35,6 +35,10 @@ std::shared_ptr<ParquetConnectorSplit> ParquetConnectorSplit::create(
   const auto connectorId = obj["connectorId"].asString();
   const auto splitWeight = obj["splitWeight"].asInt();
   const auto filePath = obj["filePath"].asString();
+  std::unordered_map<std::string, std::string> infoColumns;
+  for (const auto& [key, value] : obj["infoColumns"].items()) {
+    infoColumns[key.asString()] = value.asString();
+  }
 
   return std::make_shared<ParquetConnectorSplit>(
       connectorId, filePath, splitWeight);
