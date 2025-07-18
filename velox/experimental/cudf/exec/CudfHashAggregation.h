@@ -147,4 +147,54 @@ class CudfHashAggregation : public exec::Operator, public NvtxHelper {
   CudfVectorPtr partialOutput_;
 };
 
+using AggregatorFactory =
+    std::function<std::unique_ptr<CudfHashAggregation::Aggregator>(
+        core::AggregationNode::Step step,
+        uint32_t inputIndex,
+        VectorPtr constant,
+        bool isGlobal)>;
+
+struct AggregatorEntry {
+  AggregatorFactory factory;
+};
+
+using AggregatorMap =
+    folly::Synchronized<std::unordered_map<std::string, AggregatorEntry>>;
+
+AggregatorMap& aggregators();
+
+const AggregatorEntry* FOLLY_NULLABLE
+getAggregatorEntry(const std::string& name);
+
+/// Register an aggregator function with the specified name and factory.
+/// When function with `name` already exists, if overwrite is true, existing
+/// registration will be replaced. Otherwise, return false without overwriting.
+bool registerAggregator(
+    const std::string& name,
+    const AggregatorFactory& factory,
+    bool overwrite = false);
+
+/// Creates an aggregator instance using the registered factory.
+/// Returns nullptr if no factory is registered for the given name.
+std::unique_ptr<CudfHashAggregation::Aggregator> createAggregator(
+    const std::string& kind,
+    core::AggregationNode::Step step,
+    uint32_t inputIndex,
+    VectorPtr constant,
+    bool isGlobal);
+
+/// Registration functions for CUDF aggregators
+void registerSumAggregator(bool withCompanionFunctions, bool overwrite = false);
+void registerCountAggregator(
+    bool withCompanionFunctions,
+    bool overwrite = false);
+void registerMinAggregator(bool withCompanionFunctions, bool overwrite = false);
+void registerMaxAggregator(bool withCompanionFunctions, bool overwrite = false);
+void registerAvgAggregator(bool withCompanionFunctions, bool overwrite = false);
+
+/// Register all CUDF aggregators
+void registerCudfAggregators(
+    bool withCompanionFunctions,
+    bool overwrite = false);
+
 } // namespace facebook::velox::cudf_velox

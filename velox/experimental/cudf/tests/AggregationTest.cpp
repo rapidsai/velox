@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "velox/experimental/cudf/exec/CudfHashAggregation.h"
 #include "velox/experimental/cudf/exec/ToCudf.h"
 
 #include "velox/dwio/common/tests/utils/BatchMaker.h"
@@ -492,6 +493,9 @@ TEST_F(AggregationTest, CompanionAggs) {
        makeFlatVector<int64_t>(values)});
 
   createDuckDbTable({rowVector});
+
+  facebook::velox::cudf_velox::registerCudfAggregators(
+      true /* withCompanionFunctions */, false /* overwrite */);
 
   auto op =
       PlanBuilder()

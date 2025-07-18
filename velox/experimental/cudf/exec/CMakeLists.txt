@@ -23,6 +23,7 @@ add_library(
   CudfOrderBy.cpp
   DebugUtil.cpp
   ExpressionEvaluator.cpp
+  PrestoAggregates.cpp
   ToCudf.cpp
   Utilities.cpp
   VeloxCudfInterop.cpp)
