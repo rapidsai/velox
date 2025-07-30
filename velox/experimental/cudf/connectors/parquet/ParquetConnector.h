@@ -17,6 +17,7 @@
 #pragma once
 
 #include "velox/experimental/cudf/connectors/parquet/ParquetConfig.h"
+
 #include "velox/connectors/Connector.h"
 
 namespace facebook::velox::cudf_velox::connector::parquet {
