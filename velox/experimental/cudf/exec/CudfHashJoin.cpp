@@ -376,6 +376,12 @@ CudfHashJoinProbe::CudfHashJoinProbe(
 }
 
 bool CudfHashJoinProbe::needsInput() const {
+  if (cudfDebugEnabled()) {
+    std::cout << "Calling CudfHashJoinProbe::needsInput" << std::endl;
+  }
+  if (joinNode_->isRightJoin()) {
+    return !finished_ && inputs_.size() < 100;
+  }
   return !finished_ && input_ == nullptr;
 }
 
@@ -397,7 +403,81 @@ void CudfHashJoinProbe::addInput(RowVectorPtr input) {
     auto lockedStats = stats_.wlock();
     lockedStats->numNullKeys += null_count;
   }
-  input_ = std::move(input);
+  if (!joinNode_->isRightJoin()) {
+    input_ = std::move(input);
+    return;
+  }
+  
+  // Queue inputs and process all at once
+  if (input->size() > 0) {
+    inputs_.push_back(std::move(cudfInput));
+  }
+}
+
+void CudfHashJoinProbe::noMoreInput () {
+  if (cudfDebugEnabled()) {
+    std::cout << "Calling CudfHashJoinProbe::noMoreInput" << std::endl;
+  }
+  VELOX_NVTX_OPERATOR_FUNC_RANGE();
+  if (!joinNode_->isRightJoin()) {
+    return;
+  }
+  Operator::noMoreInput();
+  std::vector<ContinuePromise> promises;
+  std::vector<std::shared_ptr<exec::Driver>> peers;
+  // Only last driver collects all answers
+  if (!operatorCtx_->task()->allPeersFinished(
+          planNodeId(), operatorCtx_->driver(), &future_, promises, peers)) {
+    return;
+  }
+  // Collect results from peers
+  for (auto& peer : peers) {
+    auto op = peer->findOperator(planNodeId());
+    auto* probe = dynamic_cast<CudfHashJoinProbe*>(op);
+    VELOX_CHECK_NOT_NULL(probe);
+    inputs_.insert(inputs_.end(), probe->inputs_.begin(), probe->inputs_.end());
+  }
+
+  SCOPE_EXIT {
+    // Realize the promises so that the other Drivers (which were not
+    // the last to finish) can continue from the barrier and finish.
+    peers.clear();
+    for (auto& promise : promises) {
+      promise.setValue();
+    }
+  };
+
+  auto stream = cudfGlobalStreamPool().get_stream();
+  std::unique_ptr<cudf::table> tbl;
+  if (inputs_.size() == 0) {
+    auto emptyRowVector = RowVector::createEmpty(
+        joinNode_->sources()[1]->outputType(), operatorCtx_->pool());
+    tbl = facebook::velox::cudf_velox::with_arrow::toCudfTable(
+        emptyRowVector, operatorCtx_->pool(), stream);
+  } else {
+    tbl = getConcatenatedTable(inputs_, stream);
+  }
+
+  // Release input data after synchronizing
+  stream.synchronize();
+
+  VELOX_CHECK_NOT_NULL(tbl);
+
+  if (cudfDebugEnabled()) {
+    std::cout << "Probe table number of columns: " << tbl->num_columns()
+              << std::endl;
+    std::cout << "Probe table number of rows: " << tbl->num_rows() << std::endl;
+  }
+  
+  // Store the concatenated table in input_
+  input_ = std::make_shared<CudfVector>(
+      operatorCtx_->pool(),
+      joinNode_->outputType(),
+      tbl->num_rows(),
+      std::move(tbl),
+      stream);
+  
+  inputs_.clear();
 }
 
 RowVectorPtr CudfHashJoinProbe::getOutput() {

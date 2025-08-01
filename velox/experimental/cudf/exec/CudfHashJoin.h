@@ -82,6 +82,8 @@ class CudfHashJoinProbe : public exec::Operator, public NvtxHelper {
 
   void addInput(RowVectorPtr input) override;
 
+  void noMoreInput() override;
+
   RowVectorPtr getOutput() override;
 
   bool skipProbeOnEmptyBuild() const;
@@ -92,7 +94,8 @@ class CudfHashJoinProbe : public exec::Operator, public NvtxHelper {
     return joinType == core::JoinType::kInner ||
         joinType == core::JoinType::kLeft ||
         joinType == core::JoinType::kAnti ||
-        joinType == core::JoinType::kLeftSemiFilter;
+        joinType == core::JoinType::kLeftSemiFilter ||
+        joinType == core::JoinType::kRight;
   }
 
   bool isFinished() override;
@@ -106,6 +109,10 @@ class CudfHashJoinProbe : public exec::Operator, public NvtxHelper {
   std::vector<std::unique_ptr<cudf::scalar>> scalars_;
 
   bool rightPrecomputed_{false};
+
+  // Batched probe inputs needed for right join
+  std::vector<CudfVectorPtr> inputs_;
+  ContinueFuture future_{ContinueFuture::makeEmpty()};
 
   std::vector<cudf::size_type> leftKeyIndices_;
   std::vector<cudf::size_type> rightKeyIndices_;
