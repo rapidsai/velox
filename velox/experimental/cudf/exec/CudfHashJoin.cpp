@@ -407,14 +407,14 @@ void CudfHashJoinProbe::addInput(RowVectorPtr input) {
     input_ = std::move(input);
     return;
   }
-  
+
   // Queue inputs and process all at once
   if (input->size() > 0) {
     inputs_.push_back(std::move(cudfInput));
   }
 }
 
-void CudfHashJoinProbe::noMoreInput () {
+void CudfHashJoinProbe::noMoreInput() {
   if (cudfDebugEnabled()) {
     std::cout << "Calling CudfHashJoinProbe::noMoreInput" << std::endl;
   }
@@ -468,7 +468,7 @@ void CudfHashJoinProbe::noMoreInput () {
               << std::endl;
     std::cout << "Probe table number of rows: " << tbl->num_rows() << std::endl;
   }
-  
+
   // Store the concatenated table in input_
   input_ = std::make_shared<CudfVector>(
       operatorCtx_->pool(),
@@ -476,7 +476,7 @@ void CudfHashJoinProbe::noMoreInput () {
       tbl->num_rows(),
       std::move(tbl),
       stream);
-  
+
   inputs_.clear();
 }
 
