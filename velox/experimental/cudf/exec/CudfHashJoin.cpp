@@ -380,9 +380,9 @@ bool CudfHashJoinProbe::needsInput() const {
     std::cout << "Calling CudfHashJoinProbe::needsInput" << std::endl;
   }
   if (joinNode_->isRightJoin()) {
-    return !finished_ && inputs_.size() < 100;
+    return !noMoreInput_;
   }
-  return !finished_ && input_ == nullptr;
+  return !noMoreInput_ && !finished_ && input_ == nullptr;
 }
 
 void CudfHashJoinProbe::addInput(RowVectorPtr input) {
@@ -419,10 +419,10 @@ void CudfHashJoinProbe::noMoreInput() {
     std::cout << "Calling CudfHashJoinProbe::noMoreInput" << std::endl;
   }
   VELOX_NVTX_OPERATOR_FUNC_RANGE();
+  Operator::noMoreInput();
   if (!joinNode_->isRightJoin()) {
     return;
   }
-  Operator::noMoreInput();
   std::vector<ContinuePromise> promises;
   std::vector<std::shared_ptr<exec::Driver>> peers;
   // Only last driver collects all answers
@@ -724,6 +724,14 @@ bool CudfHashJoinProbe::skipProbeOnEmptyBuild() const {
 }
 
 exec::BlockingReason CudfHashJoinProbe::isBlocked(ContinueFuture* future) {
+  if (joinNode_->isRightJoin() && hashObject_.has_value()) {
+    if (!future_.valid()) {
+      return exec::BlockingReason::kNotBlocked;
+    }
+    *future = std::move(future_);
+    return exec::BlockingReason::kWaitForJoinProbe;
+  }
+
   if (hashObject_.has_value()) {
     return exec::BlockingReason::kNotBlocked;
   }
@@ -758,6 +766,10 @@ exec::BlockingReason CudfHashJoinProbe::isBlocked(ContinueFuture* future) {
         skipInput_ = true;
       }
     }
+  }
+  if (joinNode_->isRightJoin() && future_.valid()) {
+    *future = std::move(future_);
+    return exec::BlockingReason::kWaitForJoinProbe;
   }
   return exec::BlockingReason::kNotBlocked;
 }
