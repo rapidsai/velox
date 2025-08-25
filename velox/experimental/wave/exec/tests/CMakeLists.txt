@@ -39,6 +39,7 @@ target_link_libraries(
   velox_functions_prestosql
   velox_functions_test_lib
   velox_hive_connector
+  velox_cudf_parquet_connector
   velox_memory
   velox_serialization
   velox_test_util
@@ -78,6 +79,7 @@ if(${VELOX_ENABLE_BENCHMARKS})
     velox_functions_prestosql
     velox_functions_test_lib
     velox_hive_connector
+    velox_cudf_parquet_connector
     velox_memory
     velox_serialization
     velox_test_util

@@ -29,6 +29,7 @@ target_link_libraries(
   velox_hive_connector
   velox_hive_partition_function
   velox_memory
+  velox_cudf_parquet_connector
   Folly::folly
   Folly::follybenchmark
   fmt::fmt)

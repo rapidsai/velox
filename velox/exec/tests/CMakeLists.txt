@@ -192,6 +192,7 @@ target_link_libraries(
   velox_vector_fuzzer
   velox_presto_serializer
   velox_dwio_dwrf_writer
+  velox_cudf_parquet_connector
   Boost::atomic
   Boost::context
   Boost::date_time

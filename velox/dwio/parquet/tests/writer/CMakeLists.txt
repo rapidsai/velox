@@ -30,7 +30,9 @@ target_link_libraries(
   Folly::folly
   ${TEST_LINK_LIBS}
   GTest::gtest
-  fmt::fmt)
+  fmt::fmt
+  velox_cudf_parquet_connector
+  )
 
 add_executable(velox_parquet_writer_test ParquetWriterTest.cpp)
 
@@ -50,4 +52,6 @@ target_link_libraries(
   Folly::folly
   ${TEST_LINK_LIBS}
   GTest::gtest
-  fmt::fmt)
+  fmt::fmt
+  velox_cudf_parquet_connector
+  )

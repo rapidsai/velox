@@ -32,4 +32,5 @@ target_link_libraries(
   velox_exec
   velox_exec_test_lib
   velox_memory
+  velox_cudf_parquet_connector
   fmt::fmt)

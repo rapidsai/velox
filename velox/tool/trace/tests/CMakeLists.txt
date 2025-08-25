@@ -39,6 +39,7 @@ target_link_libraries(
   velox_query_trace_replayer_base
   velox_trace_file_tool_base
   velox_vector_fuzzer
+  velox_cudf_parquet_connector
   GTest::gtest_main
   GTest::gmock
   Folly::folly
