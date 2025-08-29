@@ -25,11 +25,13 @@ target_link_libraries(
   velox_parse_utils
   velox_parse_expression
   velox_exec
-  velox_exec_test_lib
+  velox_exec_test_lib_cudf
+  velox_cudf_parquet_connector
   velox_hive_connector
   velox_hive_partition_function
   velox_memory
-  velox_cudf_parquet_connector
   Folly::folly
   Folly::follybenchmark
   fmt::fmt)
+
+velox_apply_cudf_curl_fix(velox_hive_partition_function_benchmark)
