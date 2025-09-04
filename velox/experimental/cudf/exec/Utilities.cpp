@@ -35,8 +35,8 @@
 #include <common/base/Exceptions.h>
 
 #include <cstdlib>
-#include <memory>
 #include <limits>
+#include <memory>
 #include <string_view>
 
 namespace facebook::velox::cudf_velox {
@@ -205,12 +205,16 @@ std::vector<std::unique_ptr<cudf::table>> getConcatenatedTableBatched(
   size_t total_numrows = 0, startpos = 0;
   for (size_t i = 0; i < tables.size(); i++) {
     auto num_rows = static_cast<size_t>(tableViews[i].num_rows());
-    if (total_numrows + num_rows >= static_cast<size_t>(std::numeric_limits<cudf::size_type>::max())) {
-      outputTables.push_back(cudf::concatenate(std::vector<cudf::table_view>(tableViews.begin() + startpos, tableViews.begin() + i), stream, cudf::get_current_device_resource_ref()));
+    if (total_numrows + num_rows >=
+        static_cast<size_t>(std::numeric_limits<cudf::size_type>::max())) {
+      outputTables.push_back(cudf::concatenate(
+          std::vector<cudf::table_view>(
+              tableViews.begin() + startpos, tableViews.begin() + i),
+          stream,
+          cudf::get_current_device_resource_ref()));
       startpos = i;
       total_numrows = num_rows;
-    }
-    else {
+    } else {
       total_numrows += num_rows;
     }
   }

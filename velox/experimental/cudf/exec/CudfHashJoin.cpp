@@ -167,14 +167,15 @@ void CudfHashJoinBuild::noMoreInput() {
   stream.synchronize();
   inputs_.clear();
 
-  for (auto const &tbl : tbls) {
+  for (auto const& tbl : tbls) {
     VELOX_CHECK_NOT_NULL(tbl);
   }
   if (cudfDebugEnabled()) {
     std::cout << "Build table number of columns: " << tbls[0]->num_columns()
               << std::endl;
     for (auto i = 0; i < tbls.size(); i++) {
-      std::cout << "Build table " << i << ": number of rows: " << tbls[i]->num_rows() << std::endl;
+      std::cout << "Build table " << i
+                << ": number of rows: " << tbls[i]->num_rows() << std::endl;
     }
   }
 
@@ -186,7 +187,7 @@ void CudfHashJoinBuild::noMoreInput() {
     buildKeyIndices[i] = static_cast<cudf::size_type>(
         buildType->getChildIdx(rightKeys[i]->name()));
   }
-  
+
   // set hash table to CudfHashJoinBridge
   auto joinBridge = operatorCtx_->task()->getCustomJoinBridge(
       operatorCtx_->driverCtx()->splitGroupId, planNodeId());
@@ -198,20 +199,22 @@ void CudfHashJoinBuild::noMoreInput() {
   // cudf
   bool buildHashJoin = (joinNode_->isInnerJoin() || joinNode_->isLeftJoin()) &&
       !joinNode_->filter();
-  
+
   std::vector<std::shared_ptr<cudf::hash_join>> hashObjects;
   for (auto i = 0; i < tbls.size(); i++) {
-    hashObjects.push_back((buildHashJoin) ? std::make_shared<cudf::hash_join>(
-                                            tbls[i]->view().select(buildKeyIndices),
-                                            cudf::null_equality::UNEQUAL,
-                                            stream)
-                                      : nullptr);
+    hashObjects.push_back(
+        (buildHashJoin) ? std::make_shared<cudf::hash_join>(
+                              tbls[i]->view().select(buildKeyIndices),
+                              cudf::null_equality::UNEQUAL,
+                              stream)
+                        : nullptr);
     if (buildHashJoin) {
       VELOX_CHECK_NOT_NULL(hashObjects.back());
     }
     if (cudfDebugEnabled()) {
       if (hashObjects.back() != nullptr) {
-        printf("hashObject %d is not nullptr %p\n", i, hashObjects.back().get());
+        printf(
+            "hashObject %d is not nullptr %p\n", i, hashObjects.back().get());
       } else {
         printf("hashObject %d is *** nullptr\n", i);
       }
@@ -506,8 +509,8 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
   auto& rightTables = hashObject_.value().first;
   auto& hbs = hashObject_.value().second;
   for (auto i = 0; i < rightTables.size(); i++) {
-    auto &rightTable = rightTables[i];
-    auto &hb = hbs[i];
+    auto& rightTable = rightTables[i];
+    auto& hb = hbs[i];
     VELOX_CHECK_NOT_NULL(rightTable);
     if (cudfDebugEnabled()) {
       if (rightTable != nullptr)
@@ -526,7 +529,7 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
   // Special case for null-aware anti join where
   // build table is not empty, no nulls, and probe table has nulls
   if (joinNode_->isNullAware() and !joinNode_->filter()) {
-    auto &rightTable = rightTables[0];
+    auto& rightTable = rightTables[0];
     auto const rightTableHasNulls =
         cudf::has_nulls(rightTable->view().select(rightKeyIndices_));
     auto const leftTableHasNulls =
@@ -549,7 +552,7 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
   auto leftTableView = leftTable->view();
   for (auto i = 0; i < rightTables.size(); i++) {
     auto rightTableView = rightTables[i]->view();
-    auto &hb = hbs[i];
+    auto& hb = hbs[i];
 
     if (joinNode_->isInnerJoin()) {
       // left = probe, right = build
@@ -686,13 +689,14 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
     auto leftIndicesCol = cudf::column_view{leftIndicesSpan};
     auto rightIndicesCol = cudf::column_view{rightIndicesSpan};
     auto constexpr oobPolicy = cudf::out_of_bounds_policy::NULLIFY;
-    auto leftResult = cudf::gather(leftInput, leftIndicesCol, oobPolicy, stream);
+    auto leftResult =
+        cudf::gather(leftInput, leftIndicesCol, oobPolicy, stream);
     auto rightResult =
         cudf::gather(rightInput, rightIndicesCol, oobPolicy, stream);
 
     if (cudfDebugEnabled()) {
-      std::cout << "Left result number of columns: " << leftResult->num_columns()
-                << std::endl;
+      std::cout << "Left result number of columns: "
+                << leftResult->num_columns() << std::endl;
       std::cout << "Right result number of columns: "
                 << rightResult->num_columns() << std::endl;
     }
@@ -710,7 +714,8 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
     cudfOutputs.push_back(std::make_unique<cudf::table>(std::move(joinedCols)));
     stream.synchronize();
 
-    if (cudfOutputs.back()->num_columns() == 0 or cudfOutputs.back()->num_rows() == 0) {
+    if (cudfOutputs.back()->num_columns() == 0 or
+        cudfOutputs.back()->num_rows() == 0) {
       return nullptr;
     }
   }
@@ -720,7 +725,11 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
 
   auto cudfOutput = concatenateTables(std::move(cudfOutputs), stream);
   return std::make_shared<CudfVector>(
-      pool(), outputType_, cudfOutput->num_rows(), std::move(cudfOutput), stream);
+      pool(),
+      outputType_,
+      cudfOutput->num_rows(),
+      std::move(cudfOutput),
+      stream);
 }
 
 bool CudfHashJoinProbe::skipProbeOnEmptyBuild() const {
