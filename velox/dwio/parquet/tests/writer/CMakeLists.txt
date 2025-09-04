@@ -32,7 +32,11 @@ target_link_libraries(
   ${TEST_LINK_LIBS}
   GTest::gtest
   fmt::fmt
-)
+  velox_exec_test_lib_cudf
+  velox_cudf_parquet_connector
+  )
+
+velox_apply_cudf_curl_fix(velox_parquet_writer_sink_test)
 
 add_executable(velox_parquet_writer_test ParquetWriterTest.cpp)
 
@@ -54,4 +58,8 @@ target_link_libraries(
   ${TEST_LINK_LIBS}
   GTest::gtest
   fmt::fmt
-)
+  velox_exec_test_lib_cudf
+  velox_cudf_parquet_connector
+  )
+
+velox_apply_cudf_curl_fix(velox_parquet_writer_test)

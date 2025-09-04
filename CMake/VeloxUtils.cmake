@@ -168,3 +168,31 @@ function(velox_sources TARGET)
     target_sources(${TARGET} ${ARGN})
   endif()
 endfunction()
+
+# Apply curl fix for targets that need cudf but get curl_url_strerror linker errors
+function(velox_apply_cudf_curl_fix TARGET_NAME)
+  if(VELOX_ENABLE_CUDF)
+    # Find the bundled curl library 
+    set(BUNDLED_CURL_LIB_VERSIONED "${CMAKE_BINARY_DIR}/_deps/curl-build/lib/libcurl.so.4.8.0")
+    set(BUNDLED_CURL_LIB "${CMAKE_BINARY_DIR}/_deps/curl-build/lib/libcurl.so")
+    set(BUNDLED_CURL_DIR "${CMAKE_BINARY_DIR}/_deps/curl-build/lib")
+    
+    if(EXISTS "${BUNDLED_CURL_LIB_VERSIONED}")
+      set(SELECTED_CURL_LIB "${BUNDLED_CURL_LIB_VERSIONED}")
+    elseif(EXISTS "${BUNDLED_CURL_LIB}")
+      set(SELECTED_CURL_LIB "${BUNDLED_CURL_LIB}")
+    else()
+      message(WARNING "[${TARGET_NAME}] No bundled curl found, curl_url_strerror error likely")
+      set(SELECTED_CURL_LIB "")
+    endif()
+    
+    if(SELECTED_CURL_LIB)
+      message(STATUS "[${TARGET_NAME}] Applying cudf curl fix with bundled curl: ${SELECTED_CURL_LIB}")
+      # Set rpath so bundled curl is found at runtime
+      target_link_options(${TARGET_NAME} PRIVATE "LINKER:-rpath,${BUNDLED_CURL_DIR}")
+      # Link bundled curl with whole-archive to force curl_url_strerror symbol availability
+      target_link_libraries(${TARGET_NAME} -Wl,--whole-archive "${SELECTED_CURL_LIB}" -Wl,--no-whole-archive)
+      message(STATUS "[${TARGET_NAME}] Cudf curl fix applied successfully")
+    endif()
+  endif()
+endfunction()

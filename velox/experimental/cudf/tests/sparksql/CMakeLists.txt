@@ -25,7 +25,8 @@ set_tests_properties(velox_cudf_spark_aggregates_test PROPERTIES LABELS cuda_dri
 target_link_libraries(
   velox_cudf_spark_aggregates_test
   velox_cudf_exec
-  velox_exec_test_lib
+  velox_exec_test_lib_cudf
+  velox_cudf_parquet_connector
   velox_vector_test_lib
   velox_functions_aggregates_test_lib
   velox_functions_spark
@@ -34,5 +35,6 @@ target_link_libraries(
   velox_vector_fuzzer
   gflags::gflags
   GTest::gtest
-  GTest::gtest_main
-)
+  GTest::gtest_main)
+
+velox_apply_cudf_curl_fix(velox_cudf_spark_aggregates_test)
