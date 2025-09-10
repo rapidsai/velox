@@ -34,8 +34,6 @@ target_link_libraries(
   fmt::fmt
 )
 
-velox_apply_cudf_curl_fix(velox_parquet_writer_sink_test)
-
 add_executable(velox_parquet_writer_test ParquetWriterTest.cpp)
 
 add_test(
@@ -57,5 +55,3 @@ target_link_libraries(
   GTest::gtest
   fmt::fmt
 )
-
-velox_apply_cudf_curl_fix(velox_parquet_writer_test)

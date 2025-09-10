@@ -36,5 +36,3 @@ target_link_libraries(
   GTest::gtest
   GTest::gtest_main
 )
-
-velox_apply_cudf_curl_fix(velox_cudf_spark_aggregates_test)

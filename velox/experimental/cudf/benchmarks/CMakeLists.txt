@@ -20,4 +20,3 @@ target_link_libraries(
   velox_cudf_exec_test_lib
   velox_tpch_benchmark_lib
 )
-velox_apply_cudf_curl_fix(velox_cudf_tpch_benchmark)

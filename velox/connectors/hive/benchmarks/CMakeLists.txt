@@ -32,5 +32,3 @@ target_link_libraries(
   Folly::follybenchmark
   fmt::fmt
 )
-
-velox_apply_cudf_curl_fix(velox_hive_partition_function_benchmark)

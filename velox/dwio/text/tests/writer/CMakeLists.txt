@@ -39,5 +39,3 @@ target_link_libraries(
   GTest::gtest
   fmt::fmt
 )
-
-velox_apply_cudf_curl_fix(velox_text_writer_test)
