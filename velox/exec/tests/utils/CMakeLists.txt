@@ -62,13 +62,3 @@ target_link_libraries(
   velox_functions_prestosql
   velox_aggregates
 )
-
-# Create separate CUDF test library to avoid pulling kvikio/curl into all tests
-if(VELOX_ENABLE_CUDF)
-  add_library(velox_exec_test_lib_cudf INTERFACE)
-  target_compile_definitions(velox_exec_test_lib_cudf INTERFACE VELOX_ENABLE_CUDF)
-  target_link_libraries(velox_exec_test_lib_cudf INTERFACE 
-    velox_exec_test_lib
-    velox_cudf_exec
-    velox_cudf_parquet_connector)
-endif()

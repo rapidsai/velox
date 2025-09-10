@@ -34,5 +34,5 @@ set_target_properties(velox_cudf_parquet_connector PROPERTIES CUDA_ARCHITECTURES
 
 target_link_libraries(
   velox_cudf_parquet_connector
-  PRIVATE cudf::cudf velox_common_io velox_connector velox_type_tz velox_gcs
+  PRIVATE cudf::cudf velox_common_io velox_connector velox_hive_connector velox_type_tz velox_gcs
 )

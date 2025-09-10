@@ -93,8 +93,7 @@ target_link_libraries(
   velox_cudf_hash_join_test
   velox_cudf_exec
   velox_exec
-  velox_exec_test_lib_cudf
-  velox_cudf_parquet_connector
+  velox_exec_test_lib
   velox_test_util
   velox_vector_fuzzer
   gtest
@@ -107,8 +106,7 @@ target_link_libraries(
   velox_cudf_order_by_test
   velox_cudf_exec
   velox_exec
-  velox_exec_test_lib_cudf
-  velox_cudf_parquet_connector
+  velox_exec_test_lib
   velox_test_util
   gtest
   gtest_main
@@ -119,8 +117,7 @@ target_link_libraries(
   velox_cudf_aggregation_test
   velox_cudf_exec
   velox_exec
-  velox_exec_test_lib_cudf
-  velox_cudf_parquet_connector
+  velox_exec_test_lib
   velox_test_util
   velox_vector_fuzzer
   gtest
@@ -132,8 +129,7 @@ target_link_libraries(
   velox_cudf_local_partition_test
   velox_cudf_exec
   velox_exec
-  velox_exec_test_lib_cudf
-  velox_cudf_parquet_connector
+  velox_exec_test_lib
   velox_test_util
   gtest
   gtest_main
@@ -143,9 +139,9 @@ target_link_libraries(
 target_link_libraries(
   velox_cudf_table_scan_test
   velox_cudf_exec_test_lib
-  velox_cudf_parquet_connector
+  # velox_cudf_exec
   velox_exec
-  velox_exec_test_lib_cudf
+  velox_exec_test_lib
   velox_cudf_parquet_connector
   velox_test_util
   gtest
@@ -169,8 +165,7 @@ target_link_libraries(
   velox_cudf_filter_project_test
   velox_cudf_exec
   velox_exec
-  velox_exec_test_lib_cudf
-  velox_cudf_parquet_connector
+  velox_exec_test_lib
   velox_test_util
   gtest
   gtest_main
@@ -180,8 +175,8 @@ target_link_libraries(
   velox_cudf_subfield_filter_ast_test
   velox_cudf_exec
   velox_exec
-  velox_exec_test_lib_cudf
-  velox_cudf_parquet_connector
+  velox_exec_test_lib
+  velox_cudf_exec_test_lib
   velox_test_util
   gtest
   gtest_main
@@ -191,8 +186,7 @@ target_link_libraries(
   velox_cudf_limit_test
   velox_cudf_exec
   velox_exec
-  velox_exec_test_lib_cudf
-  velox_cudf_parquet_connector
+  velox_exec_test_lib
   velox_test_util
   gtest
   gtest_main
