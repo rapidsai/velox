@@ -16,9 +16,19 @@
 
 #include "velox/experimental/cudf/connectors/hive/CudfHiveConnectorSplit.h"
 
+#include <cudf/io/types.hpp>
+
 #include <string>
 
 namespace facebook::velox::cudf_velox::connector::hive {
+
+CudfHiveConnectorSplit::CudfHiveConnectorSplit(
+    const std::string& connectorId,
+    const std::string& _filePath,
+    int64_t _splitWeight)
+    : facebook::velox::connector::ConnectorSplit(connectorId, _splitWeight),
+      filePath(_filePath),
+      cudfSourceInfo(std::make_unique<cudf::io::source_info>(filePath)) {}
 
 std::string CudfHiveConnectorSplit::toString() const {
   return fmt::format("CudfHive: {}", filePath);

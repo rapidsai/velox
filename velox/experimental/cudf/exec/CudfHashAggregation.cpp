@@ -36,6 +36,10 @@ namespace {
 
 using namespace facebook::velox;
 
+bool isFloatingPointType(const TypePtr& type) {
+  return type->kind() != TypeKind::REAL && type->kind() != TypeKind::DOUBLE;
+}
+
 #define DEFINE_SIMPLE_AGGREGATOR(Name, name, KIND)                            \
   struct Name##Aggregator : cudf_velox::CudfHashAggregation::Aggregator {     \
     Name##Aggregator(                                                         \
@@ -582,9 +586,22 @@ auto toIntermediateAggregators(
 std::unique_ptr<cudf::table> makeEmptyTable(TypePtr const& inputType) {
   std::vector<std::unique_ptr<cudf::column>> emptyColumns;
   for (size_t i = 0; i < inputType->size(); ++i) {
-    auto emptyColumn = cudf::make_empty_column(
-        cudf_velox::veloxToCudfTypeId(inputType->childAt(i)));
-    emptyColumns.push_back(std::move(emptyColumn));
+    if (auto const& childType = inputType->childAt(i);
+        childType->kind() == TypeKind::ROW) {
+      auto tbl = makeEmptyTable(childType);
+      auto structColumn = std::make_unique<cudf::column>(
+          cudf::data_type(cudf::type_id::STRUCT),
+          0,
+          rmm::device_buffer(),
+          rmm::device_buffer(),
+          0,
+          tbl->release());
+      emptyColumns.push_back(std::move(structColumn));
+    } else {
+      auto emptyColumn = cudf::make_empty_column(
+          cudf_velox::veloxToCudfTypeId(inputType->childAt(i)));
+      emptyColumns.push_back(std::move(emptyColumn));
+    }
   }
   return std::make_unique<cudf::table>(std::move(emptyColumns));
 }

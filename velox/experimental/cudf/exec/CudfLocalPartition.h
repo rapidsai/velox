@@ -33,6 +33,8 @@ class CudfLocalPartition : public exec::Operator, public NvtxHelper {
     return fmt::format("CudfLocalPartition({})", numPartitions_);
   }
 
+  void recordOutputStats(RowVectorPtr& input);
+
   void addInput(RowVectorPtr input) override;
 
   RowVectorPtr getOutput() override {
@@ -50,6 +52,9 @@ class CudfLocalPartition : public exec::Operator, public NvtxHelper {
   void noMoreInput() override;
 
   bool isFinished() override;
+
+  static bool shouldReplace(
+      const std::shared_ptr<const core::LocalPartitionNode>& planNode);
 
  protected:
   const std::vector<std::shared_ptr<exec::LocalExchangeQueue>> queues_;
