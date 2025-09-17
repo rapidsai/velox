@@ -40,6 +40,7 @@ target_link_libraries(
     velox_cudf_vector
     velox_exec
     velox_cudf_parquet_connector
+    CUDA::cudart
 )
 
 target_compile_options(velox_cudf_exec PRIVATE -Wno-missing-field-initializers $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
@@ -47,6 +48,7 @@ target_compile_options(velox_cudf_exec PRIVATE -Wno-missing-field-initializers $
 set_target_properties(
   velox_cudf_exec 
   PROPERTIES 
-  CUDA_STANDARD 17
+  CUDA_STANDARD 20
   POSITION_INDEPENDENT_CODE ON
-  CUDA_SEPARABLE_COMPILATION ON)
+  CUDA_SEPARABLE_COMPILATION ON
+  CUDA_RESOLVE_DEVICE_SYMBOLS ON)

@@ -37,6 +37,7 @@
 
 namespace facebook::velox::cudf_velox {
   
+  /*
 std::unique_ptr<cudf::table> create_joined_table(
     std::unique_ptr<rmm::device_uvector<cudf::size_type>> &&leftJoinIndices,
     std::unique_ptr<rmm::device_uvector<cudf::size_type>> &&rightJoinIndices,
@@ -239,6 +240,100 @@ std::unique_ptr<cudf::table> create_joined_table(
   stream.synchronize();
   return std::move(cudfOutput);
 }
+*/
 
+std::pair<
+std::unique_ptr<rmm::device_uvector<cudf::size_type>>,
+std::unique_ptr<rmm::device_uvector<cudf::size_type>>
+> sort_join_indices(
+    std::unique_ptr<rmm::device_uvector<cudf::size_type>> &&leftJoinIndices,
+    std::unique_ptr<rmm::device_uvector<cudf::size_type>> &&rightJoinIndices,
+    rmm::cuda_stream_view stream) {
+  thrust::sort_by_key(rmm::exec_policy_nosync(stream), leftJoinIndices->begin(), leftJoinIndices->end(), rightJoinIndices->begin());
+  return {std::move(leftJoinIndices), std::move(rightJoinIndices)};
+}
+
+/*
+std::vector<std::unique_ptr<cudf::column>> filter_left_joined_cols(
+    std::unique_ptr<rmm::device_uvector<cudf::size_type>> &&leftJoinIndices,
+    std::unique_ptr<rmm::device_uvector<cudf::size_type>> &&rightJoinIndices,
+    cudf::table_view const &leftTableView,
+    cudf::table_view const &rightTableView,
+    cudf::column_view const &filterColumn,
+    rmm::cuda_stream_view stream) {
+  // 1. Remove all filtered rows
+  // 2. Re insert rows from left table if they are missing
+  auto mr = cudf::get_current_device_resource_ref();
+  auto constexpr oobPolicy = cudf::out_of_bounds_policy::NULLIFY;
+
+  rmm::device_uvector<bool> unique_filter(leftTableView.num_rows(), stream, mr);
+  cudf::device_span<bool const> filter_column_span = filterColumn;
+  thrust::reduce_by_key(rmm::exec_policy_nosync(stream), leftJoinIndices->begin(), leftJoinIndices->end(), 
+      filter_column_span.begin(), thrust::make_discard_iterator(), unique_filter.begin(), cuda::std::equal_to{}, 
+      cuda::std::logical_or{});
+  auto num_extra_rows = thrust::count_if(rmm::exec_policy(stream), unique_filter.begin(), unique_filter.end(), [] __device__ (auto b) {
+        return !b;
+      });
+  
+  // Identify rows from the left table that are false in unique_filter
+  rmm::device_uvector<cudf::size_type> extra_rows(num_extra_rows, stream, mr);
+  thrust::copy_if(rmm::exec_policy_nosync(stream), thrust::counting_iterator(0), thrust::counting_iterator(leftTableView.num_rows()), 
+      extra_rows.begin(), 
+      [unique_filter = unique_filter.begin()] __device__(auto i) {
+        return !unique_filter[i];
+      });
+  cudf::device_span<cudf::size_type const> extra_rows_span{extra_rows};
+  auto left_extra_result = cudf::gather(leftTableView, cudf::column_view{extra_rows_span}, oobPolicy, stream);
+  auto extra_columns = left_extra_result->release();
+  for(auto col = 0; col < rightColsSize; col++) {
+    auto null_scalar = cudf::make_empty_scalar_like(joinedCols[col]->view(), stream);
+    //auto res = cudf::copy_if_else(joinedCols[col]->view(), *null_scalar, filterColumn, stream);
+    extra_columns.push_back(cudf::make_column_from_scalar(*null_scalar, num_extra_rows, stream, mr);
+  }
+  auto extra_table = std::make_unique<cudf::table>(std::move(extra_columns));
+  
+  // Apply the Filter
+  auto filterTable = std::make_unique<cudf::table>(std::move(joinedCols));
+  auto filteredTable =
+      cudf::apply_boolean_mask(*filterTable, filterColumn, stream);
+  std::vector<cudf::table_view> concat_table_views;
+  concat_table_views.push_back(filteredTable->view());
+  concat_table_views.push_back(extra_table->view());
+  auto filteredLeftJoinTable = cudf::concatenate(concat_table_views, stream, mr);
+
+  joinedCols = filteredLeftJoinTable->release();
+  
+  return joinedCols;
+}
+*/
+
+rmm::device_uvector<cudf::size_type> filter_left_joined_cols(
+    std::unique_ptr<rmm::device_uvector<cudf::size_type>> &&leftJoinIndices,
+    cudf::table_view const &leftTableView,
+    cudf::column_view const &filterColumn,
+    rmm::cuda_stream_view stream) {
+  // 1. Remove all filtered rows
+  // 2. Re insert rows from left table if they are missing
+  auto mr = cudf::get_current_device_resource_ref();
+  auto constexpr oobPolicy = cudf::out_of_bounds_policy::NULLIFY;
+
+  rmm::device_uvector<bool> unique_filter(leftTableView.num_rows(), stream, mr);
+  cudf::device_span<bool const> filter_column_span = filterColumn;
+  thrust::reduce_by_key(rmm::exec_policy_nosync(stream), leftJoinIndices->begin(), leftJoinIndices->end(), 
+      filter_column_span.begin(), thrust::make_discard_iterator(), unique_filter.begin(), cuda::std::equal_to{}, 
+      cuda::std::logical_or{});
+  auto num_extra_rows = thrust::count_if(rmm::exec_policy(stream), unique_filter.begin(), unique_filter.end(), [] __device__ (auto b) {
+        return !b;
+      });
+  
+  // Identify rows from the left table that are false in unique_filter
+  rmm::device_uvector<cudf::size_type> extra_rows(num_extra_rows, stream, mr);
+  thrust::copy_if(rmm::exec_policy_nosync(stream), thrust::counting_iterator(0), thrust::counting_iterator(leftTableView.num_rows()), 
+      extra_rows.begin(), 
+      [unique_filter = unique_filter.begin()] __device__(auto i) {
+        return !unique_filter[i];
+      });
+  return extra_rows;
+}
 
 }
