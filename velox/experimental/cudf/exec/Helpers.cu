@@ -46,6 +46,7 @@ sort_join_indices(
     std::unique_ptr<rmm::device_uvector<cudf::size_type>>&& rightJoinIndices,
     rmm::cuda_stream_view stream) {
 
+#if 0
   stream.synchronize();
   auto num_matches = leftJoinIndices->size();
   std::vector<cudf::size_type> h_leftJoinIndices(num_matches, -1);
@@ -56,13 +57,13 @@ sort_join_indices(
     std::cout << e << " ";
   }
   std::cout << std::endl;
+#endif
 
   thrust::sort_by_key(
       rmm::exec_policy(stream),
       leftJoinIndices->begin(),
       leftJoinIndices->end(),
       rightJoinIndices->begin());
-  stream.synchronize();
 
   return {std::move(leftJoinIndices), std::move(rightJoinIndices)};
 }
@@ -76,6 +77,7 @@ rmm::device_uvector<cudf::size_type> filter_left_joined_cols(
   // 2. Re insert rows from left table if they are missing
   auto mr = cudf::get_current_device_resource_ref();
 
+#if 0
   auto num_matches = leftJoinIndices->size();
   std::vector<cudf::size_type> h_leftJoinIndices(num_matches, false);
   cudaMemcpyAsync(h_leftJoinIndices.data(), leftJoinIndices->data(), num_matches * sizeof(cudf::size_type), cudaMemcpyDefault, stream);
@@ -87,8 +89,7 @@ rmm::device_uvector<cudf::size_type> filter_left_joined_cols(
   std::cout << std::endl;
 
   rmm::device_uvector<cudf::size_type> filter(num_matches, stream);
-  auto bool2int = thrust::make_transform_iterator(filterColumn.begin<bool>(), [] __device__(auto b) {return b ? 1 : 0; });
-  thrust::copy_n(rmm::exec_policy(stream), bool2int, num_matches, filter.begin());
+  thrust::copy_n(rmm::exec_policy(stream), thrust::make_transform_iterator(filterColumn.begin<bool>(), [] __device__(auto b) {return b ? 1 : 0; }), num_matches, filter.begin());
   std::vector<cudf::size_type> h_filter(num_matches, false);
   cudaMemcpyAsync(h_filter.data(), filter.data(), num_matches * sizeof(cudf::size_type), cudaMemcpyDefault, stream);
   stream.synchronize();
@@ -97,6 +98,7 @@ rmm::device_uvector<cudf::size_type> filter_left_joined_cols(
     std::cout << e << " ";
   }
   std::cout << std::endl;
+#endif
 
   rmm::device_uvector<int> unique_filter(leftTableView.num_rows(), stream, mr);
   thrust::reduce_by_key(
@@ -107,6 +109,7 @@ rmm::device_uvector<cudf::size_type> filter_left_joined_cols(
       thrust::make_discard_iterator(),
       unique_filter.begin());
 
+#if 0
   std::vector<int> h_unique_filter(leftTableView.num_rows(), -1);
   cudaMemcpyAsync(h_unique_filter.data(), unique_filter.data(), leftTableView.num_rows() * sizeof(int), cudaMemcpyDefault, stream);
   stream.synchronize();
@@ -115,6 +118,7 @@ rmm::device_uvector<cudf::size_type> filter_left_joined_cols(
     std::cout << e << " ";
   }
   std::cout << std::endl;
+#endif
 
   auto num_extra_rows = thrust::count_if(
       rmm::exec_policy(stream),
@@ -122,7 +126,6 @@ rmm::device_uvector<cudf::size_type> filter_left_joined_cols(
       unique_filter.end(),
       [] __device__(auto b) { return b == 0; });
 
-  std::cout << "num_extra_rows = " << num_extra_rows << std::endl;
   // Identify rows from the left table that are false in unique_filter
   rmm::device_uvector<cudf::size_type> extra_rows(num_extra_rows, stream, mr);
   thrust::copy_if(
