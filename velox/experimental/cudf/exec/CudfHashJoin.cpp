@@ -19,6 +19,7 @@
 #include "velox/experimental/cudf/exec/ToCudf.h"
 #include "velox/experimental/cudf/exec/Utilities.h"
 #include "velox/experimental/cudf/exec/VeloxCudfInterop.h"
+#include "velox/experimental/cudf/exec/Helpers.h"
 
 #include "velox/exec/Task.h"
 #include "velox/type/TypeUtil.h"
@@ -40,6 +41,7 @@
 #include <thrust/sort.h>
 
 #include <rmm/exec_policy.hpp>
+#include <rmm/device_uvector.hpp>
 
 namespace facebook::velox::cudf_velox {
 
@@ -639,6 +641,14 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
     VELOX_FAIL("Unsupported join type: ", joinNode_->joinType());
   }
 
+  auto cudfOutput = create_joined_table(
+      std::move(leftJoinIndices), std::move(rightJoinIndices), 
+      leftTableView, rightTableView, 
+      leftColumnIndicesToGather_, rightColumnIndicesToGather_,
+      leftColumnOutputIndices_, rightColumnOutputIndices_,
+      stream, cudf::get_current_device_resource_ref());
+
+  /*
   auto leftIndicesSpan = leftJoinIndices
       ? cudf::device_span<cudf::size_type const>{*leftJoinIndices}
       : cudf::device_span<cudf::size_type const>{};
@@ -852,12 +862,15 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
   for (int i = 0; i < rightColumnOutputIndices_.size(); i++) {
     joinedCols[rightColumnOutputIndices_[i]] = std::move(rightCols[i]);
   }
+  */
 
   input_.reset();
   finished_ = noMoreInput_;
 
+  /*
   auto cudfOutput = std::make_unique<cudf::table>(std::move(joinedCols));
   stream.synchronize();
+  */
   auto const size = cudfOutput->num_rows();
   if (cudfOutput->num_columns() == 0 or size == 0) {
     return nullptr;
