@@ -45,7 +45,6 @@ sort_join_indices(
     std::unique_ptr<rmm::device_uvector<cudf::size_type>>&& leftJoinIndices,
     std::unique_ptr<rmm::device_uvector<cudf::size_type>>&& rightJoinIndices,
     rmm::cuda_stream_view stream) {
-
 #if 0
   stream.synchronize();
   auto num_matches = leftJoinIndices->size();
@@ -105,7 +104,9 @@ rmm::device_uvector<cudf::size_type> filter_left_joined_cols(
       rmm::exec_policy(stream),
       leftJoinIndices->begin(),
       leftJoinIndices->end(),
-      thrust::make_transform_iterator(filterColumn.begin<bool>(), [] __device__(auto b) { return b ? 1 : 0; }),
+      thrust::make_transform_iterator(
+          filterColumn.begin<bool>(),
+          [] __device__(auto b) { return b ? 1 : 0; }),
       thrust::make_discard_iterator(),
       unique_filter.begin());
 
@@ -139,14 +140,19 @@ rmm::device_uvector<cudf::size_type> filter_left_joined_cols(
   return extra_rows;
 }
 
-void printTable (cudf::table_view const &t, rmm::cuda_stream_view stream) {
+void printTable(cudf::table_view const& t, rmm::cuda_stream_view stream) {
   std::cout << t.num_rows() << " " << t.num_columns() << std::endl;
-  for(auto i = 0; i < t.num_columns(); i++) {
+  for (auto i = 0; i < t.num_columns(); i++) {
     auto col = t.column(i);
     std::vector<cudf::size_type> h_col(col.size(), -1);
-    cudaMemcpyAsync(h_col.data(), col.data<cudf::size_type>(), col.size() * sizeof(cudf::size_type), cudaMemcpyDefault, stream);
+    cudaMemcpyAsync(
+        h_col.data(),
+        col.data<cudf::size_type>(),
+        col.size() * sizeof(cudf::size_type),
+        cudaMemcpyDefault,
+        stream);
     stream.synchronize();
-    for(auto e : h_col)
+    for (auto e : h_col)
       std::cout << e << " ";
     std::cout << std::endl;
   }

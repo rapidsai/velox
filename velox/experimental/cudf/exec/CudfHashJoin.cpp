@@ -651,7 +651,8 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
   auto constexpr oobPolicy = cudf::out_of_bounds_policy::NULLIFY;
   std::vector<std::unique_ptr<cudf::column>> joinedCols;
 
-  if (joinNode_->filter() && (joinNode_->isLeftJoin() || joinNode_->isInnerJoin())) {
+  if (joinNode_->filter() &&
+      (joinNode_->isLeftJoin() || joinNode_->isInnerJoin())) {
     std::tie(leftJoinIndices, rightJoinIndices) = sort_join_indices(
         std::move(leftJoinIndices), std::move(rightJoinIndices), stream);
     auto leftResult =
@@ -679,7 +680,7 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
     auto filterColumns = filterEvaluator.compute(
         joinedCols, stream, cudf::get_current_device_resource_ref());
     auto filterColumn = filterColumns[0]->view();
-    
+
     // If filter is not all false, apply the filter
     if (joinNode_->isInnerJoin()) {
       // apply the filter
@@ -687,8 +688,7 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
       auto filteredTable =
           cudf::apply_boolean_mask(*filterTable, filterColumn, stream);
       joinedCols = filteredTable->release();
-    }
-    else if(joinNode_->isLeftJoin()) {
+    } else if (joinNode_->isLeftJoin()) {
       auto extra_rows = filter_left_joined_cols(
           std::move(leftJoinIndices), leftTableView, filterColumn, stream);
       auto num_extra_rows = extra_rows.size();

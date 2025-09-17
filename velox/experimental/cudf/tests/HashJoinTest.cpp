@@ -32,8 +32,8 @@
 #include "velox/exec/tests/utils/PlanBuilder.h"
 #include "velox/exec/tests/utils/TempDirectoryPath.h"
 #include "velox/exec/tests/utils/VectorTestUtil.h"
-#include "velox/vector/fuzzer/VectorFuzzer.h"
 #include "velox/vector/VectorPrinter.h"
+#include "velox/vector/fuzzer/VectorFuzzer.h"
 
 #include <fmt/format.h>
 #include <re2/re2.h>
@@ -1959,12 +1959,12 @@ TEST_P(MultiThreadedHashJoinTest, leftJoinWithFilter) {
 }
 
 #if 0
-void printRowVectors(const std::vector<RowVectorPtr>& vectors, const std::string& label) {  
-  std::cout << "=== " << label << " ===" << std::endl;  
-  for (size_t i = 0; i < vectors.size(); ++i) {  
-    std::cout << "Batch " << i << ":" << std::endl;  
+void printRowVectors(const std::vector<RowVectorPtr>& vectors, const std::string& label) {
+  std::cout << "=== " << label << " ===" << std::endl;
+  for (size_t i = 0; i < vectors.size(); ++i) {
+    std::cout << "Batch " << i << ":" << std::endl;
     std::cout << printVector(*vectors[i]) << std::endl;
-  }  
+  }
 }
 
 TEST_P(MultiThreadedHashJoinTest, leftJoinWithFilterDebug) {
@@ -2025,11 +2025,11 @@ TEST_P(MultiThreadedHashJoinTest, leftJoinWithFilterDebug) {
                 5, [](auto row) { return 111 + row * 2; }),
         });
       });
-  printRowVectors(probeVectors, "Probe Table");  
+  printRowVectors(probeVectors, "Probe Table");
   printRowVectors(buildVectors, "Build Table");
   std::cout << "numDrivers_ = " << numDrivers_ << std::endl;
   // Additional filter.
-  
+
   {
     auto testProbeVectors = probeVectors;
     auto testBuildVectors = buildVectors;
@@ -2127,7 +2127,7 @@ TEST_P(MultiThreadedHashJoinTest, InnerJoinWithFilterDebug) {
                 5, [](auto row) { return 111 + row * 2; }),
         });
       });
-  printRowVectors(probeVectors, "Probe Table");  
+  printRowVectors(probeVectors, "Probe Table");
   printRowVectors(buildVectors, "Build Table");
   std::cout << "numDrivers_ = " << numDrivers_ << std::endl;
   // Additional filter.
