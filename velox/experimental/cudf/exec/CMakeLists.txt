@@ -43,12 +43,16 @@ target_link_libraries(
     CUDA::cudart
 )
 
-target_compile_options(velox_cudf_exec PRIVATE -Wno-missing-field-initializers $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
+target_compile_options(
+  velox_cudf_exec
+  PRIVATE -Wno-missing-field-initializers $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
+)
 
 set_target_properties(
-  velox_cudf_exec 
-  PROPERTIES 
-  CUDA_STANDARD 20
-  POSITION_INDEPENDENT_CODE ON
-  CUDA_SEPARABLE_COMPILATION ON
-  CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+  velox_cudf_exec
+  PROPERTIES
+    CUDA_STANDARD 20
+    POSITION_INDEPENDENT_CODE ON
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+)

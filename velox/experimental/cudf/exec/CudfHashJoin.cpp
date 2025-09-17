@@ -16,10 +16,10 @@
 
 #include "velox/experimental/cudf/exec/CudfHashJoin.h"
 #include "velox/experimental/cudf/exec/ExpressionEvaluator.h"
+#include "velox/experimental/cudf/exec/Helpers.h"
 #include "velox/experimental/cudf/exec/ToCudf.h"
 #include "velox/experimental/cudf/exec/Utilities.h"
 #include "velox/experimental/cudf/exec/VeloxCudfInterop.h"
-#include "velox/experimental/cudf/exec/Helpers.h"
 
 #include "velox/exec/Task.h"
 #include "velox/type/TypeUtil.h"
@@ -35,13 +35,12 @@
 #include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/stream_compaction.hpp>
 
-#include <nvtx3/nvtx3.hpp>
+#include <rmm/device_uvector.hpp>
+#include <rmm/exec_policy.hpp>
 
+#include <nvtx3/nvtx3.hpp>
 #include <thrust/count.h>
 #include <thrust/sort.h>
-
-#include <rmm/exec_policy.hpp>
-#include <rmm/device_uvector.hpp>
 
 namespace facebook::velox::cudf_velox {
 
@@ -709,13 +708,13 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
       filteredjoinedCols[rightColumnOutputIndices_[i]] =
           std::move(joinedCols[leftColsSize + rightColumnIndicesToGather_[i]]);
     }
-    
+
     joinedCols = std::move(filteredjoinedCols);
-  }
-  else if (joinNode_->filter() && joinNode_->isLeftJoin()) {
-    // for left join, we need to ensure that all rows in the left table exist after the 
-    // filter is applied
-    std::tie(leftJoinIndices, rightJoinIndices) = sort_join_indices(std::move(leftJoinIndices), std::move(rightJoinIndices), stream); 
+  } else if (joinNode_->filter() && joinNode_->isLeftJoin()) {
+    // for left join, we need to ensure that all rows in the left table exist
+    // after the filter is applied
+    std::tie(leftJoinIndices, rightJoinIndices) = sort_join_indices(
+        std::move(leftJoinIndices), std::move(rightJoinIndices), stream);
     auto leftResult =
         cudf::gather(leftTableView, leftIndicesCol, oobPolicy, stream);
     auto rightResult =
@@ -754,18 +753,27 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
 
     // If filter is not all true, apply the filter
     if (!(result->is_valid(stream) && result->value(stream))) {
-      auto extra_rows = filter_left_joined_cols(std::move(leftJoinIndices), leftTableView, filterColumn, stream);
+      auto extra_rows = filter_left_joined_cols(
+          std::move(leftJoinIndices), leftTableView, filterColumn, stream);
       auto num_extra_rows = extra_rows.size();
       cudf::device_span<cudf::size_type const> extra_rows_span{extra_rows};
-      auto left_extra_result = cudf::gather(leftTableView, cudf::column_view{extra_rows_span}, oobPolicy, stream);
+      auto left_extra_result = cudf::gather(
+          leftTableView, cudf::column_view{extra_rows_span}, oobPolicy, stream);
       auto extra_columns = left_extra_result->release();
-      for(auto col = 0; col < rightColsSize; col++) {
-        auto null_scalar = cudf::make_empty_scalar_like(joinedCols[col]->view(), stream);
-        //auto res = cudf::copy_if_else(joinedCols[col]->view(), *null_scalar, filterColumn, stream);
-        extra_columns.push_back(cudf::make_column_from_scalar(*null_scalar, num_extra_rows, stream, cudf::get_current_device_resource_ref()));
+      for (auto col = 0; col < rightColsSize; col++) {
+        auto null_scalar =
+            cudf::make_empty_scalar_like(joinedCols[col]->view(), stream);
+        // auto res = cudf::copy_if_else(joinedCols[col]->view(), *null_scalar,
+        // filterColumn, stream);
+        extra_columns.push_back(cudf::make_column_from_scalar(
+            *null_scalar,
+            num_extra_rows,
+            stream,
+            cudf::get_current_device_resource_ref()));
       }
-      auto extra_table = std::make_unique<cudf::table>(std::move(extra_columns));
-      
+      auto extra_table =
+          std::make_unique<cudf::table>(std::move(extra_columns));
+
       // Apply the Filter
       auto filterTable = std::make_unique<cudf::table>(std::move(joinedCols));
       auto filteredTable =
@@ -773,7 +781,8 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
       std::vector<cudf::table_view> concat_table_views;
       concat_table_views.push_back(filteredTable->view());
       concat_table_views.push_back(extra_table->view());
-      auto filteredLeftJoinTable = cudf::concatenate(concat_table_views, stream, cudf::get_current_device_resource_ref());
+      auto filteredLeftJoinTable = cudf::concatenate(
+          concat_table_views, stream, cudf::get_current_device_resource_ref());
 
       joinedCols = filteredLeftJoinTable->release();
     }
@@ -788,19 +797,19 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
       filteredjoinedCols[rightColumnOutputIndices_[i]] =
           std::move(joinedCols[leftColsSize + rightColumnIndicesToGather_[i]]);
     }
-    
+
     joinedCols = std::move(filteredjoinedCols);
-  }
-  else {
+  } else {
     auto leftInput = leftTableView.select(leftColumnIndicesToGather_);
     auto rightInput = rightTableView.select(rightColumnIndicesToGather_);
-    auto leftResult = cudf::gather(leftInput, leftIndicesCol, oobPolicy, stream);
+    auto leftResult =
+        cudf::gather(leftInput, leftIndicesCol, oobPolicy, stream);
     auto rightResult =
         cudf::gather(rightInput, rightIndicesCol, oobPolicy, stream);
 
     if (cudfDebugEnabled()) {
-      std::cout << "Left result number of columns: " << leftResult->num_columns()
-                << std::endl;
+      std::cout << "Left result number of columns: "
+                << leftResult->num_columns() << std::endl;
       std::cout << "Right result number of columns: "
                 << rightResult->num_columns() << std::endl;
     }
@@ -808,7 +817,8 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
     auto leftCols = leftResult->release();
     auto rightCols = rightResult->release();
     joinedCols.resize(outputType_->names().size());
-    //auto joinedCols = std::vector<std::unique_ptr<cudf::column>>(outputType_->names().size());
+    // auto joinedCols =
+    // std::vector<std::unique_ptr<cudf::column>>(outputType_->names().size());
     for (int i = 0; i < leftColumnOutputIndices_.size(); i++) {
       joinedCols[leftColumnOutputIndices_[i]] = std::move(leftCols[i]);
     }
