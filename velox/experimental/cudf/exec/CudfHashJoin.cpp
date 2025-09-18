@@ -23,23 +23,16 @@
 #include "velox/exec/Task.h"
 #include "velox/type/TypeUtil.h"
 
-#include <cudf/aggregation.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/concatenate.hpp>
 #include <cudf/copying.hpp>
 #include <cudf/join/join.hpp>
 #include <cudf/join/mixed_join.hpp>
 #include <cudf/null_mask.hpp>
-#include <cudf/reduction.hpp>
 #include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/stream_compaction.hpp>
 
-#include <rmm/device_uvector.hpp>
-#include <rmm/exec_policy.hpp>
-
 #include <nvtx3/nvtx3.hpp>
-#include <thrust/count.h>
-#include <thrust/sort.h>
 
 namespace facebook::velox::cudf_velox {
 
