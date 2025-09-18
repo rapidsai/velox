@@ -1087,8 +1087,7 @@ class ArrowBridgeArrayImportTest : public ArrowBridgeArrayExportTest {
   template <typename T>
   ArrowArray fillArrowArray(
       const std::vector<std::optional<T>>& inputValues,
-      ArrowContextHolder& holder,
-      const char* format = nullptr) {
+      ArrowContextHolder& holder) {
     using TArrow = typename VeloxToArrowType<T>::type;
     int64_t length = inputValues.size();
     int64_t nullCount = 0;
@@ -1121,10 +1120,7 @@ class ArrowBridgeArrayImportTest : public ArrowBridgeArrayExportTest {
   template <typename TOffsets = int32_t>
   ArrowArray fillArrowArray(
       const std::vector<std::optional<std::string>>& inputValues,
-      ArrowContextHolder& holder,
-      const char* format = nullptr) {
-    bool const is32 =
-        format == nullptr || (format[0] != 'U' && format[0] != 'Z');
+      ArrowContextHolder& holder) {
     int64_t length = inputValues.size();
     int64_t nullCount = 0;
 
@@ -1143,11 +1139,7 @@ class ArrowBridgeArrayImportTest : public ArrowBridgeArrayExportTest {
     auto rawNulls = holder.nulls->asMutable<uint64_t>();
     auto rawOffsets = holder.offsets->asMutable<TOffsets>();
     auto rawValues = holder.values->asMutable<char>();
-    if (is32) {
-      *rawOffsets = 0;
-    } else {
-      *rawOffsets64 = 0;
-    }
+    *rawOffsets = 0;
 
     holder.buffers[2] = (length == 0) ? nullptr : (const void*)rawValues;
     holder.buffers[1] = (length == 0) ? nullptr : (const void*)rawOffsets;
@@ -1156,26 +1148,16 @@ class ArrowBridgeArrayImportTest : public ArrowBridgeArrayExportTest {
       if (inputValues[i] == std::nullopt) {
         bits::setNull(rawNulls, i);
         nullCount++;
-        if (is32) {
-          *(rawOffsets + 1) = *rawOffsets;
-          ++rawOffsets;
-        } else {
-          *(rawOffsets64 + 1) = *rawOffsets64;
-          ++rawOffsets64;
-        }
+        *(rawOffsets + 1) = *rawOffsets;
+        ++rawOffsets;
       } else {
         bits::clearNull(rawNulls, i);
         const auto& val = *inputValues[i];
 
         std::memcpy(rawValues, val.data(), val.size());
         rawValues += val.size();
-        if (is32) {
-          *(rawOffsets + 1) = *rawOffsets + val.size();
-          ++rawOffsets;
-        } else {
-          *(rawOffsets64 + 1) = *rawOffsets64 + val.size();
-          ++rawOffsets64;
-        }
+        *(rawOffsets + 1) = *rawOffsets + val.size();
+        ++rawOffsets;
       }
     }
 
