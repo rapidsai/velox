@@ -703,17 +703,17 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
           std::move(joinedCols[leftColsSize + rightColumnIndicesToGather_[i]]);
     }
     joinedCols = std::move(filteredjoinedCols);
-  }
-  else {
+  } else {
     auto leftInput = leftTableView.select(leftColumnIndicesToGather_);
     auto rightInput = rightTableView.select(rightColumnIndicesToGather_);
-    auto leftResult = cudf::gather(leftInput, leftIndicesCol, oobPolicy, stream);
+    auto leftResult =
+        cudf::gather(leftInput, leftIndicesCol, oobPolicy, stream);
     auto rightResult =
         cudf::gather(rightInput, rightIndicesCol, oobPolicy, stream);
 
     if (cudfDebugEnabled()) {
-      std::cout << "Left result number of columns: " << leftResult->num_columns()
-                << std::endl;
+      std::cout << "Left result number of columns: "
+                << leftResult->num_columns() << std::endl;
       std::cout << "Right result number of columns: "
                 << rightResult->num_columns() << std::endl;
     }
