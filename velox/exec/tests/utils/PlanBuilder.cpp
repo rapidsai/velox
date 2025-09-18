@@ -19,7 +19,6 @@
 #include "velox/connectors/hive/TableHandle.h"
 #include "velox/connectors/tpcds/TpcdsConnector.h"
 #include "velox/connectors/tpch/TpchConnector.h"
-#include "velox/core/FilterToExpression.h"
 #include "velox/duckdb/conversion/DuckParser.h"
 #include "velox/exec/Aggregate.h"
 #include "velox/exec/HashPartitionFunction.h"
@@ -27,6 +26,7 @@
 #include "velox/exec/TableWriter.h"
 #include "velox/exec/WindowFunction.h"
 #include "velox/exec/tests/utils/AggregationResolver.h"
+#include "velox/exec/tests/utils/FilterToExpression.h"
 #include "velox/expression/Expr.h"
 #include "velox/expression/ExprToSubfieldFilter.h"
 #include "velox/expression/SignatureBinder.h"
@@ -258,9 +258,7 @@ void addConjunct(
     conjunction = conjunct;
   } else {
     conjunction = std::make_shared<core::CallTypedExpr>(
-        BOOLEAN(),
-        std::vector<core::TypedExprPtr>{conjunction, conjunct},
-        "and");
+        BOOLEAN(), "and", conjunction, conjunct);
   }
 }
 } // namespace
@@ -304,7 +302,7 @@ core::PlanNodePtr PlanBuilder::TableScanBuilder::build(core::PlanNodeId id) {
 
   if (filtersAsNode_ || useCudf) {
     for (const auto& [subfield, filter] : subfieldFiltersMap_) {
-      auto filterExpr = core::filterToExpr(
+      auto filterExpr = core::test::filterToExpr(
           subfield, filter.get(), parseType, planBuilder_.pool_);
 
       addConjunct(filterExpr, filterNodeExpr);
@@ -811,9 +809,8 @@ PlanBuilder& PlanBuilder::tableWriteMerge() {
       core::AggregationNode::Aggregate aggregate = writerSpec.aggregates[i];
       aggregate.call = std::make_shared<core::CallTypedExpr>(
           aggregate.call->type(),
-          std::vector<core::TypedExprPtr>{
-              field(inputType, writerSpec.aggregateNames[i])},
-          aggregate.call->name());
+          aggregate.call->name(),
+          field(inputType, writerSpec.aggregateNames[i]));
       aggregates.push_back(std::move(aggregate));
       aggregateNames.push_back(fmt::format("a{}", i));
     }
@@ -1996,12 +1993,13 @@ PlanBuilder& PlanBuilder::indexLookupJoin(
     const std::vector<std::string>& rightKeys,
     const core::TableScanNodePtr& right,
     const std::vector<std::string>& joinConditions,
-    bool includeMatchColumn,
+    const std::string& filter,
+    bool hasMarker,
     const std::vector<std::string>& outputLayout,
     core::JoinType joinType) {
   VELOX_CHECK_NOT_NULL(planNode_, "indexLookupJoin cannot be the source node");
   auto inputType = concat(planNode_->outputType(), right->outputType());
-  if (includeMatchColumn) {
+  if (hasMarker) {
     auto names = inputType->names();
     names.push_back(outputLayout.back());
     auto types = inputType->children();
@@ -2019,13 +2017,20 @@ PlanBuilder& PlanBuilder::indexLookupJoin(
         parseIndexJoinCondition(joinCondition, inputType, pool_));
   }
 
+  // Parse filter expression if provided
+  core::TypedExprPtr filterExpr;
+  if (!filter.empty()) {
+    filterExpr = parseExpr(filter, inputType, options_, pool_);
+  }
+
   planNode_ = std::make_shared<core::IndexLookupJoinNode>(
       nextPlanNodeId(),
       joinType,
       std::move(leftKeyFields),
       std::move(rightKeyFields),
       std::move(joinConditionPtrs),
-      includeMatchColumn,
+      filterExpr,
+      hasMarker,
       std::move(planNode_),
       right,
       std::move(outputType));
@@ -2037,7 +2042,7 @@ PlanBuilder& PlanBuilder::unnest(
     const std::vector<std::string>& replicateColumns,
     const std::vector<std::string>& unnestColumns,
     const std::optional<std::string>& ordinalColumn,
-    const std::optional<std::string>& emptyUnnestValueName) {
+    const std::optional<std::string>& markerName) {
   VELOX_CHECK_NOT_NULL(planNode_, "Unnest cannot be the source node");
   std::vector<std::shared_ptr<const core::FieldAccessTypedExpr>>
       replicateFields;
@@ -2073,7 +2078,7 @@ PlanBuilder& PlanBuilder::unnest(
       unnestFields,
       unnestNames,
       ordinalColumn,
-      emptyUnnestValueName,
+      markerName,
       planNode_);
   VELOX_CHECK(planNode_->supportsBarrier());
   return *this;
@@ -2531,5 +2536,51 @@ core::TypedExprPtr PlanBuilder::inferTypes(
   VELOX_CHECK_NOT_NULL(planNode_);
   return core::Expressions::inferTypes(
       untypedExpr, planNode_->outputType(), pool_);
+}
+
+core::PlanNodePtr PlanBuilder::IndexLookupJoinBuilder::build(
+    const core::PlanNodeId& id) {
+  VELOX_CHECK_NOT_NULL(
+      planBuilder_.planNode_, "IndexLookupJoin cannot be the source node");
+  auto inputType =
+      concat(planBuilder_.planNode_->outputType(), indexSource_->outputType());
+  if (hasMarker_) {
+    auto names = inputType->names();
+    names.push_back(outputLayout_.back());
+    auto types = inputType->children();
+    types.push_back(BOOLEAN());
+    inputType = ROW(std::move(names), std::move(types));
+  }
+  auto outputType = extract(inputType, outputLayout_);
+  auto leftKeyFields =
+      PlanBuilder::fields(planBuilder_.planNode_->outputType(), leftKeys_);
+  auto rightKeyFields =
+      PlanBuilder::fields(indexSource_->outputType(), rightKeys_);
+
+  std::vector<core::IndexLookupConditionPtr> joinConditionPtrs{};
+  joinConditionPtrs.reserve(joinConditions_.size());
+  for (const auto& joinCondition : joinConditions_) {
+    joinConditionPtrs.push_back(PlanBuilder::parseIndexJoinCondition(
+        joinCondition, inputType, planBuilder_.pool_));
+  }
+
+  // Parse filter expression if provided
+  core::TypedExprPtr filterExpr;
+  if (!filter_.empty()) {
+    filterExpr = parseExpr(
+        filter_, inputType, planBuilder_.options_, planBuilder_.pool_);
+  }
+
+  return std::make_shared<core::IndexLookupJoinNode>(
+      id,
+      joinType_,
+      std::move(leftKeyFields),
+      std::move(rightKeyFields),
+      std::move(joinConditionPtrs),
+      filterExpr,
+      hasMarker_,
+      std::move(planBuilder_.planNode_),
+      indexSource_,
+      std::move(outputType));
 }
 } // namespace facebook::velox::exec::test

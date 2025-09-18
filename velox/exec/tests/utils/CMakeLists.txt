@@ -21,6 +21,7 @@ add_library(
   AggregationResolver.cpp
   AssertQueryBuilder.cpp
   ArbitratorTestUtil.cpp
+  FilterToExpression.cpp
   HiveConnectorTestBase.cpp
   IndexLookupJoinTestBase.cpp
   LocalExchangeSource.cpp
@@ -65,5 +66,5 @@ target_link_libraries(
 
 if(VELOX_ENABLE_CUDF)
   target_compile_definitions(velox_exec_test_lib PRIVATE VELOX_ENABLE_CUDF)
-  target_link_libraries(velox_exec_test_lib velox_cudf_exec velox_cudf_parquet_connector)
+  target_link_libraries(velox_exec_test_lib velox_cudf_exec velox_cudf_hive_connector)
 endif()

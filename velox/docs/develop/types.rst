@@ -115,6 +115,7 @@ DATE                    INTEGER
 DECIMAL                 BIGINT if precision <= 18, HUGEINT if precision >= 19
 INTERVAL DAY TO SECOND  BIGINT
 INTERVAL YEAR TO MONTH  INTEGER
+TIME                    BIGINT
 ======================  ======================================================
 
 DECIMAL type carries additional `precision`,
@@ -129,6 +130,9 @@ upto 38 precision, with a range of :math:`[-10^{38} + 1, +10^{38} - 1]`.
 
 All the three values, precision, scale, unscaled value are required to represent a
 decimal value.
+
+TIME type represents time in milliseconds from midnight UTC. Thus min/max value can  range from UTC-14:00 at 00:00:00 to UTC+14:00 at 23:59:59.999 modulo 24 hours.
+TIME type is backed by BIGINT physical type.
 
 Custom Types
 ~~~~~~~~~~~~
@@ -177,6 +181,7 @@ GEOMETRY                  VARBINARY
 TDIGEST                   VARBINARY
 QDIGEST                   VARBINARY
 BIGINT_ENUM               BIGINT
+VARCHAR_ENUM              VARCHAR
 ========================  =====================
 
 TIMESTAMP WITH TIME ZONE represents a time point in milliseconds precision
@@ -232,6 +237,14 @@ different enum type as a singleton. The LongEnumParameter is used as the key to 
 and a new instance is only created if it has not been created with the given LongEnumParameter.
 Casting is permitted from any integer type to an enum type. Casting is only permitted from an enum type
 to a BIGINT type. Casting between different enum types is not permitted.
+Comparison operations are only allowed between values of the same enum type.
+
+VARCHAR_ENUM(VarcharEnumParameter) type represents an enumerated value where the physical type is VARCHAR.
+It takes one VarcharEnumParameter as parameter, which consists of a string name and a mapping of
+string keys to VARCHAR values.
+Similar to BIGINT_ENUM, there is a static cache which stores instances of different VARCHAR_ENUM types, with the
+VarcharEnumParameter as the key.
+Casting is only permitted to and from VARCHAR type, and is case-sensitive. Casting between different enum types is not permitted.
 Comparison operations are only allowed between values of the same enum type.
 
 Spark Types

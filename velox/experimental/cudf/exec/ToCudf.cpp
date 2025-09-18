@@ -14,8 +14,9 @@
  * limitations under the License.
  */
 
-#include "velox/experimental/cudf/connectors/parquet/CudfHiveConnector.h"
-#include "velox/experimental/cudf/connectors/parquet/ParquetDataSource.h"
+#include "velox/experimental/cudf/connectors/hive/CudfHiveConnector.h"
+#include "velox/experimental/cudf/connectors/hive/CudfHiveDataSource.h"
+#include "velox/experimental/cudf/exec/CudfAssignUniqueId.h"
 #include "velox/experimental/cudf/exec/CudfConversion.h"
 #include "velox/experimental/cudf/exec/CudfFilterProject.h"
 #include "velox/experimental/cudf/exec/CudfHashAggregation.h"
@@ -23,12 +24,12 @@
 #include "velox/experimental/cudf/exec/CudfLimit.h"
 #include "velox/experimental/cudf/exec/CudfLocalPartition.h"
 #include "velox/experimental/cudf/exec/CudfOrderBy.h"
+#include "velox/experimental/cudf/exec/CudfTopN.h"
 #include "velox/experimental/cudf/exec/ExpressionEvaluator.h"
 #include "velox/experimental/cudf/exec/ToCudf.h"
 #include "velox/experimental/cudf/exec/Utilities.h"
 
-#include "velox/connectors/hive/HiveConnector.h"
-#include "velox/connectors/hive/TableHandle.h"
+#include "velox/exec/AssignUniqueId.h"
 #include "velox/exec/Driver.h"
 #include "velox/exec/FilterProject.h"
 #include "velox/exec/HashAggregation.h"
@@ -38,6 +39,7 @@
 #include "velox/exec/Operator.h"
 #include "velox/exec/OrderBy.h"
 #include "velox/exec/TableScan.h"
+#include "velox/exec/TopN.h"
 
 #include <cudf/detail/nvtx/ranges.hpp>
 
@@ -103,7 +105,7 @@ bool CompileState::compile(bool force_replace) {
     auto const& connector = velox::connector::getConnector(
         tableScanNode->tableHandle()->connectorId());
     auto cudfHiveConnector = std::dynamic_pointer_cast<
-        facebook::velox::cudf_velox::connector::parquet::CudfHiveConnector>(
+        facebook::velox::cudf_velox::connector::hive::CudfHiveConnector>(
         connector);
     if (!cudfHiveConnector) {
       return false;
@@ -146,10 +148,12 @@ bool CompileState::compile(bool force_replace) {
           const exec::Operator* op) {
         return isAnyOf<
                    exec::OrderBy,
+                   exec::TopN,
                    exec::HashAggregation,
                    exec::Limit,
                    exec::LocalPartition,
-                   exec::LocalExchange>(op) ||
+                   exec::LocalExchange,
+                   exec::AssignUniqueId>(op) ||
             isFilterProjectSupported(op) || isJoinSupported(op) ||
             isTableScanSupported(op);
       };
@@ -164,9 +168,11 @@ bool CompileState::compile(bool force_replace) {
                           isJoinSupported](const exec::Operator* op) {
     return isAnyOf<
                exec::OrderBy,
+               exec::TopN,
                exec::HashAggregation,
                exec::Limit,
-               exec::LocalPartition>(op) ||
+               exec::LocalPartition,
+               exec::AssignUniqueId>(op) ||
         isFilterProjectSupported(op) || isJoinSupported(op);
   };
   auto producesGpuOutput = [isFilterProjectSupported,
@@ -174,9 +180,11 @@ bool CompileState::compile(bool force_replace) {
                             isTableScanSupported](const exec::Operator* op) {
     return isAnyOf<
                exec::OrderBy,
+               exec::TopN,
                exec::HashAggregation,
                exec::Limit,
-               exec::LocalExchange>(op) ||
+               exec::LocalExchange,
+               exec::AssignUniqueId>(op) ||
         isFilterProjectSupported(op) ||
         (isAnyOf<exec::HashProbe>(op) && isJoinSupported(op)) ||
         (isTableScanSupported(op));
@@ -264,6 +272,12 @@ bool CompileState::compile(bool force_replace) {
       VELOX_CHECK(planNode != nullptr);
       replaceOp.push_back(std::make_unique<CudfOrderBy>(id, ctx, planNode));
       replaceOp.back()->initialize();
+    } else if (auto topNOp = dynamic_cast<exec::TopN*>(oper)) {
+      auto planNode = std::dynamic_pointer_cast<const core::TopNNode>(
+          getPlanNode(topNOp->planNodeId()));
+      VELOX_CHECK(planNode != nullptr);
+      replaceOp.push_back(std::make_unique<CudfTopN>(id, ctx, planNode));
+      replaceOp.back()->initialize();
     } else if (auto hashAggOp = dynamic_cast<exec::HashAggregation*>(oper)) {
       auto planNode = std::dynamic_pointer_cast<const core::AggregationNode>(
           getPlanNode(hashAggOp->planNodeId()));
@@ -308,6 +322,18 @@ bool CompileState::compile(bool force_replace) {
     } else if (
         auto localExchangeOp = dynamic_cast<exec::LocalExchange*>(oper)) {
       keepOperator = 1;
+    } else if (
+        auto assignUniqueIdOp = dynamic_cast<exec::AssignUniqueId*>(oper)) {
+      auto planNode = std::dynamic_pointer_cast<const core::AssignUniqueIdNode>(
+          getPlanNode(assignUniqueIdOp->planNodeId()));
+      VELOX_CHECK(planNode != nullptr);
+      replaceOp.push_back(std::make_unique<CudfAssignUniqueId>(
+          id,
+          ctx,
+          planNode,
+          planNode->taskUniqueId(),
+          planNode->uniqueIdCounter()));
+      replaceOp.back()->initialize();
     }
 
     if (producesGpuOutput(oper) and
@@ -382,6 +408,9 @@ struct CudfDriverAdapter {
 
   // Call operator needed by DriverAdapter
   bool operator()(const exec::DriverFactory& factory, exec::Driver& driver) {
+    if (!driver.driverCtx()->queryConfig().get<bool>(kCudfEnabled, true)) {
+      return false;
+    }
     auto state = CompileState(factory, driver);
     auto res = state.compile(force_replace_);
     return res;

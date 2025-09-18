@@ -14,6 +14,7 @@
 
 add_library(
   velox_cudf_exec
+  CudfAssignUniqueId.cpp
   CudfConversion.cpp
   CudfFilterProject.cpp
   CudfHashAggregation.cpp
@@ -22,6 +23,7 @@ add_library(
   CudfLimit.cpp
   CudfLocalPartition.cpp
   CudfOrderBy.cpp
+  CudfTopN.cpp
   DebugUtil.cpp
   ExpressionEvaluator.cpp
   ToCudf.cpp
@@ -39,8 +41,7 @@ target_link_libraries(
     velox_common_base
     velox_cudf_vector
     velox_exec
-    velox_cudf_parquet_connector
-    CUDA::cudart
+    velox_cudf_hive_connector
 )
 
 target_compile_options(

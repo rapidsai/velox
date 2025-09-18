@@ -246,6 +246,18 @@ struct BigintEnumT {
 template <typename E>
 using BigintEnum = CustomType<BigintEnumT<E>>;
 
+// Type to use for inputs and outputs of simple functions with VarcharEnum
+// types. E.g. arg_type<VarcharEnum<E1>> and out_type<VarcharEnum<E1>>.
+template <typename E>
+struct VarcharEnumT {
+  using type = Varchar;
+
+  static inline const std::string typeName = "varchar_enum(" + E::name() + ")";
+};
+
+template <typename E>
+using VarcharEnum = CustomType<VarcharEnumT<E>>;
+
 template <typename T>
 struct Constant {};
 
@@ -342,18 +354,24 @@ template <>
 struct SimpleTypeTrait<Varbinary> : public TypeTraits<TypeKind::VARBINARY> {};
 
 template <>
-struct SimpleTypeTrait<Date> : public SimpleTypeTrait<int32_t> {
+struct SimpleTypeTrait<Date> : public TypeTraits<TypeKind::INTEGER> {
   static constexpr const char* name = "DATE";
 };
 
 template <>
-struct SimpleTypeTrait<IntervalDayTime> : public SimpleTypeTrait<int64_t> {
+struct SimpleTypeTrait<IntervalDayTime> : public TypeTraits<TypeKind::BIGINT> {
   static constexpr const char* name = "INTERVAL DAY TO SECOND";
 };
 
 template <>
-struct SimpleTypeTrait<IntervalYearMonth> : public SimpleTypeTrait<int32_t> {
+struct SimpleTypeTrait<IntervalYearMonth>
+    : public TypeTraits<TypeKind::INTEGER> {
   static constexpr const char* name = "INTERVAL YEAR TO MONTH";
+};
+
+template <>
+struct SimpleTypeTrait<Time> : public TypeTraits<TypeKind::BIGINT> {
+  static constexpr const char* name = "TIME";
 };
 
 template <typename T, bool comparable, bool orderable>

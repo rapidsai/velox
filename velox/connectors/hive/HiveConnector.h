@@ -20,8 +20,6 @@
 #include "velox/connectors/hive/HiveConfig.h"
 #include "velox/core/PlanNode.h"
 
-#include <functional>
-
 namespace facebook::velox::dwio::common {
 class DataSink;
 class DataSource;
@@ -38,11 +36,6 @@ class HiveConnector : public Connector {
 
   bool canAddDynamicFilter() const override {
     return true;
-  }
-
-  ConnectorMetadata* metadata() const override {
-    VELOX_CHECK_NOT_NULL(metadata_);
-    return metadata_.get();
   }
 
   std::unique_ptr<DataSource> createDataSource(
@@ -67,8 +60,8 @@ class HiveConnector : public Connector {
       ConnectorQueryCtx* connectorQueryCtx,
       CommitStrategy commitStrategy) override;
 
-  folly::Executor* executor() const override {
-    return executor_;
+  folly::Executor* ioExecutor() const override {
+    return ioExecutor_;
   }
 
   FileHandleCacheStats fileHandleCacheStats() {
@@ -81,11 +74,12 @@ class HiveConnector : public Connector {
     return fileHandleFactory_.clearCache();
   }
 
+  static void registerSerDe();
+
  protected:
   const std::shared_ptr<HiveConfig> hiveConfig_;
   FileHandleFactory fileHandleFactory_;
-  folly::Executor* executor_;
-  std::shared_ptr<ConnectorMetadata> metadata_;
+  folly::Executor* ioExecutor_;
 };
 
 class HiveConnectorFactory : public ConnectorFactory {
@@ -148,30 +142,13 @@ class HivePartitionFunctionSpec : public core::PartitionFunctionSpec {
       const folly::dynamic& obj,
       void* context);
 
+  static void registerSerDe();
+
  private:
   const int numBuckets_;
   const std::vector<int> bucketToPartition_;
   const std::vector<column_index_t> channels_;
   const std::vector<VectorPtr> constValues_;
 };
-
-void registerHivePartitionFunctionSerDe();
-
-/// Hook for connecting metadata functions to a HiveConnector. Each registered
-/// factory is called after initializing a HiveConnector until one of these
-/// returns a ConnectorMetadata instance.
-class HiveConnectorMetadataFactory {
- public:
-  virtual ~HiveConnectorMetadataFactory() = default;
-
-  /// Returns a ConnectorMetadata to complete'hiveConnector' if 'this'
-  /// recognizes a data source, e.g. local file system or remote metadata
-  /// service associated to configs in 'hiveConnector'.
-  virtual std::shared_ptr<ConnectorMetadata> create(
-      HiveConnector* connector) = 0;
-};
-
-bool registerHiveConnectorMetadataFactory(
-    std::unique_ptr<HiveConnectorMetadataFactory>);
 
 } // namespace facebook::velox::connector::hive
