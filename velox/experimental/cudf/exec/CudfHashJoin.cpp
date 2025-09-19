@@ -665,8 +665,7 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
     auto leftColsSize = leftResult->num_columns();
     auto rightColsSize = rightResult->num_columns();
 
-    std::vector<std::unique_ptr<cudf::column>> joinedCols =
-        leftResult->release();
+    joinedCols = leftResult->release();
     auto rightCols = rightResult->release();
     joinedCols.insert(
         joinedCols.end(),
