@@ -190,7 +190,9 @@ void CudfHashJoinBuild::noMoreInput() {
   // Only need to construct hash_join object if it's an inner join or left join
   // and doesn't have a filter. All other cases use a standalone function in
   // cudf
-  bool buildHashJoin = (joinNode_->isInnerJoin() || (joinNode_->isLeftJoin() && !joinNode_->filter()));
+  bool buildHashJoin =
+      (joinNode_->isInnerJoin() ||
+       (joinNode_->isLeftJoin() && !joinNode_->filter()));
   auto hashObject = (buildHashJoin) ? std::make_shared<cudf::hash_join>(
                                           tbl->view().select(buildKeyIndices),
                                           cudf::null_equality::UNEQUAL,
