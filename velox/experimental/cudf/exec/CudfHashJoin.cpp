@@ -797,23 +797,18 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
     }
     cudfOutputs.push_back(std::make_unique<cudf::table>(std::move(joinedCols)));
     stream.synchronize();
-
-    if (cudfOutputs.back()->num_columns() == 0 or
-        cudfOutputs.back()->num_rows() == 0) {
-      return nullptr;
-    }
   }
 
   input_.reset();
   finished_ = noMoreInput_;
 
   auto cudfOutput = concatenateTables(std::move(cudfOutputs), stream);
+  auto const size = cudfOutput->num_rows();
+  if (cudfOutput->num_columns() == 0 or size == 0) {
+    return nullptr;
+  }
   return std::make_shared<CudfVector>(
-      pool(),
-      outputType_,
-      cudfOutput->num_rows(),
-      std::move(cudfOutput),
-      stream);
+      pool(), outputType_, size, std::move(cudfOutput), stream);
 }
 
 bool CudfHashJoinProbe::skipProbeOnEmptyBuild() const {

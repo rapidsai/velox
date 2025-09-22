@@ -175,11 +175,11 @@ std::vector<std::unique_ptr<cudf::table>> getConcatenatedTableBatched(
     std::vector<CudfVectorPtr>& tables,
     const TypePtr& tableType,
     rmm::cuda_stream_view stream) {
-  std::vector<std::unique_ptr<cudf::table>> concat_tables;
+  std::vector<std::unique_ptr<cudf::table>> concatTables;
   // Check for empty vector
   if (tables.size() == 0) {
-    concat_tables.push_back(makeEmptyTable(tableType));
-    return concat_tables;
+    concatTables.push_back(makeEmptyTable(tableType));
+    return concatTables;
   }
 
   auto inputStreams = std::vector<rmm::cuda_stream_view>();
@@ -197,26 +197,37 @@ std::vector<std::unique_ptr<cudf::table>> getConcatenatedTableBatched(
   cudf::detail::join_streams(inputStreams, stream);
 
   if (tables.size() == 1) {
-    concat_tables.push_back(tables[0]->release());
-    return concat_tables;
+    concatTables.push_back(tables[0]->release());
+    return concatTables;
   }
 
   std::vector<std::unique_ptr<cudf::table>> outputTables;
-  size_t total_numrows = 0, startpos = 0;
-  for (size_t i = 0; i < tables.size(); i++) {
-    auto num_rows = static_cast<size_t>(tableViews[i].num_rows());
-    if (total_numrows + num_rows >=
-        static_cast<size_t>(std::numeric_limits<cudf::size_type>::max())) {
+  auto const maxRows =
+      static_cast<size_t>(std::numeric_limits<cudf::size_type>::max());
+  size_t startpos = 0;
+  size_t runningRows = 0;
+  for (size_t i = 0; i < tableViews.size(); ++i) {
+    auto const numRows = static_cast<size_t>(tableViews[i].num_rows());
+    // If adding this table would exceed the limit, flush current batch
+    // [startpos, i).
+    if (runningRows > 0 && runningRows + numRows > maxRows) {
       outputTables.push_back(cudf::concatenate(
           std::vector<cudf::table_view>(
               tableViews.begin() + startpos, tableViews.begin() + i),
           stream,
           cudf::get_current_device_resource_ref()));
       startpos = i;
-      total_numrows = num_rows;
-    } else {
-      total_numrows += num_rows;
+      runningRows = 0;
     }
+    runningRows += numRows;
+  }
+  // Flush the final batch [startpos, end).
+  if (startpos < tableViews.size()) {
+    outputTables.push_back(cudf::concatenate(
+        std::vector<cudf::table_view>(
+            tableViews.begin() + startpos, tableViews.end()),
+        stream,
+        cudf::get_current_device_resource_ref()));
   }
   stream.synchronize();
   return outputTables;
