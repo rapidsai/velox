@@ -35,6 +35,7 @@
 #include <common/base/Exceptions.h>
 
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <string_view>
 
@@ -168,6 +169,57 @@ std::unique_ptr<cudf::table> getConcatenatedTable(
       tableViews, stream, cudf::get_current_device_resource_ref());
   stream.synchronize();
   return output;
+}
+
+std::vector<std::unique_ptr<cudf::table>> getConcatenatedTableBatched(
+    std::vector<CudfVectorPtr>& tables,
+    const TypePtr& tableType,
+    rmm::cuda_stream_view stream) {
+  std::vector<std::unique_ptr<cudf::table>> concat_tables;
+  // Check for empty vector
+  if (tables.size() == 0) {
+    concat_tables.push_back(makeEmptyTable(tableType));
+    return concat_tables;
+  }
+
+  auto inputStreams = std::vector<rmm::cuda_stream_view>();
+  auto tableViews = std::vector<cudf::table_view>();
+
+  inputStreams.reserve(tables.size());
+  tableViews.reserve(tables.size());
+
+  for (const auto& table : tables) {
+    VELOX_CHECK_NOT_NULL(table);
+    tableViews.push_back(table->getTableView());
+    inputStreams.push_back(table->stream());
+  }
+
+  cudf::detail::join_streams(inputStreams, stream);
+
+  if (tables.size() == 1) {
+    concat_tables.push_back(tables[0]->release());
+    return concat_tables;
+  }
+
+  std::vector<std::unique_ptr<cudf::table>> outputTables;
+  size_t total_numrows = 0, startpos = 0;
+  for (size_t i = 0; i < tables.size(); i++) {
+    auto num_rows = static_cast<size_t>(tableViews[i].num_rows());
+    if (total_numrows + num_rows >=
+        static_cast<size_t>(std::numeric_limits<cudf::size_type>::max())) {
+      outputTables.push_back(cudf::concatenate(
+          std::vector<cudf::table_view>(
+              tableViews.begin() + startpos, tableViews.begin() + i),
+          stream,
+          cudf::get_current_device_resource_ref()));
+      startpos = i;
+      total_numrows = num_rows;
+    } else {
+      total_numrows += num_rows;
+    }
+  }
+  stream.synchronize();
+  return outputTables;
 }
 
 } // namespace facebook::velox::cudf_velox
