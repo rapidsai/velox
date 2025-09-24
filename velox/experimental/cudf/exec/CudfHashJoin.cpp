@@ -201,8 +201,7 @@ void CudfHashJoinBuild::noMoreInput() {
   }
 
   // Only need to construct hash_join object if it's an inner join or left join
-  // and doesn't have a filter. All other cases use a standalone function in
-  // cudf
+  // All other cases use a standalone function in cudf
   bool buildHashJoin = (joinNode_->isInnerJoin() || joinNode_->isLeftJoin());
 
   std::vector<std::shared_ptr<cudf::hash_join>> hashObjects;
@@ -236,37 +235,6 @@ void CudfHashJoinBuild::noMoreInput() {
   auto cudfHashJoinBridge =
       std::dynamic_pointer_cast<CudfHashJoinBridge>(joinBridge);
 
-  // Only need to construct hash_join object if it's an inner join or left join
-  // and doesn't have a filter. All other cases use a standalone function in
-  // cudf
-  bool buildHashJoin = (joinNode_->isInnerJoin() || joinNode_->isLeftJoin()) &&
-      !joinNode_->filter();
-
-  std::vector<std::shared_ptr<cudf::hash_join>> hashObjects;
-  for (auto i = 0; i < tbls.size(); i++) {
-    hashObjects.push_back(
-        (buildHashJoin) ? std::make_shared<cudf::hash_join>(
-                              tbls[i]->view().select(buildKeyIndices),
-                              cudf::null_equality::UNEQUAL,
-                              stream)
-                        : nullptr);
-    if (buildHashJoin) {
-      VELOX_CHECK_NOT_NULL(hashObjects.back());
-    }
-    if (cudfDebugEnabled()) {
-      if (hashObjects.back() != nullptr) {
-        printf(
-            "hashObject %d is not nullptr %p\n", i, hashObjects.back().get());
-      } else {
-        printf("hashObject %d is *** nullptr\n", i);
-      }
-    }
-  }
-
-  std::vector<std::shared_ptr<cudf::table>> shared_tbls;
-  for (auto& tbl : tbls) {
-    shared_tbls.push_back(std::move(tbl));
-  }
   cudfHashJoinBridge->setHashTable(std::make_optional(
       std::make_pair(std::move(shared_tbls), std::move(hashObjects))));
 }
