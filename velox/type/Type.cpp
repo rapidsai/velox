@@ -68,34 +68,6 @@ const auto& typeKindNames() {
 }
 } // namespace
 
-folly::dynamic LongEnumParameter::serializeEnumParameter() const {
-  folly::dynamic obj = folly::dynamic::object;
-  obj["enumName"] = name;
-  folly::dynamic follyMap = folly::dynamic::object;
-  for (const auto& [key, value] : valuesMap) {
-    follyMap[key] = value;
-  }
-  obj["valuesMap"] = follyMap;
-  return obj;
-}
-
-size_t LongEnumParameter::Hash::operator()(
-    const LongEnumParameter& param) const {
-  uint64_t nameHash = folly::Hash{}(param.name);
-
-  // Hash each key-value pair and combine using commutativeHashMix
-  // to ensure order independence.
-  uint64_t mapHash = facebook::velox::bits::kNullHash;
-  for (const auto& [key, value] : param.valuesMap) {
-    const auto elementHash = facebook::velox::bits::hashMix(
-        folly::Hash{}(key), folly::Hash{}(value));
-    mapHash = facebook::velox::bits::commutativeHashMix(mapHash, elementHash);
-  }
-
-  // Combine name hash with map hash.
-  return facebook::velox::bits::hashMix(nameHash, mapHash);
-}
-
 VELOX_DEFINE_ENUM_NAME(TypeKind, typeKindNames);
 
 std::pair<uint8_t, uint8_t> getDecimalPrecisionScale(const Type& type) {
@@ -132,32 +104,87 @@ std::vector<TypePtr> deserializeChildTypes(const folly::dynamic& obj) {
   return velox::ISerializable::deserialize<std::vector<Type>>(obj["cTypes"]);
 }
 
-template <typename ValueType>
+template <typename TValue>
+folly::dynamic serializeEnumParam(
+    const std::string& name,
+    const std::unordered_map<std::string, TValue>& valuesMap) {
+  folly::dynamic obj = folly::dynamic::object;
+  obj["enumName"] = name;
+  folly::dynamic follyMap = folly::dynamic::object;
+  for (const auto& [key, value] : valuesMap) {
+    follyMap[key] = value;
+  }
+  obj["valuesMap"] = follyMap;
+  return obj;
+}
+
+template <typename TValue>
 TypeParameter deserializeEnumParam(const folly::dynamic& obj) {
   auto enumName = obj["enumName"].asString();
   VELOX_CHECK(obj["valuesMap"].isObject());
   auto valuesMap = obj["valuesMap"];
 
   // Construct the values map
-  std::unordered_map<std::string, ValueType> map;
+  std::unordered_map<std::string, TValue> map;
   for (const auto& item : valuesMap.items()) {
     std::string key = item.first.asString();
-    if constexpr (std::is_same_v<ValueType, int64_t>) {
+    if constexpr (std::is_same_v<TValue, int64_t>) {
       int64_t value = item.second.asInt();
       map.emplace(std::move(key), value);
+    } else if constexpr (std::is_same_v<TValue, std::string>) {
+      std::string value = item.second.asString();
+      map.emplace(std::move(key), std::move(value));
     } else {
-      VELOX_UNREACHABLE("Only int64_t value type is supported for enum types.");
+      VELOX_UNREACHABLE(
+          "Only int64_t and std::string value types are supported for enum types.");
     }
   }
 
   // Construct the corresponding TypeParameter
-  if constexpr (std::is_same_v<ValueType, int64_t>) {
+  if constexpr (std::is_same_v<TValue, int64_t>) {
     return TypeParameter(LongEnumParameter(enumName, map));
+  } else if constexpr (std::is_same_v<TValue, std::string>) {
+    return TypeParameter(VarcharEnumParameter(enumName, map));
   }
-  // TODO: Add the same deserialize logic for VarcharEnumType
-  VELOX_UNREACHABLE("Only int64_t value type is supported for enum types.");
+  VELOX_UNREACHABLE(
+      "Only int64_t and std::string value types are supported for enum types.");
+}
+
+template <typename TParameter>
+size_t hashEnumParam(const TParameter& param) {
+  uint64_t nameHash = folly::Hash{}(param.name);
+
+  // Hash each key-value pair and combine using commutativeHashMix
+  // to ensure order independence.
+  uint64_t mapHash = facebook::velox::bits::kNullHash;
+  for (const auto& [key, value] : param.valuesMap) {
+    const auto elementHash = facebook::velox::bits::hashMix(
+        folly::Hash{}(key), folly::Hash{}(value));
+    mapHash = facebook::velox::bits::commutativeHashMix(mapHash, elementHash);
+  }
+
+  // Combine name hash with map hash.
+  return facebook::velox::bits::hashMix(nameHash, mapHash);
 }
 } // namespace
+
+folly::dynamic LongEnumParameter::serialize() const {
+  return serializeEnumParam<int64_t>(name, valuesMap);
+}
+
+size_t LongEnumParameter::Hash::operator()(
+    const LongEnumParameter& param) const {
+  return hashEnumParam<LongEnumParameter>(param);
+}
+
+folly::dynamic VarcharEnumParameter::serialize() const {
+  return serializeEnumParam<std::string>(name, valuesMap);
+}
+
+size_t VarcharEnumParameter::Hash::operator()(
+    const VarcharEnumParameter& param) const {
+  return hashEnumParam<VarcharEnumParameter>(param);
+}
 
 TypePtr Type::create(const folly::dynamic& obj) {
   if (obj.find("ref") != obj.items().end()) {
@@ -185,6 +212,10 @@ TypePtr Type::create(const folly::dynamic& obj) {
     }
     if (obj.find("kLongEnumParam") != obj.items().end()) {
       params.emplace_back(deserializeEnumParam<int64_t>(obj["kLongEnumParam"]));
+    }
+    if (obj.find("kVarcharEnumParam") != obj.items().end()) {
+      params.emplace_back(
+          deserializeEnumParam<std::string>(obj["kVarcharEnumParam"]));
     }
     return getCustomType(typeName, params);
   }
@@ -232,6 +263,7 @@ void Type::registerSerDe() {
   registry.Register(
       "IntervalYearMonthType", IntervalYearMonthType::deserialize);
   registry.Register("DateType", DateType::deserialize);
+  registry.Register("TimeType", TimeType::deserialize);
 }
 
 std::string ArrayType::toString() const {
@@ -379,14 +411,50 @@ RowType::RowType(std::vector<std::string>&& names, std::vector<TypePtr>&& types)
 }
 
 RowType::~RowType() {
-  if (auto* parameters = parameters_.load()) {
-    delete parameters;
-  }
+  auto* parameters = parameters_.load(std::memory_order_acquire);
+  delete parameters;
+
+  auto* nameToIndex = nameToIndex_.load(std::memory_order_acquire);
+  delete nameToIndex;
 }
 
-std::unique_ptr<std::vector<TypeParameter>> RowType::makeParameters() const {
-  return std::make_unique<std::vector<TypeParameter>>(
+const std::vector<TypeParameter>* RowType::ensureParameters() const {
+  auto newParameters = std::make_unique<std::vector<TypeParameter>>(
       createTypeParameters(children_));
+
+  std::vector<TypeParameter>* oldParameters = nullptr;
+  if (!parameters_.compare_exchange_strong(
+          oldParameters,
+          newParameters.get(),
+          std::memory_order_acq_rel,
+          std::memory_order_acquire)) [[unlikely]] {
+    return oldParameters;
+  }
+
+  return newParameters.release();
+}
+
+const RowType::NameToIndex* RowType::ensureNameToIndex() const {
+  auto newNameToIndex = std::make_unique<NameToIndex>();
+  newNameToIndex->reserve(names_.size());
+  for (uint32_t i = 0; const auto& name : names_) {
+    if (auto* oldNameToIndex = nameToIndex_.load(std::memory_order_acquire))
+        [[unlikely]] {
+      return oldNameToIndex;
+    }
+    newNameToIndex->emplace(NameIndex{name, i++});
+  }
+
+  NameToIndex* oldNameToIndex = nullptr;
+  if (!nameToIndex_.compare_exchange_strong(
+          oldNameToIndex,
+          newNameToIndex.get(),
+          std::memory_order_acq_rel,
+          std::memory_order_acquire)) [[unlikely]] {
+    return oldNameToIndex;
+  }
+
+  return newNameToIndex.release();
 }
 
 namespace {
@@ -417,10 +485,8 @@ std::string makeFieldNotFoundErrorMessage(
 } // namespace
 
 const TypePtr& RowType::findChild(folly::StringPiece name) const {
-  for (uint32_t i = 0; i < names_.size(); ++i) {
-    if (names_.at(i) == name) {
-      return children_.at(i);
-    }
+  if (auto i = getChildIdxIfExists(name)) {
+    return children_[*i];
   }
   VELOX_USER_FAIL(makeFieldNotFoundErrorMessage(name, names_));
 }
@@ -440,7 +506,7 @@ bool RowType::isComparable() const {
 }
 
 bool RowType::containsChild(std::string_view name) const {
-  return std::find(names_.begin(), names_.end(), name) != names_.end();
+  return nameToIndex().contains(NameIndex{name, 0});
 }
 
 uint32_t RowType::getChildIdx(std::string_view name) const {
@@ -453,10 +519,10 @@ uint32_t RowType::getChildIdx(std::string_view name) const {
 
 std::optional<uint32_t> RowType::getChildIdxIfExists(
     std::string_view name) const {
-  for (uint32_t i = 0; i < names_.size(); i++) {
-    if (names_.at(i) == name) {
-      return i;
-    }
+  const auto& nameToIndex = this->nameToIndex();
+  auto it = nameToIndex.find(NameIndex{name, 0});
+  if (it != nameToIndex.end()) {
+    return it->index;
   }
   return std::nullopt;
 }
@@ -773,9 +839,6 @@ folly::dynamic FunctionType::serialize() const {
   obj["cTypes"] = velox::ISerializable::serialize(children_);
   return obj;
 }
-
-OpaqueType::OpaqueType(const std::type_index& typeIndex)
-    : typeIndex_(typeIndex) {}
 
 bool OpaqueType::equivalent(const Type& other) const {
   if (&other == this) {
@@ -1281,6 +1344,7 @@ const SingletonTypeMap& singletonBuiltInTypes() {
       {"INTERVAL DAY TO SECOND", INTERVAL_DAY_TIME()},
       {"INTERVAL YEAR TO MONTH", INTERVAL_YEAR_MONTH()},
       {"DATE", DATE()},
+      {"TIME", TIME()},
       {"UNKNOWN", UNKNOWN()},
   };
   return kTypes;
@@ -1429,6 +1493,13 @@ std::string getOpaqueAliasForTypeId(std::type_index typeIndex) {
       "Could not find type index '{}'. Did you call registerOpaqueType?",
       typeIndex.name());
   return it->second;
+}
+
+folly::dynamic TimeType::serialize() const {
+  folly::dynamic obj = folly::dynamic::object;
+  obj["name"] = "TimeType";
+  obj["type"] = name();
+  return obj;
 }
 
 std::string stringifyTruncatedElementList(

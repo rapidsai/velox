@@ -311,7 +311,6 @@ third_party/imdb/data
 # Benchmarks
 .last_benchmarked_commit
 benchmark_results*
-velox-tpch-*-data
 duckdb_unittest_tempdir/
 grammar.y.tmp
 src/amalgamation/
@@ -329,3 +328,9 @@ scripts/bm-report/report.html
 scripts/bm-report/result
 dist/
 wheelhouse/
+
+# Custom ignores
+aws-sdk-cpp
+cufile.log
+velox-tpch-*-data
+xsimd

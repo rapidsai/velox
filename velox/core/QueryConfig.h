@@ -370,7 +370,8 @@ class QueryConfig {
       "presto.array_agg.ignore_nulls";
 
   /// If true, Spark function's behavior is ANSI-compliant, e.g. throws runtime
-  /// exception instead of returning null on invalid inputs.
+  /// exception instead of returning null on invalid inputs. It affects only
+  /// functions explicitly marked as "ANSI compliant".
   /// Note: This feature is still under development to achieve full ANSI
   /// compliance. Users can refer to the Spark function documentation to verify
   /// the current support status of a specific function.
@@ -692,8 +693,16 @@ class QueryConfig {
   /// username.
   static constexpr const char* kClientTags = "client_tags";
 
+  /// Enable row size tracker as a fallback to file level row size estimates.
+  static constexpr const char* kRowSizeTrackingEnabled =
+      "row_size_tracking_enabled";
+
   bool selectiveNimbleReaderEnabled() const {
     return get<bool>(kSelectiveNimbleReaderEnabled, false);
+  }
+
+  bool rowSizeTrackingEnabled() const {
+    return get<bool>(kRowSizeTrackingEnabled, true);
   }
 
   bool debugDisableExpressionsWithPeeling() const {

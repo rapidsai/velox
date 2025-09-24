@@ -1087,8 +1087,7 @@ class ArrowBridgeArrayImportTest : public ArrowBridgeArrayExportTest {
   template <typename T>
   ArrowArray fillArrowArray(
       const std::vector<std::optional<T>>& inputValues,
-      ArrowContextHolder& holder,
-      const char* format = nullptr) {
+      ArrowContextHolder& holder) {
     using TArrow = typename VeloxToArrowType<T>::type;
     int64_t length = inputValues.size();
     int64_t nullCount = 0;
@@ -1118,12 +1117,10 @@ class ArrowBridgeArrayImportTest : public ArrowBridgeArrayExportTest {
     return makeArrowArray(holder.buffers, 2, length, nullCount);
   }
 
+  template <typename TOffsets = int32_t>
   ArrowArray fillArrowArray(
       const std::vector<std::optional<std::string>>& inputValues,
-      ArrowContextHolder& holder,
-      const char* format = nullptr) {
-    bool const is32 =
-        format == nullptr || (format[0] != 'U' && format[0] != 'Z');
+      ArrowContextHolder& holder) {
     int64_t length = inputValues.size();
     int64_t nullCount = 0;
 
@@ -1136,20 +1133,13 @@ class ArrowBridgeArrayImportTest : public ArrowBridgeArrayExportTest {
     }
 
     holder.nulls = AlignedBuffer::allocate<uint64_t>(length, pool_.get());
-    holder.offsets = is32
-        ? AlignedBuffer::allocate<int32_t>(length + 1, pool_.get())
-        : AlignedBuffer::allocate<int64_t>(length + 1, pool_.get());
+    holder.offsets = AlignedBuffer::allocate<TOffsets>(length + 1, pool_.get());
     holder.values = AlignedBuffer::allocate<char>(bufferSize, pool_.get());
 
     auto rawNulls = holder.nulls->asMutable<uint64_t>();
-    auto rawOffsets = holder.offsets->asMutable<int32_t>();
-    auto rawOffsets64 = holder.offsets->asMutable<int64_t>();
+    auto rawOffsets = holder.offsets->asMutable<TOffsets>();
     auto rawValues = holder.values->asMutable<char>();
-    if (is32) {
-      *rawOffsets = 0;
-    } else {
-      *rawOffsets64 = 0;
-    }
+    *rawOffsets = 0;
 
     holder.buffers[2] = (length == 0) ? nullptr : (const void*)rawValues;
     holder.buffers[1] = (length == 0) ? nullptr : (const void*)rawOffsets;
@@ -1158,31 +1148,25 @@ class ArrowBridgeArrayImportTest : public ArrowBridgeArrayExportTest {
       if (inputValues[i] == std::nullopt) {
         bits::setNull(rawNulls, i);
         nullCount++;
-        if (is32) {
-          *(rawOffsets + 1) = *rawOffsets;
-          ++rawOffsets;
-        } else {
-          *(rawOffsets64 + 1) = *rawOffsets64;
-          ++rawOffsets64;
-        }
+        *(rawOffsets + 1) = *rawOffsets;
+        ++rawOffsets;
       } else {
         bits::clearNull(rawNulls, i);
         const auto& val = *inputValues[i];
 
         std::memcpy(rawValues, val.data(), val.size());
         rawValues += val.size();
-        if (is32) {
-          *(rawOffsets + 1) = *rawOffsets + val.size();
-          ++rawOffsets;
-        } else {
-          *(rawOffsets64 + 1) = *rawOffsets64 + val.size();
-          ++rawOffsets64;
-        }
+        *(rawOffsets + 1) = *rawOffsets + val.size();
+        ++rawOffsets;
       }
     }
 
     holder.buffers[0] = (length == 0) ? nullptr : (const void*)rawNulls;
     return makeArrowArray(holder.buffers, 3, length, nullCount);
+  }
+
+  bool is64Offsets(const char* format) {
+    return format != nullptr && (format[0] == 'U' || format[0] == 'Z');
   }
 
   // Takes a vector with input data, generates an input ArrowArray and Velox
@@ -1193,7 +1177,21 @@ class ArrowBridgeArrayImportTest : public ArrowBridgeArrayExportTest {
       const char* format,
       const std::vector<std::optional<TInput>>& inputValues) {
     ArrowContextHolder holder;
-    auto arrowArray = fillArrowArray(inputValues, holder, format);
+    auto arrowArray = [&] {
+      if constexpr (std::is_same_v<TInput, std::string>) {
+        if (is64Offsets(format)) {
+          return fillArrowArray<int64_t>(inputValues, holder);
+        }
+      }
+      return fillArrowArray(inputValues, holder);
+    }();
+
+    // for format U or Z, the offsets buffer is int64_t
+    if (is64Offsets(format)) {
+      EXPECT_EQ(arrowArray.n_buffers, 3);
+      EXPECT_EQ(
+          holder.offsets->size(), (inputValues.size() + 1) * sizeof(int64_t));
+    }
 
     auto arrowSchema = makeArrowSchema(format);
     auto output = importFromArrow(arrowSchema, arrowArray, pool_.get());

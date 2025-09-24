@@ -28,18 +28,10 @@ using namespace facebook::velox::exec;
 
 namespace facebook::velox::connector::hive {
 
-namespace {
-std::vector<std::unique_ptr<HiveConnectorMetadataFactory>>&
-hiveConnectorMetadataFactories() {
-  static std::vector<std::unique_ptr<HiveConnectorMetadataFactory>> factories;
-  return factories;
-}
-} // namespace
-
 HiveConnector::HiveConnector(
     const std::string& id,
     std::shared_ptr<const config::ConfigBase> config,
-    folly::Executor* executor)
+    folly::Executor* ioExecutor)
     : Connector(id, std::move(config)),
       hiveConfig_(std::make_shared<HiveConfig>(connectorConfig())),
       fileHandleFactory_(
@@ -47,8 +39,8 @@ HiveConnector::HiveConnector(
               ? std::make_unique<SimpleLRUCache<FileHandleKey, FileHandle>>(
                     hiveConfig_->numCacheFileHandles())
               : nullptr,
-          std::make_unique<FileHandleGenerator>(config)),
-      executor_(executor) {
+          std::make_unique<FileHandleGenerator>(hiveConfig_->config())),
+      ioExecutor_(ioExecutor) {
   if (hiveConfig_->isFileHandleCacheEnabled()) {
     LOG(INFO) << "Hive connector " << connectorId()
               << " created with maximum of "
@@ -58,12 +50,6 @@ HiveConnector::HiveConnector(
   } else {
     LOG(INFO) << "Hive connector " << connectorId()
               << " created with file handle cache disabled";
-  }
-  for (auto& factory : hiveConnectorMetadataFactories()) {
-    metadata_ = factory->create(this);
-    if (metadata_ != nullptr) {
-      break;
-    }
   }
 }
 
@@ -77,7 +63,7 @@ std::unique_ptr<DataSource> HiveConnector::createDataSource(
       tableHandle,
       columnHandles,
       &fileHandleFactory_,
-      executor_,
+      ioExecutor_,
       connectorQueryCtx,
       hiveConfig_);
 }
@@ -98,6 +84,19 @@ std::unique_ptr<DataSink> HiveConnector::createDataSink(
       connectorQueryCtx,
       commitStrategy,
       hiveConfig_);
+}
+
+// static
+void HiveConnector::registerSerDe() {
+  HiveTableHandle::registerSerDe();
+  HiveColumnHandle::registerSerDe();
+  HiveConnectorSplit::registerSerDe();
+  HiveInsertTableHandle::registerSerDe();
+  HiveInsertFileNameGenerator::registerSerDe();
+  LocationHandle::registerSerDe();
+  HiveBucketProperty::registerSerDe();
+  HiveSortingColumn::registerSerDe();
+  HivePartitionFunctionSpec::registerSerDe();
 }
 
 std::unique_ptr<core::PartitionFunction> HivePartitionFunctionSpec::create(
@@ -121,7 +120,7 @@ std::unique_ptr<core::PartitionFunction> HivePartitionFunctionSpec::create(
           std::mt19937{0});
     }
   }
-  return std::make_unique<velox::connector::hive::HivePartitionFunction>(
+  return std::make_unique<HivePartitionFunction>(
       numBuckets_,
       bucketToPartition_.empty() ? std::move(bucketToPartitions)
                                  : bucketToPartition_,
@@ -186,16 +185,11 @@ core::PartitionFunctionSpecPtr HivePartitionFunctionSpec::deserialize(
       std::move(constValues));
 }
 
-void registerHivePartitionFunctionSerDe() {
+// static
+void HivePartitionFunctionSpec::registerSerDe() {
   auto& registry = DeserializationWithContextRegistryForSharedPtr();
   registry.Register(
       "HivePartitionFunctionSpec", HivePartitionFunctionSpec::deserialize);
-}
-
-bool registerHiveConnectorMetadataFactory(
-    std::unique_ptr<HiveConnectorMetadataFactory> factory) {
-  hiveConnectorMetadataFactories().push_back(std::move(factory));
-  return true;
 }
 
 } // namespace facebook::velox::connector::hive

@@ -21,6 +21,7 @@
 #include "velox/dwio/common/CachedBufferedInput.h"
 #include "velox/dwio/common/DirectBufferedInput.h"
 #include "velox/expression/Expr.h"
+#include "velox/expression/ExprConstants.h"
 #include "velox/expression/ExprToSubfieldFilter.h"
 
 namespace facebook::velox::connector::hive {
@@ -110,8 +111,7 @@ void addSubfields(
       folly::F14FastMap<std::string, std::vector<SubfieldSpec>> required;
       for (auto& subfield : subfields) {
         auto* element = subfield.subfield->path()[level].get();
-        auto* nestedField =
-            dynamic_cast<const common::Subfield::NestedField*>(element);
+        auto* nestedField = element->as<common::Subfield::NestedField>();
         VELOX_CHECK(
             nestedField,
             "Unsupported for row subfields pruning: {}",
@@ -150,20 +150,18 @@ void addSubfields(
       std::vector<int64_t> longSubscripts;
       for (auto& subfield : subfields) {
         auto* element = subfield.subfield->path()[level].get();
-        if (dynamic_cast<const common::Subfield::AllSubscripts*>(element)) {
+        if (element->is(common::SubfieldKind::kAllSubscripts)) {
           return;
         }
         if (stringKey) {
-          auto* subscript =
-              dynamic_cast<const common::Subfield::StringSubscript*>(element);
+          auto* subscript = element->as<common::Subfield::StringSubscript>();
           VELOX_CHECK(
               subscript,
               "Unsupported for string map pruning: {}",
               element->toString());
           stringSubscripts.push_back(subscript->index());
         } else {
-          auto* subscript =
-              dynamic_cast<const common::Subfield::LongSubscript*>(element);
+          auto* subscript = element->as<common::Subfield::LongSubscript>();
           VELOX_CHECK(
               subscript,
               "Unsupported for long map pruning: {}",
@@ -902,8 +900,8 @@ core::TypedExprPtr extractFiltersFromRemainingFilter(
     return inner ? replaceInputs(call, {inner}) : nullptr;
   }
 
-  if ((call->name() == "and" && !negated) ||
-      (call->name() == "or" && negated)) {
+  if ((call->name() == expression::kAnd && !negated) ||
+      (call->name() == expression::kOr && negated)) {
     auto lhs = extractFiltersFromRemainingFilter(
         call->inputs()[0], evaluator, negated, filters, sampleRate);
     auto rhs = extractFiltersFromRemainingFilter(
