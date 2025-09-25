@@ -2212,7 +2212,7 @@ TEST_P(MultiThreadedHashJoinTest, leftJoinWithNullableFilter) {
   HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
       .injectSpill(false)
       .checkSpillStats(false)
-      .numDrivers(numDrivers_)
+      .numDrivers(numDrivers_, false, false)
       .probeKeys({"c0"})
       .probeVectors(std::move(probeVectors))
       .buildKeys({"u_c0"})
