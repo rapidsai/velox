@@ -27,40 +27,16 @@
 
 namespace facebook::velox::cudf_velox {
 
-std::unique_ptr<cudf::table> create_joined_table(
-    std::unique_ptr<rmm::device_uvector<cudf::size_type>>&& leftJoinIndices,
-    std::unique_ptr<rmm::device_uvector<cudf::size_type>>&& rightJoinIndices,
-    cudf::table_view const& leftTableView,
-    cudf::table_view const& rightTableView,
-    std::vector<cudf::size_type> const& leftColumnIndicesToGather_,
-    std::vector<cudf::size_type> const& rightColumnIndicesToGather_,
-    std::vector<size_t> const& leftColumnOutputIndices_,
-    std::vector<size_t> const& rightColumnOutputIndices_,
-    rmm::cuda_stream_view stream,
-    rmm::device_async_resource_ref mr);
-
-std::pair<
-    std::unique_ptr<rmm::device_uvector<cudf::size_type>>,
-    std::unique_ptr<rmm::device_uvector<cudf::size_type>>>
-sort_join_indices(
-    std::unique_ptr<rmm::device_uvector<cudf::size_type>>&& leftJoinIndices,
-    std::unique_ptr<rmm::device_uvector<cudf::size_type>>&& rightJoinIndices,
+void sort_join_indices_inplace(
+    cudf::mutable_column_view leftJoinIndices,
+    cudf::mutable_column_view rightJoinIndices,
     rmm::cuda_stream_view stream);
 
-std::vector<std::unique_ptr<cudf::column>> filter_left_joined_cols(
-    std::unique_ptr<rmm::device_uvector<cudf::size_type>>&& leftJoinIndices,
-    std::unique_ptr<rmm::device_uvector<cudf::size_type>>&& rightJoinIndices,
-    cudf::table_view const& leftTableView,
-    cudf::table_view const& rightTableView,
-    cudf::column_view const& filterColumn,
+[[nodiscard]]
+std::pair<std::unique_ptr<cudf::column>, std::unique_ptr<cudf::column>>
+filtered_indices_again(
+    std::unique_ptr<rmm::device_uvector<cudf::size_type>>&& leftIndices,
+    std::unique_ptr<rmm::device_uvector<cudf::size_type>>&& rightIndices,
+    cudf::mutable_column_view& filterColumn,
     rmm::cuda_stream_view stream);
-
-rmm::device_uvector<cudf::size_type> filter_left_joined_cols(
-    std::unique_ptr<rmm::device_uvector<cudf::size_type>>&& leftJoinIndices,
-    cudf::table_view const& leftTableView,
-    cudf::column_view const& filterColumn,
-    rmm::cuda_stream_view stream);
-
-void printTable(cudf::table_view const& t, rmm::cuda_stream_view stream);
-
 } // namespace facebook::velox::cudf_velox

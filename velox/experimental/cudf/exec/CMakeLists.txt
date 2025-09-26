@@ -33,7 +33,7 @@ add_library(
 
 target_link_libraries(
   velox_cudf_exec
-  PUBLIC cudf::cudf
+  PUBLIC cudf::cudf cuco::cuco
   PRIVATE
     arrow
     velox_arrow_bridge
@@ -46,7 +46,10 @@ target_link_libraries(
 
 target_compile_options(
   velox_cudf_exec
-  PRIVATE -Wno-missing-field-initializers $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
+  PRIVATE
+    -Wno-missing-field-initializers
+    $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda
+    --expt-relaxed-constexpr>
 )
 
 set_target_properties(

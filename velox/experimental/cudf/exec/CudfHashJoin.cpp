@@ -25,6 +25,7 @@
 #include "velox/type/TypeUtil.h"
 
 #include <cudf/aggregation.hpp>
+#include <cudf/binaryop.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/concatenate.hpp>
 #include <cudf/copying.hpp>
@@ -675,8 +676,6 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
 
     if (joinNode_->filter() &&
         (joinNode_->isLeftJoin() || joinNode_->isInnerJoin())) {
-      std::tie(leftJoinIndices, rightJoinIndices) = sort_join_indices(
-          std::move(leftJoinIndices), std::move(rightJoinIndices), stream);
       auto leftResult =
           cudf::gather(leftTableView, leftIndicesCol, oobPolicy, stream);
       auto rightResult =
@@ -701,7 +700,7 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
           {exprs.exprs()[0]}, facebook::velox::type::concatRowTypes(rowTypes));
       auto filterColumns = filterEvaluator.compute(
           joinedCols, stream, cudf::get_current_device_resource_ref());
-      auto filterColumn = filterColumns[0]->view();
+      auto filterColumn = filterColumns[0]->mutable_view();
 
       // If filter is not all false, apply the filter
       if (joinNode_->isInnerJoin()) {
@@ -711,42 +710,29 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
             cudf::apply_boolean_mask(*filterTable, filterColumn, stream);
         joinedCols = filteredTable->release();
       } else if (joinNode_->isLeftJoin()) {
-        auto extra_rows = filter_left_joined_cols(
-            std::move(leftJoinIndices), leftTableView, filterColumn, stream);
-        auto num_extra_rows = extra_rows.size();
-        cudf::device_span<cudf::size_type const> extra_rows_span{extra_rows};
-        auto left_extra_result = cudf::gather(
-            leftTableView,
-            cudf::column_view{extra_rows_span},
-            oobPolicy,
+        joinedCols.clear(); // cleanup memory
+        auto [leftJoinIndices2, rightJoinIndices2] = filtered_indices_again(
+            std::move(leftJoinIndices),
+            std::move(rightJoinIndices),
+            filterColumn,
             stream);
-        auto extra_columns = left_extra_result->release();
-        for (auto col = leftColsSize; col < joinedCols.size(); col++) {
-          auto null_scalar =
-              cudf::make_empty_scalar_like(joinedCols[col]->view(), stream);
-          extra_columns.push_back(cudf::make_column_from_scalar(
-              *null_scalar,
-              num_extra_rows,
-              stream,
-              cudf::get_current_device_resource_ref()));
-        }
-        auto extra_table =
-            std::make_unique<cudf::table>(std::move(extra_columns));
-
-        // Apply the Filter
-        auto filterTable = std::make_unique<cudf::table>(std::move(joinedCols));
-        auto filteredTable =
-            cudf::apply_boolean_mask(*filterTable, filterColumn, stream);
-        std::vector<cudf::table_view> concat_table_views;
-        concat_table_views.push_back(filteredTable->view());
-        concat_table_views.push_back(extra_table->view());
-        auto filteredLeftJoinTable = cudf::concatenate(
-            concat_table_views,
-            stream,
-            cudf::get_current_device_resource_ref());
-        stream.synchronize();
-
-        joinedCols = filteredLeftJoinTable->release();
+        // TBD: Sort only for left join based on leftJoinIndices2
+        // sort_join_indices_inplace(
+        //     leftJoinIndices2->mutable_view(),
+        //     rightJoinIndices2->mutable_view(),
+        //     stream);
+        auto leftResult = cudf::gather(
+            leftTableView, leftJoinIndices2->view(), oobPolicy, stream);
+        // TODO delete leftTable for cleanup memory
+        auto rightResult = cudf::gather(
+            rightTableView, rightJoinIndices2->view(), oobPolicy, stream);
+        // TODO delete rightTable for cleanup memory
+        joinedCols = leftResult->release();
+        auto rightCols = rightResult->release();
+        joinedCols.insert(
+            joinedCols.end(),
+            std::make_move_iterator(rightCols.begin()),
+            std::make_move_iterator(rightCols.end()));
       }
 
       auto filteredjoinedCols = std::vector<std::unique_ptr<cudf::column>>(
