@@ -6723,53 +6723,6 @@ TEST_F(HashJoinTest, leftJoinPreserveProbeOrder) {
   ASSERT_EQ(v1->valueAt(2), 0);
 }
 
-TEST_F(HashJoinTest, myown) {
-  const std::vector<RowVectorPtr> probeVectors = {
-      makeRowVector(
-          {"k1", "v1"},
-          {
-              makeFlatVector<int64_t>({1, 2, 3, 4}),
-              makeFlatVector<int64_t>({10, 20, 30, 40}),
-          }),
-  };
-  const std::vector<RowVectorPtr> buildVectors = {
-      makeRowVector(
-          {"k2", "v2"},
-          {
-              makeFlatVector<int64_t>({2, 2, 3, 3, 3, 4}),
-              makeFlatVector<int64_t>({1, 2, 3, 4, 5, 6}),
-          }),
-  };
-  printRowVectors(probeVectors, "Probe");
-  printRowVectors(buildVectors, "Build");
-  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
-  auto plan =
-      PlanBuilder(planNodeIdGenerator)
-          .values(probeVectors)
-          .hashJoin(
-              {"k1"},
-              {"k2"},
-              PlanBuilder(planNodeIdGenerator).values(buildVectors).planNode(),
-              "v2 = 1 or v2 = 6",
-              {"v1"},
-              core::JoinType::kLeft)
-          .planNode();
-  auto result = AssertQueryBuilder(plan)
-                    .config(core::QueryConfig::kPreferredOutputBatchRows, "1")
-                    .serialExecution(true)
-                    .copyResults(pool_.get());
-
-  printRowVectors(std::vector<RowVectorPtr>{result}, "Result");
-  auto* v1 =
-      result->childAt(0)->loadedVector()->asUnchecked<SimpleVector<int64_t>>();
-  ASSERT_EQ(result->size(), 4);
-  ASSERT_FALSE(v1->mayHaveNulls());
-  ASSERT_EQ(v1->valueAt(0), 10);
-  ASSERT_EQ(v1->valueAt(1), 20);
-  ASSERT_EQ(v1->valueAt(2), 30);
-  ASSERT_EQ(v1->valueAt(3), 40);
-}
-
 DEBUG_ONLY_TEST_F(HashJoinTest, minSpillableMemoryReservation) {
   VectorFuzzer fuzzer({.vectorSize = 1000}, pool());
   const int32_t numBuildVectors = 10;
