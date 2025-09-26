@@ -41,6 +41,48 @@ namespace facebook::velox::cudf_velox {
 std::pair<
     std::unique_ptr<rmm::device_uvector<cudf::size_type>>,
     std::unique_ptr<rmm::device_uvector<cudf::size_type>>>
+unmatchedIndices(cudf::column_view invmask, rmm::cuda_stream_view stream) {
+  auto num_false_elements = thrust::count_if(
+      rmm::exec_policy(stream),
+      invmask.begin(),
+      invmask.end(),
+      [] __device__(auto b) { return !b; });
+
+  rmm::device_uvector<cudf::size_type> leftIndices(num_false_elements, stream);
+  thrust::copy_if(
+      rmm::exec_policy(stream),
+      thrust::counting_iterator(0),
+      thrust::counting_iterator(invmask.size()),
+      leftIndices.begin(),
+      [invmask = invmask.begin()] __device__(auto i) {
+        return !invmask[i];
+      });
+
+  rmm::device_uvector<cudf::size_type> rightIndices(num_false_elements, stream);
+  thrust::fill(rmm::exec_policy(stream), rightIndices.begin(), rightIndices.end(), std::numeric_limits<cudf::size_type>::min());
+
+  return {std::move(leftIndices), std::move(rightIndices)};
+}
+
+
+std::unique_ptr<rmm::device_uvector<cudf::size_type>> 
+concatenate(std::vector<std::unique_ptr<rmm::device_uvector<cudf::size_type>>> const &vecs, rmm::cuda_stream_view stream) {
+  auto totalSize = std::accumulate(vecs.begin(), vecs.end(), 0, [](auto sum, auto const &v) {
+        return sum + v->size();
+      })
+  rmm::device_uvector<cudf::size_type> concat(totalSize, stream, cudf::get_current_device_resource_ref());
+  size_t offset = 0;
+  for(auto i = 0; i < vecs.size()l i++) {
+    thrust::copy(rmm::exec_policy_nosync(stream), vecs[i]->begin(), vecs[i]->end(), concat.begin() + offset);
+    offset += vecs[i].size();
+  }
+  stream.synchronize();
+  return std::make_unique(std::move(concat));
+}
+
+std::pair<
+    std::unique_ptr<rmm::device_uvector<cudf::size_type>>,
+    std::unique_ptr<rmm::device_uvector<cudf::size_type>>>
 sort_join_indices(
     std::unique_ptr<rmm::device_uvector<cudf::size_type>>&& leftJoinIndices,
     std::unique_ptr<rmm::device_uvector<cudf::size_type>>&& rightJoinIndices,

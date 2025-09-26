@@ -202,7 +202,7 @@ void CudfHashJoinBuild::noMoreInput() {
 
   // Only need to construct hash_join object if it's an inner join or left join
   // All other cases use a standalone function in cudf
-  bool buildHashJoin = (joinNode_->isInnerJoin() || joinNode_->isLeftJoin());
+  bool buildHashJoin = (joinNode_->isInnerJoin() || joinNode_->isLeftJoin() || joinNode_->isRightJoin());
 
   std::vector<std::shared_ptr<cudf::hash_join>> hashObjects;
   for (auto i = 0; i < tbls.size(); i++) {
@@ -396,15 +396,21 @@ bool CudfHashJoinProbe::needsInput() const {
   if (cudfDebugEnabled()) {
     std::cout << "Calling CudfHashJoinProbe::needsInput" << std::endl;
   }
+#if 0
   if (joinNode_->isRightJoin() || joinNode_->isRightSemiFilterJoin()) {
     return !noMoreInput_;
   }
   return !noMoreInput_ && !finished_ && input_ == nullptr;
+#endif
+  return !noMoreInput_;
 }
 
 void CudfHashJoinProbe::addInput(RowVectorPtr input) {
   if (skipInput_) {
+    VELOX_CHECK_EQ(inputs_.size(), 0);
+#if 0
     VELOX_CHECK_NULL(input_);
+#endif
     return;
   }
   auto cudfInput = std::dynamic_pointer_cast<CudfVector>(input);
@@ -419,10 +425,12 @@ void CudfHashJoinProbe::addInput(RowVectorPtr input) {
     auto lockedStats = stats_.wlock();
     lockedStats->numNullKeys += null_count;
   }
+#if 0
   if (!joinNode_->isRightJoin() && !joinNode_->isRightSemiFilterJoin()) {
     input_ = std::move(input);
     return;
   }
+#endif
 
   // Queue inputs and process all at once
   if (input->size() > 0) {
@@ -436,9 +444,11 @@ void CudfHashJoinProbe::noMoreInput() {
   }
   VELOX_NVTX_OPERATOR_FUNC_RANGE();
   Operator::noMoreInput();
+#if 0
   if (!joinNode_->isRightJoin() && !joinNode_->isRightSemiFilterJoin()) {
     return;
   }
+#endif
   std::vector<ContinuePromise> promises;
   std::vector<std::shared_ptr<exec::Driver>> peers;
   // Only last driver collects all answers
@@ -463,19 +473,25 @@ void CudfHashJoinProbe::noMoreInput() {
     }
   };
 
+#if 0
   auto stream = cudfGlobalStreamPool().get_stream();
-  auto tbl = getConcatenatedTable(
+  auto tbls = getConcatenatedTableBatched(
       inputs_, joinNode_->sources()[1]->outputType(), stream);
 
   // Release input data after synchronizing
   stream.synchronize();
+  inputs_.clear();
 
-  VELOX_CHECK_NOT_NULL(tbl);
-
+  for (auto const& tbl : tbls) {
+    VELOX_CHECK_NOT_NULL(tbl);
+  }
   if (cudfDebugEnabled()) {
-    std::cout << "Probe table number of columns: " << tbl->num_columns()
+    std::cout << "Probe table number of columns: " << tbls[0]->num_columns()
               << std::endl;
-    std::cout << "Probe table number of rows: " << tbl->num_rows() << std::endl;
+    for (auto i = 0; i < tbls.size(); i++) {
+      std::cout << "Probe table " << i
+                << ": number of rows: " << tbls[i]->num_rows() << std::endl;
+    }
   }
 
   // Store the concatenated table in input_
@@ -485,10 +501,9 @@ void CudfHashJoinProbe::noMoreInput() {
       tbl->num_rows(),
       std::move(tbl),
       stream);
-
-  inputs_.clear();
+#endif
 }
-
+ 
 RowVectorPtr CudfHashJoinProbe::getOutput() {
   if (cudfDebugEnabled()) {
     std::cout << "Calling CudfHashJoinProbe::getOutput" << std::endl;
@@ -499,6 +514,7 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
     return nullptr;
   }
 
+#if 0
   if (!input_) {
     return nullptr;
   }
@@ -511,6 +527,28 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
               << std::endl;
     std::cout << "Probe table number of rows: " << leftTable->num_rows()
               << std::endl;
+  }
+#endif
+  if(inputs_.empty()) {
+    return nullptr;
+  }
+  auto stream = cudfGlobalStreamPool().get_stream();
+  auto leftTables = getConcatenatedTableBatched(
+      inputs_, joinNode_->sources()[1]->outputType(), stream);
+  // Release input data after synchronizing
+  stream.synchronize();
+  inputs_.clear();
+
+  for (auto const& leftTable : leftTables) {
+    VELOX_CHECK_NOT_NULL(tbl);
+  }
+  if (cudfDebugEnabled()) {
+    std::cout << "Probe table number of columns: " << leftTables[0]->num_columns()
+              << std::endl;
+    for (auto i = 0; i < leftTables.size(); i++) {
+      std::cout << "Probe table " << i
+                << ": number of rows: " << leftTables[i]->num_rows() << std::endl;
+    }
   }
 
   // TODO pass the input pool !!!
@@ -540,6 +578,7 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
   // build table is not empty, no nulls, and probe table has nulls
   if (joinNode_->isNullAware() and !joinNode_->filter()) {
     auto& rightTable = rightTables[0];
+    auto& leftTable = leftTables[0];
     auto const rightTableHasNulls =
         cudf::has_nulls(rightTable->view().select(rightKeyIndices_));
     auto const leftTableHasNulls =
@@ -558,6 +597,359 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
   std::unique_ptr<rmm::device_uvector<cudf::size_type>> leftJoinIndices;
   std::unique_ptr<rmm::device_uvector<cudf::size_type>> rightJoinIndices;
   std::vector<std::unique_ptr<cudf::table>> cudfOutputs;
+  auto constexpr oobPolicy = cudf::out_of_bounds_policy::NULLIFY;
+  std::vector<std::unique_ptr<cudf::column>> joinedCols;
+
+  auto unfilteredJoinedCols = [&](auto leftTableView, auto leftIndicesCol, auto rightTableView, auto rightIndicesCol) {
+    auto leftInput = leftTableView.select(leftColumnIndicesToGather_);
+    auto rightInput = rightTableView.select(rightColumnIndicesToGather_);
+    auto leftResult =
+        cudf::gather(leftInput, leftIndicesCol, oobPolicy, stream);
+    auto rightResult =
+        cudf::gather(rightInput, rightIndicesCol, oobPolicy, stream);
+
+    if (cudfDebugEnabled()) {
+      std::cout << "Left result number of columns: "
+                << leftResult->num_columns() << std::endl;
+      std::cout << "Right result number of columns: "
+                << rightResult->num_columns() << std::endl;
+    }
+
+    auto leftCols = leftResult->release();
+    auto rightCols = rightResult->release();
+    joinedCols.resize(outputType_->names().size());
+    for (int i = 0; i < leftColumnOutputIndices_.size(); i++) {
+      joinedCols[leftColumnOutputIndices_[i]] = std::move(leftCols[i]);
+    }
+    for (int i = 0; i < rightColumnOutputIndices_.size(); i++) {
+      joinedCols[rightColumnOutputIndices_[i]] = std::move(rightCols[i]);
+    }
+  };
+
+  auto filteredInnerJoinedCols = [&](auto leftTableView, auto leftIndicesCol, auto rightTableView, auto rightIndicesCol) {
+    auto leftResult =
+        cudf::gather(leftTableView, leftIndicesCol, oobPolicy, stream);
+    auto rightResult =
+        cudf::gather(rightTableView, rightIndicesCol, oobPolicy, stream);
+    auto leftColsSize = leftResult->num_columns();
+    auto rightColsSize = rightResult->num_columns();
+    joinedCols = leftResult->release();
+    auto rightCols = rightResult->release();
+    joinedCols.insert(
+        joinedCols.end(),
+        std::make_move_iterator(rightCols.begin()),
+        std::make_move_iterator(rightCols.end()));
+
+    auto probeType = joinNode_->sources()[0]->outputType();
+    auto buildType = joinNode_->sources()[1]->outputType();
+    std::vector<velox::RowTypePtr> rowTypes{probeType, buildType};
+    exec::ExprSet exprs({joinNode_->filter()}, operatorCtx_->execCtx());
+    VELOX_CHECK_EQ(exprs.exprs().size(), 1);
+    auto filterEvaluator = ExpressionEvaluator(
+        {exprs.exprs()[0]}, facebook::velox::type::concatRowTypes(rowTypes));
+    auto filterColumns = filterEvaluator.compute(
+        joinedCols, stream, cudf::get_current_device_resource_ref());
+    auto filterColumn = filterColumns[0]->view();
+    auto filterTable = std::make_unique<cudf::table>(std::move(joinedCols));
+    auto filteredTable =
+        cudf::apply_boolean_mask(*filterTable, filterColumn, stream);
+    joinedCols = filteredTable->release();
+
+    auto filteredjoinedCols = std::vector<std::unique_ptr<cudf::column>>(
+        outputType_->names().size());
+    for (int i = 0; i < leftColumnOutputIndices_.size(); i++) {
+      filteredjoinedCols[leftColumnOutputIndices_[i]] =
+          std::move(joinedCols[leftColumnIndicesToGather_[i]]);
+    }
+    for (int i = 0; i < rightColumnOutputIndices_.size(); i++) {
+      filteredjoinedCols[rightColumnOutputIndices_[i]] = std::move(
+          joinedCols[leftColsSize + rightColumnIndicesToGather_[i]]);
+    }
+    joinedCols = std::move(filteredjoinedCols);
+  };
+
+  auto filteredLeftJoinedCols = [&](auto leftTableView, auto &&leftJoinIndicesVec, auto rightTableView, auto &&rightJoinIndicesVec) {
+    std::unique_ptr<rmm::device_uvector<cudf::size_type>> leftJoinIndices;
+    std::unique_ptr<rmm::device_uvector<cudf::size_type>> rightJoinIndices;
+    if(leftJoinIndicesVec.size() > 1) {
+      leftJoinIndices = concatenate(leftJoinIndicesVec, stream);
+      rightJoinIndices = concatenate(rightJoinIndicesVec, stream);
+    }
+    else {
+      leftJoinIndices = std::move(leftJoinIndicesVec[0]);
+      rightJoinIndices = std::move(rightJoinIndicesVec);
+    }
+    std::tie(leftJoinIndices, rightJoinIndices) = sort_join_indices(
+        std::move(leftJoinIndices), std::move(rightJoinIndices), stream);
+    auto leftIndicesSpan = cudf::device_span<cudf::size_type const>{*leftJoinIndices};
+    auto rightIndicesSpan = cudf::device_span<cudf::size_type const>{*rightJoinIndices};
+    auto leftIndicesCol = cudf::column_view{leftIndicesSpan};
+    auto rightIndicesCol = cudf::column_view{rightIndicesSpan};
+
+    auto leftResult =
+        cudf::gather(leftTableView, leftIndicesCol, oobPolicy, stream);
+    auto rightResult =
+        cudf::gather(rightTableView, rightIndicesCol, oobPolicy, stream);
+    auto leftColsSize = leftResult->num_columns();
+    auto rightColsSize = rightResult->num_columns();
+    joinedCols = leftResult->release();
+    auto rightCols = rightResult->release();
+    joinedCols.insert(
+        joinedCols.end(),
+        std::make_move_iterator(rightCols.begin()),
+        std::make_move_iterator(rightCols.end()));
+
+    auto probeType = joinNode_->sources()[0]->outputType();
+    auto buildType = joinNode_->sources()[1]->outputType();
+    std::vector<velox::RowTypePtr> rowTypes{probeType, buildType};
+    exec::ExprSet exprs({joinNode_->filter()}, operatorCtx_->execCtx());
+    VELOX_CHECK_EQ(exprs.exprs().size(), 1);
+    auto filterEvaluator = ExpressionEvaluator(
+        {exprs.exprs()[0]}, facebook::velox::type::concatRowTypes(rowTypes));
+    auto filterColumns = filterEvaluator.compute(
+        joinedCols, stream, cudf::get_current_device_resource_ref());
+    auto filterColumn = filterColumns[0]->view();
+
+    auto extra_rows = filter_left_joined_cols(
+        std::move(leftJoinIndices), leftTableView, filterColumn, stream);
+    auto num_extra_rows = extra_rows.size();
+    cudf::device_span<cudf::size_type const> extra_rows_span{extra_rows};
+    auto left_extra_result = cudf::gather(
+        leftTableView,
+        cudf::column_view{extra_rows_span},
+        oobPolicy,
+        stream);
+    auto extra_columns = left_extra_result->release();
+    for (auto col = leftColsSize; col < joinedCols.size(); col++) {
+      auto null_scalar =
+          cudf::make_empty_scalar_like(joinedCols[col]->view(), stream);
+      extra_columns.push_back(cudf::make_column_from_scalar(
+          *null_scalar,
+          num_extra_rows,
+          stream,
+          cudf::get_current_device_resource_ref()));
+    }
+    auto extra_table =
+        std::make_unique<cudf::table>(std::move(extra_columns));
+
+    auto filterTable = std::make_unique<cudf::table>(std::move(joinedCols));
+    auto filteredTable =
+        cudf::apply_boolean_mask(*filterTable, filterColumn, stream);
+
+    std::vector<cudf::table_view> concat_table_views;
+    concat_table_views.push_back(filteredTable->view());
+    concat_table_views.push_back(extra_table->view());
+    auto filteredLeftJoinTable = cudf::concatenate(
+        concat_table_views,
+        stream,
+        cudf::get_current_device_resource_ref());
+    joinedCols = filteredLeftJoinTable->release();
+
+    auto filteredjoinedCols = std::vector<std::unique_ptr<cudf::column>>(
+        outputType_->names().size());
+    for (int i = 0; i < leftColumnOutputIndices_.size(); i++) {
+      filteredjoinedCols[leftColumnOutputIndices_[i]] =
+          std::move(joinedCols[leftColumnIndicesToGather_[i]]);
+    }
+    for (int i = 0; i < rightColumnOutputIndices_.size(); i++) {
+      filteredjoinedCols[rightColumnOutputIndices_[i]] = std::move(
+          joinedCols[leftColsSize + rightColumnIndicesToGather_[i]]);
+    }
+    joinedCols = std::move(filteredjoinedCols);
+  };
+
+  auto innerJoinLambda = [&]() {
+    for (auto i = 0; i < rightTables.size(); i++) {
+      for (auto j = 0; j < leftTables.size(); j++) {
+        auto rightTableView = rightTables[i]->view();
+        auto& hb = hbs[i];
+        auto leftTableView = leftTables[j]->view();
+        // left = probe, right = build
+        VELOX_CHECK_NOT_NULL(hb);
+        std::tie(leftJoinIndices, rightJoinIndices) = hb->inner_join(
+            leftTableView.select(leftKeyIndices_), std::nullopt, stream);
+        auto leftIndicesSpan = cudf::device_span<cudf::size_type const>{*leftJoinIndices};
+        auto rightIndicesSpan = cudf::device_span<cudf::size_type const>{*rightJoinIndices};
+        auto leftIndicesCol = cudf::column_view{leftIndicesSpan};
+        auto rightIndicesCol = cudf::column_view{rightIndicesSpan};
+        if (joinNode_->filter()) {
+          filteredInnerJoinedCols(leftTableView, leftIndicesCol, rightTableView, rightIndicesCol);
+        } else {
+          unfilteredJoinedCols(leftTableView, leftIndicesCol, rightTableView, rightIndicesCol);
+        }
+        cudfOutputs.push_back(std::make_unique<cudf::table>(std::move(joinedCols)));
+        stream.synchronize();
+      }
+    }
+  };
+
+  auto leftJoinLambda = [&]() {
+    if(rightTables.size() == 1) {
+      for (auto j = 0; j < leftTables.size(); j++) {
+        auto rightTableView = rightTables[0]->view();
+        auto& hb = hbs[0];
+        auto leftTableView = leftTables[j]->view();
+        // left = probe, right = build
+        VELOX_CHECK_NOT_NULL(hb);
+        std::tie(leftJoinIndices, rightJoinIndices) = hb->left_join(
+            leftTableView.select(leftKeyIndices_), std::nullopt, stream);
+        if (joinNode_->filter()) {
+          std::vector<std::unique_ptr<rmm::device_uvector<cudf::size_type>>> leftJoinIndicesVec{std::move(leftJoinIndices)};
+          std::vector<std::unique_ptr<rmm::device_uvector<cudf::size_type>>> rightJoinIndicesVec{std::move(rightJoinIndices)};
+          filteredLeftJoinedCols(leftTableView, std::move(leftJoinIndicesVec), rightTableView, std::move(rightJoinIndicesVec));
+        } else {
+          auto leftIndicesSpan = cudf::device_span<cudf::size_type const>{*leftJoinIndices};
+          auto rightIndicesSpan = cudf::device_span<cudf::size_type const>{*rightJoinIndices};
+          auto leftIndicesCol = cudf::column_view{leftIndicesSpan};
+          auto rightIndicesCol = cudf::column_view{rightIndicesSpan};
+          unfilteredJoinedCols(leftTableView, leftIndicesCol, rightTableView, rightIndicesCol);
+        }
+        cudfOutputs.push_back(std::make_unique<cudf::table>(std::move(joinedCols)));
+        stream.synchronize();
+      }
+      return;
+    }
+
+    auto noMatchScalar = cudf::make_numeric_scalar<cudf::size_type>(std::numeric_limits<cudf::size_type>::min(), stream);
+    auto falseScalar = cudf::make_numeric_scalar<bool>(false, stream);
+    auto trueScalar = cudf::make_numeric_scalar<bool>(true, stream);
+    std::vector<std::unique_ptr<rmm::device_uvector<cudf::size_type>>> localLeftJoinIndices(rightTables.size() + 1);
+    std::vector<std::unique_ptr<rmm::device_uvector<cudf::size_type>>> locaRightJoinIndices(rightTables.size() + 1);
+    for (auto i = 0; i < leftTables.size(); i++) {
+      auto isLeftTableRowMatched = cudf::make_column_from_scalar(*falseScalar, leftTables[i]->num_rows(), stream);
+      auto isLeftTableRowMatchedT = cudf::table_view({isLeftTableRowMatched->view()});
+      for (auto j = 0; j < rightTables.size(); j++) {
+        auto rightTableView = rightTables[j]->view();
+        auto& hb = hbs[j];
+        auto leftTableView = leftTables[i]->view();
+        // left = probe, right = build
+        VELOX_CHECK_NOT_NULL(hb);
+        std::tie(localLeftJoinIndices[j], localRightJoinIndices[j]) = hb->inner_join(
+            leftTableView.select(leftKeyIndices_), std::nullopt, stream);
+        auto leftIndicesSpan = cudf::device_span<cudf::size_type const>{*localLeftJoinIndices[j]};
+        auto rightIndicesSpan = cudf::device_span<cudf::size_type const>{*localRightJoinIndices[j]};
+        auto leftIndicesCol = cudf::column_view{leftIndicesSpan};
+        auto rightIndicesCol = cudf::column_view{rightIndicesSpan};
+
+        auto leftIndicesTable = cudf::table_view({leftIndicesCol});
+        auto keyIdx = std::vector<cudf::size_type>{0};
+        auto uniqueLeftIndicesCol = cudf::distinct(leftIndicesTable, keyIdx, 
+            cudf::duplicate_keep_option::KEEP_ANY, cudf::null_equality::EQUAL, 
+            cudf::nan_equality::ALL_EQUAL, stream);
+        std::vector<std::reference_wrapper<const cudf::scalar>> sourceTrueScalars{*trueScalar};    
+        isLeftTableRowMatched = cudf::scatter(sourceTrueScalars, uniqueLeftIndicesCol->view(), isLeftTableRowMatchedT, stream);
+        isLeftTableRowMatchedT = cudf::table_view({isLeftTableRowMatched->view()});
+
+        if(!joinNode_->filter()) {
+          unfilteredJoinedCols(leftTableView, leftIndicesCol, rightTableView, rightIndicesCol);
+          cudfOutputs.push_back(std::make_unique<cudf::table>(std::move(joinedCols)));
+        } 
+      }
+
+      auto indicesColumn = cudf::sequence(isLeftTableRowMatched->size(), cudf::numeric_scalar<int32_t>(0), stream);  
+      auto indicesTable = cudf::table_view({indicesColumn->view()});  
+      auto invertedMask = cudf::unary_operation(isLeftTableRowMatched->view(), cudf::unary_operator::NOT, stream);  
+      auto unmatchedIndicesT = cudf::apply_boolean_mask(indicesTable, invertedMask->view());  
+      auto unmatchedIndices = unmatchedIndicesT->get_column(0).view();
+      auto unmatchedRightIndices = cudf::make_column_from_scalar(*noMatchScalar, unmatchedIndices.size(), stream);
+      if(!joinNode_->filter()) {
+        unfilteredJoinedCols(leftTableView, unmatchedIndices, rightTableView, unmatchedRightIndices->view());
+        cudfOutputs.push_back(std::make_unique<cudf::table>(std::move(joinedCols)));
+      } else {
+        std::tie(localLeftJoinIndices[rightTables.size()], localRightJoinIndices[rightTables.size()]) =
+          unmatchedIndices(isLeftTableRowMatched->view(), stream);
+        filteredLeftJoinedCols(leftTableView, std::move(localLeftJoinIndices), rightTableView, std::move(localRightJoinIndices));
+        cudfOutputs.push_back(std::make_unique<cudf::table>(std::move(joinedCols)));
+      }
+    }
+  }
+
+  auto rightJoinLambda = [&]() {
+    if(leftTables.size() == 1) {
+      for (auto j = 0; j < rightTables.size(); j++) {
+        auto rightTableView = rightTables[j]->view();
+        auto leftTableView = leftTables[0]->view();
+        if (joinNode_->filter()) {
+          std::tie(rightJoinIndices, leftJoinIndices) = cudf::mixed_left_join(
+              rightTableView.select(rightKeyIndices_),
+              leftTableView.select(leftKeyIndices_),
+              rightTableView,
+              leftTableView,
+              tree_.back(),
+              cudf::null_equality::UNEQUAL,
+              std::nullopt,
+              stream);
+        } else {
+          std::tie(rightJoinIndices, leftJoinIndices) = cudf::left_join(
+              rightTableView.select(rightKeyIndices_),
+              leftTableView.select(leftKeyIndices_),
+              cudf::null_equality::UNEQUAL,
+              stream,
+              cudf::get_current_device_resource_ref());
+        }
+        auto leftIndicesSpan = cudf::device_span<cudf::size_type const>{*leftJoinIndices};
+        auto rightIndicesSpan = cudf::device_span<cudf::size_type const>{*rightJoinIndices};
+        auto leftIndicesCol = cudf::column_view{leftIndicesSpan};
+        auto rightIndicesCol = cudf::column_view{rightIndicesSpan};
+        unfilteredJoinedCols(leftTableView, leftIndicesCol, rightTableView, rightIndicesCol);
+        cudfOutputs.push_back(std::make_unique<cudf::table>(std::move(joinedCols)));
+        stream.synchronize();
+      }
+      return;
+    }
+
+    auto noMatchScalar = cudf::make_numeric_scalar<cudf::size_type>(std::numeric_limits<cudf::size_type>::min(), stream);
+    auto falseScalar = cudf::make_numeric_scalar<bool>(false, stream);
+    auto trueScalar = cudf::make_numeric_scalar<bool>(true, stream);
+    std::vector<std::unique_ptr<rmm::device_uvector<cudf::size_type>>> localLeftJoinIndices(leftTables.size() + 1);
+    std::vector<std::unique_ptr<rmm::device_uvector<cudf::size_type>>> locaRightJoinIndices(leftTables.size() + 1);
+    for (auto i = 0; i < rightTables.size(); i++) {
+      auto isRightTableRowMatched = cudf::make_column_from_scalar(*falseScalar, rightTables[i]->num_rows(), stream);
+      auto isRightTableRowMatchedT = cudf::table_view({isRightTableRowMatched->view()});
+      auto& hb = hbs[i];
+      VELOX_CHECK_NOT_NULL(hb);
+      for (auto j = 0; j < leftTables.size(); j++) {
+        auto rightTableView = rightTables[i]->view();
+        auto leftTableView = leftTables[j]->view();
+        std::tie(localLeftJoinIndices[j], localRightJoinIndices[j]) = hb->inner_join(
+            leftTableView.select(leftKeyIndices_), std::nullopt, stream);
+        auto leftIndicesSpan = cudf::device_span<cudf::size_type const>{*localLeftJoinIndices[j]};
+        auto rightIndicesSpan = cudf::device_span<cudf::size_type const>{*localRightJoinIndices[j]};
+        auto leftIndicesCol = cudf::column_view{leftIndicesSpan};
+        auto rightIndicesCol = cudf::column_view{rightIndicesSpan};
+
+        auto rightIndicesTable = cudf::table_view({rightIndicesCol});
+        auto keyIdx = std::vector<cudf::size_type>{0};
+        auto uniqueRightIndicesCol = cudf::distinct(rightIndicesTable, keyIdx, 
+            cudf::duplicate_keep_option::KEEP_ANY, cudf::null_equality::EQUAL, 
+            cudf::nan_equality::ALL_EQUAL, stream);
+        std::vector<std::reference_wrapper<const cudf::scalar>> sourceTrueScalars{*trueScalar};    
+        isRightTableRowMatched = cudf::scatter(sourceTrueScalars, uniqueRightIndicesCol->view(), isRightTableRowMatchedT, stream);
+        isRightTableRowMatchedT = cudf::table_view({isRightTableRowMatched->view()});
+
+        if(!joinNode_->filter()) {
+          unfilteredJoinedCols(leftTableView, leftIndicesCol, rightTableView, rightIndicesCol);
+          cudfOutputs.push_back(std::make_unique<cudf::table>(std::move(joinedCols)));
+        } 
+      }
+
+      auto indicesColumn = cudf::sequence(isRightTableRowMatched->size(), cudf::numeric_scalar<int32_t>(0), stream);  
+      auto indicesTable = cudf::table_view({indicesColumn->view()});  
+      auto invertedMask = cudf::unary_operation(isRightTableRowMatched->view(), cudf::unary_operator::NOT, stream);  
+      auto unmatchedIndicesT = cudf::apply_boolean_mask(indicesTable, invertedMask->view());  
+      auto unmatchedIndices = unmatchedIndicesT->get_column(0).view();
+      auto unmatchedLeftIndices = cudf::make_column_from_scalar(*noMatchScalar, unmatchedIndices.size(), stream);
+      if(!joinNode_->filter()) {
+        unfilteredJoinedCols(leftTableView, unmatchedLeftIndices->view(), rightTableView, unmatchedIndices);
+        cudfOutputs.push_back(std::make_unique<cudf::table>(std::move(joinedCols)));
+      } else {
+        std::tie(localRightJoinIndices[leftTables.size()], localLeftJoinIndices[leftTables.size()]) =
+          unmatchedIndices(isRightTableRowMatched->view(), stream);
+        filteredLeftJoinedCols(rightTableView, std::move(localRightJoinIndices), leftTableView, std::move(localLeftJoinIndices));
+        cudfOutputs.push_back(std::make_unique<cudf::table>(std::move(joinedCols)));
+      }
+    }
+  }
 
   auto leftTableView = leftTable->view();
   for (auto i = 0; i < rightTables.size(); i++) {
@@ -823,6 +1215,7 @@ bool CudfHashJoinProbe::skipProbeOnEmptyBuild() const {
 }
 
 exec::BlockingReason CudfHashJoinProbe::isBlocked(ContinueFuture* future) {
+#if 0
   if ((joinNode_->isRightJoin() || joinNode_->isRightSemiFilterJoin()) &&
       hashObject_.has_value()) {
     if (!future_.valid()) {
@@ -831,9 +1224,14 @@ exec::BlockingReason CudfHashJoinProbe::isBlocked(ContinueFuture* future) {
     *future = std::move(future_);
     return exec::BlockingReason::kWaitForJoinProbe;
   }
+#endif
 
   if (hashObject_.has_value()) {
-    return exec::BlockingReason::kNotBlocked;
+    if (!future_.valid()) {
+      return exec::BlockingReason::kNotBlocked;
+    }
+    *future = std::move(future_);
+    return exec::BlockingReason::kWaitForJoinProbe;
   }
 
   auto joinBridge = operatorCtx_->task()->getCustomJoinBridge(
@@ -867,8 +1265,14 @@ exec::BlockingReason CudfHashJoinProbe::isBlocked(ContinueFuture* future) {
       }
     }
   }
+#if 0
   if ((joinNode_->isRightJoin() || joinNode_->isRightSemiFilterJoin()) &&
       future_.valid()) {
+    *future = std::move(future_);
+    return exec::BlockingReason::kWaitForJoinProbe;
+  }
+#endif
+  if(future_.valid()) {
     *future = std::move(future_);
     return exec::BlockingReason::kWaitForJoinProbe;
   }
@@ -876,7 +1280,10 @@ exec::BlockingReason CudfHashJoinProbe::isBlocked(ContinueFuture* future) {
 }
 
 bool CudfHashJoinProbe::isFinished() {
+#if 0
   auto const isFinished = finished_ || (noMoreInput_ && input_ == nullptr);
+#endif
+  auto const isFinished = finished_ || (noMoreInput_ && inputs_.empty());
 
   // Release hashObject_ if finished
   if (isFinished) {

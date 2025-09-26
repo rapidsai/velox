@@ -120,6 +120,7 @@ class CudfHashJoinProbe : public exec::Operator, public NvtxHelper {
   std::vector<CudfVectorPtr> inputs_;
   ContinueFuture future_{ContinueFuture::makeEmpty()};
 
+
   std::vector<cudf::size_type> leftKeyIndices_;
   std::vector<cudf::size_type> rightKeyIndices_;
   std::vector<cudf::size_type> leftColumnIndicesToGather_;
