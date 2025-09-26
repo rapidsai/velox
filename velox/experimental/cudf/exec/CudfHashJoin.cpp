@@ -951,6 +951,128 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
     }
   }
 
+  auto antiJoinLambda = [&]() {
+    if(leftTables.size() > 1) {
+      VELOX_FAIL("Multiple left tables unsupported for anti joins");
+    }
+    for (auto j = 0; j < rightTables.size(); j++) {
+      auto rightTableView = rightTables[j]->view();
+      auto leftTableView = leftTables[0]->view();
+      if (joinNode_->filter()) {
+        leftJoinIndices = cudf::mixed_left_anti_join(
+            leftTableView.select(leftKeyIndices_),
+            rightTableView.select(rightKeyIndices_),
+            leftTableView,
+            rightTableView,
+            tree_.back(),
+            cudf::null_equality::UNEQUAL,
+            stream,
+            cudf::get_current_device_resource_ref());
+      } else {
+        auto const rightTableHasNulls =
+            cudf::has_nulls(rightTableView.select(rightKeyIndices_));
+        if (joinNode_->isNullAware() and rightTableHasNulls) {
+          // empty result
+          leftJoinIndices =
+              std::make_unique<rmm::device_uvector<cudf::size_type>>(
+                  0, stream, cudf::get_current_device_resource_ref());
+        } else {
+          leftJoinIndices = cudf::left_anti_join(
+              leftTableView.select(leftKeyIndices_),
+              rightTableView.select(rightKeyIndices_),
+              cudf::null_equality::UNEQUAL,
+              stream,
+              cudf::get_current_device_resource_ref());
+        }
+      }
+      auto leftIndicesSpan = leftJoinIndice = cudf::device_span<cudf::size_type const>{*leftJoinIndices}
+      auto rightIndicesSpan = cudf::device_span<cudf::size_type const>{};
+      auto leftIndicesCol = cudf::column_view{leftIndicesSpan};
+      auto rightIndicesCol = cudf::column_view{rightIndicesSpan};
+      unfilteredJoinedCols(leftTableView, leftIndicesCol, rightTableView, rightIndicesCol);
+      cudfOutputs.push_back(std::make_unique<cudf::table>(std::move(joinedCols)));
+    }
+  }
+
+  auto leftSemiFilterJoinLambda = [&]() {
+    if(leftTables.size() > 1) {
+      VELOX_FAIL("Multiple left tables unsupported for leftSemiFilter joins");
+    }
+    for (auto j = 0; j < rightTables.size(); j++) {
+      auto rightTableView = rightTables[j]->view();
+      auto leftTableView = leftTables[0]->view();
+      if (joinNode_->filter()) {
+        leftJoinIndices = cudf::mixed_left_semi_join(
+            leftTableView.select(leftKeyIndices_),
+            rightTableView.select(rightKeyIndices_),
+            leftTableView,
+            rightTableView,
+            tree_.back(),
+            cudf::null_equality::UNEQUAL,
+            stream,
+            cudf::get_current_device_resource_ref());
+      } else {
+        leftJoinIndices = cudf::left_semi_join(
+            leftTableView.select(leftKeyIndices_),
+            rightTableView.select(rightKeyIndices_),
+            cudf::null_equality::UNEQUAL,
+            stream,
+            cudf::get_current_device_resource_ref());
+      }
+      auto leftIndicesSpan = leftJoinIndice = cudf::device_span<cudf::size_type const>{*leftJoinIndices}
+      auto rightIndicesSpan = cudf::device_span<cudf::size_type const>{};
+      auto leftIndicesCol = cudf::column_view{leftIndicesSpan};
+      auto rightIndicesCol = cudf::column_view{rightIndicesSpan};
+      unfilteredJoinedCols(leftTableView, leftIndicesCol, rightTableView, rightIndicesCol);
+      cudfOutputs.push_back(std::make_unique<cudf::table>(std::move(joinedCols)));
+    }
+  }
+
+  auto rightSemiFilterJoinLambda = [&]() {
+    if(leftTables.size() > 1 || rightTables.size() > 1) {
+      VELOX_FAIL("Multiple left tables unsupported for leftSemiFilter joins");
+    }
+    auto rightTableView = rightTables[0]->view();
+    auto leftTableView = leftTables[0]->view();
+    if (joinNode_->filter()) {
+      rightJoinIndices = cudf::mixed_left_semi_join(
+          rightTableView.select(rightKeyIndices_),
+          leftTableView.select(leftKeyIndices_),
+          rightTableView,
+          leftTableView,
+          tree_.back(),
+          cudf::null_equality::UNEQUAL,
+          stream,
+          cudf::get_current_device_resource_ref());
+    } else {
+      rightJoinIndices = cudf::left_semi_join(
+          rightTableView.select(rightKeyIndices_),
+          leftTableView.select(leftKeyIndices_),
+          cudf::null_equality::UNEQUAL,
+          stream,
+          cudf::get_current_device_resource_ref());
+    }
+    auto leftIndicesSpan = leftJoinIndice = cudf::device_span<cudf::size_type const>{*leftJoinIndices}
+    auto rightIndicesSpan = cudf::device_span<cudf::size_type const>{};
+    auto leftIndicesCol = cudf::column_view{leftIndicesSpan};
+    auto rightIndicesCol = cudf::column_view{rightIndicesSpan};
+    unfilteredJoinedCols(leftTableView, leftIndicesCol, rightTableView, rightIndicesCol);
+    cudfOutputs.push_back(std::make_unique<cudf::table>(std::move(joinedCols)));
+  }
+
+  auto joinType = joinNode_->joinType();
+  switch(joinNode_->joinType()) {
+    case JoinType::kInner: innerJoinLambda(); break;
+    case JoinType::kLeft: leftJoinLambda(); break;
+    case JoinType::kRight: rightJoinLambda(); break;
+    case JoinType::kAnti: antiJoinLambda(); break;
+    case JoinType::kLeftSemiFilter: leftSemiFilterJoinLambda(); break;
+    case JoinType::kRightSemiFilter: rightSemiFilterJoinLambda(); break;
+    default:
+      VELOX_FAIL("Unsupported join type: ", joinNode_->joinType());
+  }
+
+#if 0
   auto leftTableView = leftTable->view();
   for (auto i = 0; i < rightTables.size(); i++) {
     auto rightTableView = rightTables[i]->view();
@@ -1190,8 +1312,9 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
     cudfOutputs.push_back(std::make_unique<cudf::table>(std::move(joinedCols)));
     stream.synchronize();
   }
+#endif
 
-  input_.reset();
+  inputs_.clear();
   finished_ = noMoreInput_;
 
   auto cudfOutput = concatenateTables(std::move(cudfOutputs), stream);
