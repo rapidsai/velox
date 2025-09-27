@@ -62,7 +62,7 @@ namespace {
 }
 
 [[nodiscard]] auto makePrefetchManagedMr() {
-  auto managed_mr = std::make_unique<rmm::mr::managed_memory_resource>();  
+  auto managed_mr = std::make_shared<rmm::mr::managed_memory_resource>();  
   return std::make_shared<rmm::mr::prefetch_resource_adaptor<rmm::mr::device_memory_resource>>(  
       managed_mr.get()  
   );
@@ -79,8 +79,8 @@ namespace {
 }
 
 [[nodiscard]] auto makePrefetchManagedPoolMr(int percent) {
-  auto managed_mr = std::make_unique<rmm::mr::managed_memory_resource>();  
-  auto pool_mr = std::make_unique<rmm::mr::pool_memory_resource<rmm::mr::device_memory_resource>>(  
+  auto managed_mr = std::make_shared<rmm::mr::managed_memory_resource>();  
+  auto pool_mr = std::make_shared<rmm::mr::pool_memory_resource<rmm::mr::device_memory_resource>>(  
       managed_mr.get(),  
       rmm::percent_of_free_device_memory(percent)
   );  
