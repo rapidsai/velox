@@ -730,6 +730,25 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
       if (buildStream_.has_value()) {
         cudaEvent_->recordFrom(buildStream_.value()).waitOn(stream);
       }
+    } else if (joinNode_->isRightJoin() && rightTables.size() == 1) {
+      if (joinNode_->filter()) {
+        std::tie(rightJoinIndices, leftJoinIndices) = cudf::mixed_left_join(
+            rightTableView.select(rightKeyIndices_),
+            leftTableView.select(leftKeyIndices_),
+            rightTableView,
+            leftTableView,
+            tree_.back(),
+            cudf::null_equality::UNEQUAL,
+            std::nullopt,
+            stream);
+      } else {
+        std::tie(rightJoinIndices, leftJoinIndices) = cudf::left_join(
+            rightTableView.select(rightKeyIndices_),
+            leftTableView.select(leftKeyIndices_),
+            cudf::null_equality::UNEQUAL,
+            stream,
+            cudf::get_current_device_resource_ref());
+      }
     } else if (joinNode_->isAntiJoin() && rightTables.size() == 1) {
       if (joinNode_->filter()) {
         leftJoinIndices = cudf::mixed_left_anti_join(
@@ -1033,7 +1052,6 @@ exec::BlockingReason CudfHashJoinProbe::isBlocked(ContinueFuture* future) {
     }
     initStream.synchronize();
   }
-
   auto& rightTables = hashObject_.value().first;
   // should be rightTable->numDistinct() but it needs compute,
   // so we use num_rows()
