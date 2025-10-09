@@ -36,21 +36,34 @@ struct CudfHiveConnectorSplit
   const facebook::velox::dwio::common::FileFormat fileFormat{
       facebook::velox::dwio::common::FileFormat::PARQUET};
   const std::unique_ptr<cudf::io::source_info> cudfSourceInfo;
+  const uint64_t start;
+  const uint64_t length;
+
+  /// These represent columns like $file_size, $file_modified_time that are
+  /// associated with the CudfHiveConnectorSplit.
+  std::unordered_map<std::string, std::string> infoColumns = {};
 
   CudfHiveConnectorSplit(
       const std::string& connectorId,
       const std::string& _filePath,
-      int64_t _splitWeight = 0)
+      uint64_t _start,
+      uint64_t _length,
+      int64_t _splitWeight = 0,
+      const std::unordered_map<std::string, std::string>& _infoColumns = {})
       : facebook::velox::connector::ConnectorSplit(connectorId, _splitWeight),
         filePath(_filePath),
-        cudfSourceInfo(std::make_unique<cudf::io::source_info>(filePath)) {}
+        cudfSourceInfo(std::make_unique<cudf::io::source_info>(filePath)),
+        start(_start),
+        length(_length),
+        infoColumns(_infoColumns) {}
+
+  uint64_t size() const override;
 
   std::string toString() const override;
+
   std::string getFileName() const;
 
-  const cudf::io::source_info& getCudfSourceInfo() const {
-    return *cudfSourceInfo;
-  }
+  const cudf::io::source_info& getCudfSourceInfo() const;
 
   static std::shared_ptr<CudfHiveConnectorSplit> create(
       const folly::dynamic& obj);
@@ -71,15 +84,35 @@ class CudfHiveConnectorSplitBuilder {
     return *this;
   }
 
+  CudfHiveConnectorSplitBuilder& start(uint64_t start) {
+    start_ = start;
+    return *this;
+  }
+
+  CudfHiveConnectorSplitBuilder& length(uint64_t length) {
+    length_ = length;
+    return *this;
+  }
+
+  CudfHiveConnectorSplitBuilder& infoColumn(
+      const std::string& name,
+      const std::string& value) {
+    infoColumns_.emplace(std::move(name), std::move(value));
+    return *this;
+  }
+
   std::shared_ptr<CudfHiveConnectorSplit> build() const {
     return std::make_shared<CudfHiveConnectorSplit>(
-        connectorId_, filePath_, splitWeight_);
+        connectorId_, filePath_, start_, length_, infoColumns_, splitWeight_);
   }
 
  private:
   const std::string filePath_;
   std::string connectorId_;
+  uint64_t start_{0};
+  uint64_t length_{std::numeric_limits<uint64_t>::max()};
   int64_t splitWeight_{0};
+  std::unordered_map<std::string, std::string> infoColumns_ = {};
 };
 
 } // namespace facebook::velox::cudf_velox::connector::hive

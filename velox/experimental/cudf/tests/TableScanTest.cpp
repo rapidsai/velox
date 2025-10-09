@@ -21,6 +21,7 @@
 #include "velox/experimental/cudf/connectors/hive/CudfHiveTableHandle.h"
 #include "velox/experimental/cudf/tests/utils/CudfHiveConnectorTestBase.h"
 
+#include "velox/common/base/Fs.h"
 #include "velox/common/base/tests/GTestUtils.h"
 #include "velox/common/file/tests/FaultyFile.h"
 #include "velox/common/file/tests/FaultyFileSystem.h"
@@ -416,4 +417,23 @@ TEST_F(TableScanTest, filterPushdown) {
       filePaths,
       "SELECT count(*) FROM tmp");
 #endif
+}
+
+TEST_F(TableScanTest, splitOffsetAndLength) {
+  auto vectors = makeVectors(10, 1'000);
+  auto filePath = TempFilePath::create();
+  writeToFile(filePath->getPath(), vectors);
+  createDuckDbTable(vectors);
+
+  assertQuery(
+      tableScanNode(),
+      makeCudfHiveConnectorSplit(
+          filePath->getPath(), 0, fs::file_size(filePath->getPath()) / 2),
+      "SELECT * FROM tmp");
+
+  assertQuery(
+      tableScanNode(),
+      makeCudfHiveConnectorSplit(
+          filePath->getPath(), fs::file_size(filePath->getPath()) / 2),
+      "SELECT * FROM tmp LIMIT 0");
 }
