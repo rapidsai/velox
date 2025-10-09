@@ -23,9 +23,9 @@
 
 namespace facebook::velox::cudf_velox::connector::hive {
 
-  uint64_t CudfHiveConnectorSplit::size() const {
-    return length;
-  }
+uint64_t CudfHiveConnectorSplit::size() const {
+  return length;
+}
 
 std::string CudfHiveConnectorSplit::toString() const {
   return fmt::format("CudfHive: {}", filePath);
