@@ -26,6 +26,7 @@
 
 #include <cudf/ast/expressions.hpp>
 #include <cudf/column/column.hpp>
+#include <cudf/copying.hpp>
 #include <cudf/join/hash_join.hpp>
 #include <cudf/table/table.hpp>
 
@@ -160,6 +161,24 @@ class CudfHashJoinProbe : public exec::Operator, public NvtxHelper {
   // For Right joins, only one driver collects the unmatched rows mask and
   // emits. This value is set true only for that driver. See noMoreInput
   bool isLastDriver_{false};
+
+  static constexpr auto oobPolicy = cudf::out_of_bounds_policy::NULLIFY;
+  std::vector<std::unique_ptr<cudf::table>> innerJoin(std::unique_ptr<cudf::table> const &leftTable, rmm::cuda_stream_view stream);
+  std::vector<std::unique_ptr<cudf::table>> leftJoin(std::unique_ptr<cudf::table> const &leftTable, rmm::cuda_stream_view stream);
+  std::vector<std::unique_ptr<cudf::table>> rightJoin(std::unique_ptr<cudf::table> const &leftTable, rmm::cuda_stream_view stream);
+  std::unique_ptr<cudf::table> unfilteredOutput(
+      cudf::table_view leftTableView,
+      cudf::column_view leftIndicesCol,
+      cudf::table_view rightTableView,
+      cudf::column_view rightIndicesCol,
+      rmm::cuda_stream_view stream);
+  std::unique_ptr<cudf::table> filteredOutput(
+      cudf::table_view leftTableView, 
+      cudf::column_view leftIndicesCol, 
+      cudf::table_view rightTableView, 
+      cudf::column_view rightIndicesCol, 
+      std::function<std::vector<std::unique_ptr<cudf::column>>(std::vector<std::unique_ptr<cudf::column>>&&, cudf::mutable_column_view)> func,
+      rmm::cuda_stream_view stream);
 };
 
 class CudfHashJoinBridgeTranslator : public exec::Operator::PlanNodeTranslator {
