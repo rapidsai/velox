@@ -163,12 +163,24 @@ class CudfHashJoinProbe : public exec::Operator, public NvtxHelper {
   bool isLastDriver_{false};
 
   static constexpr auto oobPolicy = cudf::out_of_bounds_policy::NULLIFY;
-  std::vector<std::unique_ptr<cudf::table>> innerJoin(std::unique_ptr<cudf::table> const &leftTable, rmm::cuda_stream_view stream);
-  std::vector<std::unique_ptr<cudf::table>> leftJoin(std::unique_ptr<cudf::table> const &leftTable, rmm::cuda_stream_view stream);
-  std::vector<std::unique_ptr<cudf::table>> rightJoin(std::unique_ptr<cudf::table> const &leftTable, rmm::cuda_stream_view stream);
-  std::vector<std::unique_ptr<cudf::table>> leftSemiFilterJoin(std::unique_ptr<cudf::table> const &leftTable, rmm::cuda_stream_view stream);
-  std::vector<std::unique_ptr<cudf::table>> rightSemiFilterJoin(std::unique_ptr<cudf::table> const &leftTable, rmm::cuda_stream_view stream);
-  std::vector<std::unique_ptr<cudf::table>> antiJoin(std::unique_ptr<cudf::table> &&leftTable, rmm::cuda_stream_view stream);
+  std::vector<std::unique_ptr<cudf::table>> innerJoin(
+      std::unique_ptr<cudf::table> const& leftTable,
+      rmm::cuda_stream_view stream);
+  std::vector<std::unique_ptr<cudf::table>> leftJoin(
+      std::unique_ptr<cudf::table> const& leftTable,
+      rmm::cuda_stream_view stream);
+  std::vector<std::unique_ptr<cudf::table>> rightJoin(
+      std::unique_ptr<cudf::table> const& leftTable,
+      rmm::cuda_stream_view stream);
+  std::vector<std::unique_ptr<cudf::table>> leftSemiFilterJoin(
+      std::unique_ptr<cudf::table> const& leftTable,
+      rmm::cuda_stream_view stream);
+  std::vector<std::unique_ptr<cudf::table>> rightSemiFilterJoin(
+      std::unique_ptr<cudf::table> const& leftTable,
+      rmm::cuda_stream_view stream);
+  std::vector<std::unique_ptr<cudf::table>> antiJoin(
+      std::unique_ptr<cudf::table>&& leftTable,
+      rmm::cuda_stream_view stream);
   std::unique_ptr<cudf::table> unfilteredOutput(
       cudf::table_view leftTableView,
       cudf::column_view leftIndicesCol,
@@ -176,11 +188,13 @@ class CudfHashJoinProbe : public exec::Operator, public NvtxHelper {
       cudf::column_view rightIndicesCol,
       rmm::cuda_stream_view stream);
   std::unique_ptr<cudf::table> filteredOutput(
-      cudf::table_view leftTableView, 
-      cudf::column_view leftIndicesCol, 
-      cudf::table_view rightTableView, 
-      cudf::column_view rightIndicesCol, 
-      std::function<std::vector<std::unique_ptr<cudf::column>>(std::vector<std::unique_ptr<cudf::column>>&&, cudf::mutable_column_view)> func,
+      cudf::table_view leftTableView,
+      cudf::column_view leftIndicesCol,
+      cudf::table_view rightTableView,
+      cudf::column_view rightIndicesCol,
+      std::function<std::vector<std::unique_ptr<cudf::column>>(
+          std::vector<std::unique_ptr<cudf::column>>&&,
+          cudf::mutable_column_view)> func,
       rmm::cuda_stream_view stream);
 };
 
