@@ -752,34 +752,6 @@ std::vector<std::unique_ptr<cudf::table>> CudfHashJoinProbe::rightJoin(std::uniq
   auto& rightTables = hashObject_.value().first;
   auto& hbs = hashObject_.value().second;
 
-  if (rightTables.size() == 1) {
-    if (joinNode_->filter()) {
-      auto [rightJoinIndices, leftJoinIndices] = cudf::mixed_left_join(
-          rightTableView.select(rightKeyIndices_),
-          leftTableView.select(leftKeyIndices_),
-          rightTableView,
-          leftTableView,
-          tree_.back(),
-          cudf::null_equality::UNEQUAL,
-          std::nullopt,
-          stream);
-    } else {
-      auto [rightJoinIndices, leftJoinIndices] = cudf::left_join(
-          rightTableView.select(rightKeyIndices_),
-          leftTableView.select(leftKeyIndices_),
-          cudf::null_equality::UNEQUAL,
-          stream,
-          cudf::get_current_device_resource_ref());
-    }
-    auto leftIndicesSpan = cudf::device_span<cudf::size_type const>{*leftJoinIndices};
-    auto rightIndicesSpan = cudf::device_span<cudf::size_type const>{*rightJoinIndices};
-    auto leftIndicesCol = cudf::column_view{leftIndicesSpan};
-    auto rightIndicesCol = cudf::column_view{rightIndicesSpan};
-
-    cudfOutputs.push_back(unfilteredOutput(rightTableView, rightIndicesCol, leftTableView, leftIndicesCol, stream));
-    return cudfOutputs;
-  }
-
   for (auto i = 0; i < rightTables.size(); i++) {
     auto rightTableView = rightTables[i]->view();
     auto& hb = hbs[i];
@@ -862,9 +834,9 @@ std::vector<std::unique_ptr<cudf::table>> CudfHashJoinProbe::rightJoin(std::uniq
         rightMatchedFlags = std::move(updated_flags_tbl->release()[0]);
         return std::move(joinedCols);
       };
-      cudfOutputs.push_back(filteredOutput(rightTableView, rightIndicesCol, leftTableView, leftIndicesCol, filterFunc, stream));
+      cudfOutputs.push_back(filteredOutput(leftTableView, leftIndicesCol, rightTableView, rightIndicesCol, filterFunc, stream));
     } else {
-      cudfOutputs.push_back(unfilteredOutput(rightTableView, rightIndicesCol, leftTableView, leftIndicesCol, stream));
+      cudfOutputs.push_back(unfilteredOutput(leftTableView, leftIndicesCol, rightTableView, rightIndicesCol, stream));
     }
   }
   return cudfOutputs;
@@ -878,9 +850,10 @@ std::vector<std::unique_ptr<cudf::table>> CudfHashJoinProbe::leftSemiFilterJoin(
 
   for (auto i = 0; i < rightTables.size(); i++) {
     auto rightTableView = rightTables[i]->view();
+    std::unique_ptr<rmm::device_uvector<cudf::size_type>> leftJoinIndices;
 
     if (joinNode_->filter()) {
-      auto leftJoinIndices = cudf::mixed_left_semi_join(
+      leftJoinIndices = cudf::mixed_left_semi_join(
           leftTableView.select(leftKeyIndices_),
           rightTableView.select(rightKeyIndices_),
           leftTableView,
@@ -890,7 +863,7 @@ std::vector<std::unique_ptr<cudf::table>> CudfHashJoinProbe::leftSemiFilterJoin(
           stream,
           cudf::get_current_device_resource_ref());
     } else {
-      auto leftJoinIndices = cudf::left_semi_join(
+      leftJoinIndices = cudf::left_semi_join(
           leftTableView.select(leftKeyIndices_),
           rightTableView.select(rightKeyIndices_),
           cudf::null_equality::UNEQUAL,
@@ -902,7 +875,7 @@ std::vector<std::unique_ptr<cudf::table>> CudfHashJoinProbe::leftSemiFilterJoin(
     auto leftIndicesCol = cudf::column_view{leftIndicesSpan};
     auto rightIndicesCol = cudf::empty_like(leftIndicesCol);
 
-    cudfOutputs.push_back(unfilteredOutput(leftTableView, leftIndicesCol, rightTableView, rightIndicesCol, stream));
+    cudfOutputs.push_back(unfilteredOutput(leftTableView, leftIndicesCol, rightTableView, rightIndicesCol->view(), stream));
   }
   return cudfOutputs;
 }
@@ -912,11 +885,13 @@ std::vector<std::unique_ptr<cudf::table>> CudfHashJoinProbe::rightSemiFilterJoin
 
   auto leftTableView = leftTable->view();
   auto& rightTables = hashObject_.value().first;
+  auto rightTableView = rightTables[0]->view();
 
   VELOX_CHECK_EQ(rightTables.size(), 1, "Multiple right tables not yet supported for rightSemiFilterJoin");
 
+  std::unique_ptr<rmm::device_uvector<cudf::size_type>> rightJoinIndices;
   if (joinNode_->filter()) {
-    auto rightJoinIndices = cudf::mixed_left_semi_join(
+    rightJoinIndices = cudf::mixed_left_semi_join(
         rightTableView.select(rightKeyIndices_),
         leftTableView.select(leftKeyIndices_),
         rightTableView,
@@ -926,7 +901,7 @@ std::vector<std::unique_ptr<cudf::table>> CudfHashJoinProbe::rightSemiFilterJoin
         stream,
         cudf::get_current_device_resource_ref());
   } else {
-    auto rightJoinIndices = cudf::left_semi_join(
+    rightJoinIndices = cudf::left_semi_join(
         rightTableView.select(rightKeyIndices_),
         leftTableView.select(leftKeyIndices_),
         cudf::null_equality::UNEQUAL,
@@ -937,60 +912,69 @@ std::vector<std::unique_ptr<cudf::table>> CudfHashJoinProbe::rightSemiFilterJoin
   auto rightIndicesSpan = cudf::device_span<cudf::size_type const>{*rightJoinIndices};
   auto rightIndicesCol = cudf::column_view{rightIndicesSpan};
   auto leftIndicesCol = cudf::empty_like(rightIndicesCol);
-  cudfOutputs.push_back(unfilteredOutput(rightTableView, rightIndicesCol, leftTableView, leftIndicesCol, stream));
+  cudfOutputs.push_back(unfilteredOutput(leftTableView, leftIndicesCol->view(), rightTableView, rightIndicesCol, stream));
 
   return cudfOutputs;
 }
 
-std::vector<std::unique_ptr<cudf::table>> CudfHashJoinProbe::antiJoin(std::unique_ptr<cudf::table> const &leftTable, rmm::cuda_stream_view stream) {
+std::vector<std::unique_ptr<cudf::table>> CudfHashJoinProbe::antiJoin(std::unique_ptr<cudf::table> &&leftTable, rmm::cuda_stream_view stream) {
   std::vector<std::unique_ptr<cudf::table>> cudfOutputs;
-  
-  auto leftTableView = leftTable->view();
   auto& rightTables = hashObject_.value().first;
+
+  VELOX_CHECK_EQ(rightTables.size(), 1, "Multiple right tables not yet supported for antiJoin");
+
+  auto rightTableView = rightTables[0]->view();
   // Special case for null-aware anti join where
   // build table is not empty, no nulls, and probe table has nulls
   if (joinNode_->isNullAware() and !joinNode_->filter()) {
-    auto& rightTable = rightTables[0];
-    auto const rightTableHasNulls =
-        cudf::has_nulls(rightTable->view().select(rightKeyIndices_));
     auto const leftTableHasNulls =
         cudf::has_nulls(leftTable->view().select(leftKeyIndices_));
-    if (rightTable->num_rows() > 0 and !rightTableHasNulls and
+    auto const rightTableHasNulls =
+        cudf::has_nulls(rightTableView.select(rightKeyIndices_));
+    if (rightTables[0]->num_rows() > 0 and !rightTableHasNulls and
         leftTableHasNulls) {
       // drop nulls on probe table
       leftTable = cudf::drop_nulls(
           leftTable->view(),
           leftKeyIndices_,
-          stream,
-          cudf::get_current_device_resource_ref());
+          stream);
     }
   }
 
-  VELOX_CHECK_EQ(rightTables.size(), 1, "Multiple right tables not yet supported for rightSemiFilterJoin");
-
+  auto leftTableView = leftTable->view();
+  std::unique_ptr<rmm::device_uvector<cudf::size_type>> leftJoinIndices;
   if (joinNode_->filter()) {
-    auto rightJoinIndices = cudf::mixed_left_semi_join(
-        rightTableView.select(rightKeyIndices_),
+    leftJoinIndices = cudf::mixed_left_anti_join(
         leftTableView.select(leftKeyIndices_),
-        rightTableView,
+        rightTableView.select(rightKeyIndices_),
         leftTableView,
+        rightTableView,
         tree_.back(),
         cudf::null_equality::UNEQUAL,
         stream,
         cudf::get_current_device_resource_ref());
   } else {
-    auto rightJoinIndices = cudf::left_semi_join(
-        rightTableView.select(rightKeyIndices_),
-        leftTableView.select(leftKeyIndices_),
-        cudf::null_equality::UNEQUAL,
-        stream,
-        cudf::get_current_device_resource_ref());
+    auto const rightTableHasNulls =
+        cudf::has_nulls(rightTableView.select(rightKeyIndices_));
+    if (joinNode_->isNullAware() and rightTableHasNulls) {
+      // empty result
+      leftJoinIndices =
+          std::make_unique<rmm::device_uvector<cudf::size_type>>(
+              0, stream, cudf::get_current_device_resource_ref());
+    } else {
+      leftJoinIndices = cudf::left_anti_join(
+          leftTableView.select(leftKeyIndices_),
+          rightTableView.select(rightKeyIndices_),
+          cudf::null_equality::UNEQUAL,
+          stream,
+          cudf::get_current_device_resource_ref());
+    }
   }
 
-  auto rightIndicesSpan = cudf::device_span<cudf::size_type const>{*rightJoinIndices};
-  auto rightIndicesCol = cudf::column_view{rightIndicesSpan};
-  auto leftIndicesCol = cudf::empty_like(rightIndicesCol);
-  cudfOutputs.push_back(unfilteredOutput(rightTableView, rightIndicesCol, leftTableView, leftIndicesCol, stream));
+  auto leftIndicesSpan = cudf::device_span<cudf::size_type const>{*leftJoinIndices};
+  auto leftIndicesCol = cudf::column_view{leftIndicesSpan};
+  auto rightIndicesCol = cudf::empty_like(leftIndicesCol);
+  cudfOutputs.push_back(unfilteredOutput(leftTableView, leftIndicesCol, rightTableView, rightIndicesCol->view(), stream));
 
   return cudfOutputs;
 }
@@ -1001,7 +985,74 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
   }
   VELOX_NVTX_OPERATOR_FUNC_RANGE();
 
-  if (finished_ or !hashObject_.has_value() or !input_) {
+  if (finished_ or !hashObject_.has_value()) {
+    return nullptr;
+  }
+  if (!input_) {
+    // If no more input, emit unmatched-right rows if needed.
+    if (joinNode_->isRightJoin() && noMoreInput_ && !finished_ &&
+        isLastDriver_) {
+      auto& rightTables = hashObject_.value().first;
+      auto stream = cudfGlobalStreamPool().get_stream();
+      std::vector<std::unique_ptr<cudf::table>> toConcat;
+      for (size_t i = 0; i < rightTables.size(); ++i) {
+        auto& rightTable = rightTables[i];
+        auto n = rightTable->num_rows();
+        if (n == 0) {
+          continue;
+        }
+        auto& flags = rightMatchedFlags_[i];
+        // Build a boolean mask: unmatched = NOT(flags)
+        auto boolMask = cudf::unary_operation(
+            flags->view(), cudf::unary_operator::NOT, stream);
+
+        auto rightInput =
+            rightTable->view().select(rightColumnIndicesToGather_);
+        auto unmatchedRight =
+            cudf::apply_boolean_mask(rightInput, boolMask->view(), stream);
+        auto m = unmatchedRight->num_rows();
+        if (m == 0) {
+          continue;
+        }
+        // Build left null columns
+        std::vector<std::unique_ptr<cudf::column>> outCols(outputType_->size());
+        // Left side nulls (types derive from probe schema at the matching
+        // channel indices)
+        auto probeType = joinNode_->sources()[0]->outputType();
+        for (int li = 0; li < leftColumnOutputIndices_.size(); ++li) {
+          auto outIdx = leftColumnOutputIndices_[li];
+          auto probeChannel = leftColumnIndicesToGather_[li];
+          auto leftCudfType =
+              veloxToCudfTypeId(probeType->childAt(probeChannel));
+          auto nullScalar = cudf::make_default_constructed_scalar(
+              cudf::data_type{leftCudfType});
+          outCols[outIdx] = cudf::make_column_from_scalar(
+              *nullScalar, m, stream, cudf::get_current_device_resource_ref());
+        }
+        // Right side
+        auto rightCols = unmatchedRight->release();
+        for (int ri = 0; ri < rightColumnOutputIndices_.size(); ++ri) {
+          auto outIdx = rightColumnOutputIndices_[ri];
+          outCols[outIdx] = std::move(rightCols[ri]);
+        }
+        toConcat.push_back(std::make_unique<cudf::table>(std::move(outCols)));
+      }
+      // TODO (dm): We build multiple right chunks only when they are too large
+      // to fit in cudf::size_type. In case of a right join which doesn't have a
+      // lot of matches we'll get outCols of similar size. This concatenation
+      // will overflow. Try emitting result of one right chunk at a time.
+      if (!toConcat.empty()) {
+        auto out = concatenateTables(std::move(toConcat), stream);
+        finished_ = true;
+        auto size = out->num_rows();
+        if (out->num_columns() == 0 || size == 0) {
+          return nullptr;
+        }
+        return std::make_shared<CudfVector>(
+            pool(), outputType_, size, std::move(out), stream);
+      }
+      finished_ = true;
+    }
     return nullptr;
   }
 
@@ -1054,7 +1105,7 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
       cudfOutputs = rightSemiFilterJoin(leftTable, stream);
       break;
     case core::JoinType::kAnti:
-      cudfOutputs = antiJoin(leftTable, stream);
+      cudfOutputs = antiJoin(std::move(leftTable), stream);
       break;
     default:
       VELOX_FAIL("Unsupported join type: ", joinNode_->joinType());
