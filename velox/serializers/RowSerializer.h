@@ -265,7 +265,7 @@ class RowSerializer : public IterativeVectorSerializer {
 /// Usage:
 /// RowIteratorImpl iterator(source, endOffset);
 /// while (iterator.hasNext()) {
-///   auto next = iterator.next();
+///   auto next = iterator.nextRow();
 ///   ...Process the data in next...
 /// }
 class RowIteratorImpl : public velox::RowIterator {
@@ -281,7 +281,11 @@ class RowIteratorImpl : public velox::RowIterator {
 
   bool hasNext() const override;
 
-  std::unique_ptr<std::string> next() override;
+  std::unique_ptr<std::string> nextRow() override;
+
+  std::vector<std::string_view> nextBatch(size_t maxRows) override {
+    VELOX_UNSUPPORTED("nextBatch is not supported");
+  }
 
  private:
   TRowSize readRowSize();
@@ -299,11 +303,10 @@ class RowIteratorImpl : public velox::RowIterator {
   const std::unique_ptr<folly::IOBuf> bufHolder_;
 };
 
+#ifdef VELOX_ENABLE_BACKWARD_COMPATIBILITY
 using RowIteratorFactory = std::function<std::unique_ptr<RowIterator>(
     ByteInputStream*,
-    std::unique_ptr<BufferInputStream>,
-    std::unique_ptr<folly::IOBuf>,
-    size_t)>;
+    const VectorSerde::Options*)>;
 
 template <typename SerializeView>
 class RowDeserializer {
@@ -312,13 +315,13 @@ class RowDeserializer {
       ByteInputStream* source,
       std::vector<SerializeView>& serializedRows,
       std::vector<std::unique_ptr<std::string>>& serializedBuffers,
-      RowIteratorFactory rowIteratorFactory,
+      const RowIteratorFactory& rowIteratorFactory,
       const VectorSerde::Options* options) {
     while (!source->atEnd()) {
       std::unique_ptr<velox::RowIterator> rowIterator =
-          createNextRowIter(source, options, rowIteratorFactory);
+          rowIteratorFactory(source, options);
       while (rowIterator->hasNext()) {
-        serializedBuffers.emplace_back(rowIterator->next());
+        serializedBuffers.emplace_back(rowIterator->nextRow());
         if constexpr (std::is_same_v<SerializeView, std::string_view>) {
           serializedRows.push_back(std::string_view(
               serializedBuffers.back()->data(),
@@ -344,17 +347,16 @@ class RowDeserializer {
       std::unique_ptr<velox::RowIterator>& sourceRowIterator,
       std::vector<SerializeView>& serializedRows,
       std::vector<std::unique_ptr<std::string>>& serializedBuffers,
-      RowIteratorFactory rowIteratorFactory,
+      const RowIteratorFactory& rowIteratorFactory,
       const VectorSerde::Options* options) {
     auto remainingRows = maxRows;
     if (sourceRowIterator == nullptr) {
       VELOX_CHECK(!source->atEnd());
-      sourceRowIterator =
-          createNextRowIter(source, options, rowIteratorFactory);
+      sourceRowIterator = rowIteratorFactory(source, options);
     }
     while (remainingRows > 0) {
       while (sourceRowIterator->hasNext()) {
-        serializedBuffers.emplace_back(sourceRowIterator->next());
+        serializedBuffers.emplace_back(sourceRowIterator->nextRow());
         if constexpr (std::is_same_v<SerializeView, std::string_view>) {
           serializedRows.push_back(std::string_view(
               serializedBuffers.back()->data(),
@@ -372,46 +374,88 @@ class RowDeserializer {
           sourceRowIterator.reset();
           break;
         }
-        sourceRowIterator =
-            createNextRowIter(source, options, rowIteratorFactory);
+        sourceRowIterator = rowIteratorFactory(source, options);
       }
     }
     return maxRows - remainingRows;
   }
+};
+#else
+using RowIteratorFactory = std::function<std::unique_ptr<RowIterator>(
+    ByteInputStream*,
+    const VectorSerde::Options*)>;
 
- private:
-  static std::unique_ptr<velox::RowIterator> createNextRowIter(
+template <typename SerializeView>
+class RowDeserializer {
+ public:
+  static void deserialize(
       ByteInputStream* source,
-      const VectorSerde::Options* options,
-      RowIteratorFactory& rowIteratorFactory) {
-    const auto header = detail::RowGroupHeader::read(source);
-    if (!header.compressed) {
-      return rowIteratorFactory(
-          source, nullptr, nullptr, header.uncompressedSize + source->tellp());
+      std::vector<SerializeView>& serializedRows,
+      std::vector<std::unique_ptr<std::string>>& serializedBuffers,
+      const RowIteratorFactory& rowIteratorFactory,
+      const VectorSerde::Options* options) {
+    while (!source->atEnd()) {
+      std::unique_ptr<velox::RowIterator> rowIterator =
+          rowIteratorFactory(source, options);
+      while (rowIterator->hasNext()) {
+        serializedBuffers.emplace_back(rowIterator->nextRow());
+        if constexpr (std::is_same_v<SerializeView, std::string_view>) {
+          serializedRows.push_back(std::string_view(
+              serializedBuffers.back()->data(),
+              serializedBuffers.back()->size()));
+        } else {
+          serializedRows.push_back(serializedBuffers.back()->data());
+        }
+      }
     }
+  }
 
-    const auto compressionKind = options == nullptr
-        ? VectorSerde::Options().compressionKind
-        : options->compressionKind;
-    VELOX_DCHECK_NE(
-        compressionKind, common::CompressionKind::CompressionKind_NONE);
-    auto compressBuf = folly::IOBuf::create(header.compressedSize);
-    source->readBytes(compressBuf->writableData(), header.compressedSize);
-    compressBuf->append(header.compressedSize);
-
-    // Process chained uncompressed results IOBufs.
-    const auto codec = common::compressionKindToCodec(compressionKind);
-    auto uncompressedBuf =
-        codec->uncompress(compressBuf.get(), header.uncompressedSize);
-
-    auto uncompressedStream = std::make_unique<BufferInputStream>(
-        byteRangesFromIOBuf(uncompressedBuf.get()));
-    const std::streampos initialSize = uncompressedStream->tellp();
-    return rowIteratorFactory(
-        nullptr,
-        std::move(uncompressedStream),
-        std::move(uncompressedBuf),
-        header.uncompressedSize + initialSize);
+  /// @param maxRows Max number of rows to deserialize
+  /// @param sourceRowIterator The iterator used to start deserializing. If
+  /// nullptr, the method will start to deserialize from 'source'. After
+  /// deserialization, the method will set the iterator ready for the next call
+  /// to continue to iterate. If no more data to deserialize, it will be set to
+  /// nullptr.
+  /// @param rowIteratorFactory A factory to create a row iterator from owned or
+  /// non-owned sources.
+  static uint64_t deserialize(
+      ByteInputStream* source,
+      uint64_t maxRows,
+      std::unique_ptr<velox::RowIterator>& sourceRowIterator,
+      std::vector<SerializeView>& serializedRows,
+      std::vector<std::unique_ptr<std::string>>& serializedBuffers,
+      const RowIteratorFactory& rowIteratorFactory,
+      const VectorSerde::Options* options) {
+    auto remainingRows = maxRows;
+    if (sourceRowIterator == nullptr) {
+      VELOX_CHECK(!source->atEnd());
+      sourceRowIterator = rowIteratorFactory(source, options);
+    }
+    while (remainingRows > 0) {
+      while (sourceRowIterator->hasNext()) {
+        serializedBuffers.emplace_back(sourceRowIterator->nextRow());
+        if constexpr (std::is_same_v<SerializeView, std::string_view>) {
+          serializedRows.push_back(std::string_view(
+              serializedBuffers.back()->data(),
+              serializedBuffers.back()->size()));
+        } else {
+          serializedRows.push_back(serializedBuffers.back()->data());
+        }
+        if (--remainingRows == 0) {
+          break;
+        }
+      }
+      if (!sourceRowIterator->hasNext()) {
+        if (source->atEnd()) {
+          // No more data to read.
+          sourceRowIterator.reset();
+          break;
+        }
+        sourceRowIterator = rowIteratorFactory(source, options);
+      }
+    }
+    return maxRows - remainingRows;
   }
 };
+#endif
 } // namespace facebook::velox::serializer

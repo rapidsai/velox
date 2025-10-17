@@ -48,7 +48,7 @@ VectorPtr newConstantFromString(
     if (isPartitionDateDaysSinceEpoch) {
       days = folly::to<int32_t>(value.value());
     } else {
-      days = DATE()->toDays(static_cast<folly::StringPiece>(value.value()));
+      days = DATE()->toDays(value.value());
     }
     return std::make_shared<ConstantVector<int32_t>>(
         pool, size, false, type, std::move(days));
@@ -303,11 +303,13 @@ void SplitReader::createReader(
   FileHandleKey fileHandleKey{
       .filename = hiveSplit_->filePath,
       .tokenProvider = connectorQueryCtx_->fsTokenProvider()};
+
+  auto fileProperties = hiveSplit_->properties.value_or(FileProperties{});
+  fileProperties.fileReadOps = fileReadOps;
+
   try {
     fileHandleCachePtr = fileHandleFactory_->generate(
-        fileHandleKey,
-        hiveSplit_->properties.has_value() ? &*hiveSplit_->properties : nullptr,
-        fsStats_ ? fsStats_.get() : nullptr);
+        fileHandleKey, &fileProperties, fsStats_ ? fsStats_.get() : nullptr);
     VELOX_CHECK_NOT_NULL(fileHandleCachePtr.get());
   } catch (const VeloxRuntimeError& e) {
     if (e.errorCode() == error_code::kFileNotFound &&
