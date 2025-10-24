@@ -26,13 +26,12 @@
 #include "velox/experimental/cudf/exec/CudfLocalPartition.h"
 #include "velox/experimental/cudf/exec/CudfOrderBy.h"
 #include "velox/experimental/cudf/exec/CudfTopN.h"
-#include "velox/experimental/cudf/exec/ExpressionEvaluator.h"
 #include "velox/experimental/cudf/exec/ToCudf.h"
 #include "velox/experimental/cudf/exec/Utilities.h"
+#include "velox/experimental/cudf/expression/AstExpression.h"
+#include "velox/experimental/cudf/expression/ExpressionEvaluator.h"
 
 #include "folly/Conv.h"
-#include "velox/connectors/hive/HiveConnector.h"
-#include "velox/connectors/hive/TableHandle.h"
 #include "velox/exec/AssignUniqueId.h"
 #include "velox/exec/Driver.h"
 #include "velox/exec/FilterProject.h"
@@ -121,12 +120,11 @@ bool CompileState::compile(bool force_replace) {
       auto filterNode = filterProjectOp->filterNode();
       bool canBeEvaluated = true;
       if (projectPlanNode &&
-          !ExpressionEvaluator::canBeEvaluated(
-              projectPlanNode->projections())) {
+          !canBeEvaluatedByCudf(projectPlanNode->projections())) {
         canBeEvaluated = false;
       }
       if (canBeEvaluated && filterNode &&
-          !ExpressionEvaluator::canBeEvaluated({filterNode->filter()})) {
+          !canBeEvaluatedByCudf({filterNode->filter()})) {
         canBeEvaluated = false;
       }
       return canBeEvaluated;
@@ -439,6 +437,11 @@ void registerCudf() {
   CudfDriverAdapter cda{CudfConfig::getInstance().forceReplace};
   exec::DriverAdapter cudfAdapter{kCudfAdapterName, {}, cda};
   exec::DriverFactory::registerAdapter(cudfAdapter);
+
+  if (CudfConfig::getInstance().astExpressionEnabled) {
+    registerAstEvaluator(CudfConfig::getInstance().astExpressionPriority);
+  }
+
   isCudfRegistered = true;
 }
 

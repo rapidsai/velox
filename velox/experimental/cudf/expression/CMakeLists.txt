@@ -12,15 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-add_subdirectory(exec)
-add_subdirectory(connectors)
-add_subdirectory(vector)
-add_subdirectory(expression)
+add_library(
+  velox_cudf_expression
+  AstExpression.cpp
+  ExpressionEvaluator.cpp
+  SubfieldFiltersToAst.cpp
+)
 
-if(VELOX_BUILD_TESTING)
-  add_subdirectory(tests)
-endif()
+target_link_libraries(
+  velox_cudf_expression
+  PUBLIC cudf::cudf
+  PRIVATE arrow velox_exception velox_common_base velox_cudf_vector
+)
 
-if(VELOX_ENABLE_BENCHMARKS)
-  add_subdirectory(benchmarks)
-endif()
+target_compile_options(velox_cudf_expression PRIVATE -Wno-missing-field-initializers)
