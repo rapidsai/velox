@@ -855,18 +855,19 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
       std::vector<velox::RowTypePtr> rowTypes{probeType, buildType};
       exec::ExprSet exprs({joinNode_->filter()}, operatorCtx_->execCtx());
       VELOX_CHECK_EQ(exprs.exprs().size(), 1);
-      auto filterEvaluator = ExpressionEvaluator(
+      auto filterEvaluator = createCudfExpression(
           {exprs.exprs()[0]}, facebook::velox::type::concatRowTypes(rowTypes));
-      auto filterColumns = filterEvaluator.compute(
-          joinedCols, stream, cudf::get_current_device_resource_ref());
-      auto filterColumn = filterColumns[0]->mutable_view();
+      auto filterColumn = filterEvaluator->eval(
+          joinedCols, stream, cudf::get_current_device_resource_ref(), true);
+      auto filterColumnView =
+          std::get<std::unique_ptr<cudf::column>>(filterColumn)->mutable_view();
 
       // If filter is not all false, apply the filter
       if (joinNode_->isInnerJoin() or joinNode_->isRightJoin()) {
         // apply the filter
         auto filterTable = std::make_unique<cudf::table>(std::move(joinedCols));
         auto filteredTable =
-            cudf::apply_boolean_mask(*filterTable, filterColumn, stream);
+            cudf::apply_boolean_mask(*filterTable, filterColumnView, stream);
         joinedCols = filteredTable->release();
 
         if (joinNode_->isRightJoin()) {
@@ -876,7 +877,7 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
           auto rightIdxCol = cudf::column_view{rightIndicesSpan};
           auto filteredIdxTable = cudf::apply_boolean_mask(
               cudf::table_view{std::vector<cudf::column_view>{rightIdxCol}},
-              filterColumn,
+              filterColumnView,
               stream);
           auto filteredCols = filteredIdxTable->release();
           auto filteredRightIdxCol = std::move(filteredCols[0]);
@@ -903,7 +904,7 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
         auto [leftJoinIndices2, rightJoinIndices2] = filtered_indices_again(
             std::move(leftJoinIndices),
             std::move(rightJoinIndices),
-            filterColumn,
+            filterColumnView,
             stream);
         // TBD: Sort only for left join based on leftJoinIndices2
         // sort_join_indices_inplace(
