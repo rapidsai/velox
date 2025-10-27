@@ -50,6 +50,7 @@ class CudfExpressionSelectionTest : public ::testing::Test {
         {"b", BIGINT()},
         {"name", VARCHAR()},
         {"date", TIMESTAMP()},
+        {"c", INTEGER()},
     });
 
     parse::registerTypeResolver();
@@ -121,6 +122,79 @@ TEST_F(CudfExpressionSelectionTest, functionTopLevelWithNestedAst) {
   auto* functionExpr = dynamic_cast<FunctionExpression*>(cudfExpr.get());
   ASSERT_NE(functionExpr, nullptr);
   ASSERT_TRUE(canBeEvaluatedByCudf(expr, /*deep=*/true));
+}
+
+TEST_F(CudfExpressionSelectionTest, signatureEnforcesConstantArgsSplit) {
+  // OK: delimiter and limit are constants
+  auto ok = parseAndInferTypedExpr(
+      "split(name, ',', 3)",
+      rowType_,
+      execCtx_.get(),
+      {.parseIntegerAsBigint = false, .functionPrefix = ""});
+  ASSERT_TRUE(canBeEvaluatedByCudf(ok));
+
+  // Bad: delimiter is not a constant
+  auto bad = parseAndInferTypedExpr(
+      "split(name, name, 3)",
+      rowType_,
+      execCtx_.get(),
+      {.parseIntegerAsBigint = false, .functionPrefix = ""});
+  ASSERT_FALSE(canBeEvaluatedByCudf(bad));
+}
+
+TEST_F(CudfExpressionSelectionTest, signatureEnforcesConstantArgsLike) {
+  // OK: pattern is a constant
+  auto ok =
+      parseAndInferTypedExpr("like(name, '%abc%')", rowType_, execCtx_.get());
+  ASSERT_TRUE(canBeEvaluatedByCudf(ok));
+
+  // Bad: pattern is not a constant
+  auto bad =
+      parseAndInferTypedExpr("like(name, name)", rowType_, execCtx_.get());
+  ASSERT_FALSE(canBeEvaluatedByCudf(bad));
+}
+
+TEST_F(CudfExpressionSelectionTest, signatureArityAndConstantsSubstr) {
+  // OK: 2-arg substr with constant start
+  auto ok2 =
+      parseAndInferTypedExpr("substr(name, 1)", rowType_, execCtx_.get());
+  ASSERT_TRUE(canBeEvaluatedByCudf(ok2));
+
+  // OK: 3-arg substr with constant start and length
+  auto ok3 =
+      parseAndInferTypedExpr("substr(name, 1, 5)", rowType_, execCtx_.get());
+  ASSERT_TRUE(canBeEvaluatedByCudf(ok3));
+
+  // Bad: start must be constant
+  auto badConst =
+      parseAndInferTypedExpr("substr(name, a)", rowType_, execCtx_.get());
+  ASSERT_FALSE(canBeEvaluatedByCudf(badConst));
+}
+
+TEST_F(CudfExpressionSelectionTest, signatureCastsInDivide) {
+  // OK: numeric args are castable to double
+  auto ok = parseAndInferTypedExpr("divide(a, b)", rowType_, execCtx_.get());
+  ASSERT_TRUE(canBeEvaluatedByCudf(ok));
+}
+
+TEST_F(CudfExpressionSelectionTest, signatureVarargsHashWithSeed) {
+  facebook::velox::functions::sparksql::registerFunctions();
+
+  // OK: first arg constant seed
+  auto ok = parseAndInferTypedExpr(
+      "hash_with_seed(42, a, b)",
+      rowType_,
+      execCtx_.get(),
+      {.parseIntegerAsBigint = false, .functionPrefix = ""});
+  ASSERT_TRUE(canBeEvaluatedByCudf(ok));
+
+  // Bad: first arg must be constant seed
+  auto bad = parseAndInferTypedExpr(
+      "hash_with_seed(c, b)",
+      rowType_,
+      execCtx_.get(),
+      {.parseIntegerAsBigint = false, .functionPrefix = ""});
+  ASSERT_FALSE(canBeEvaluatedByCudf(bad));
 }
 
 } // namespace

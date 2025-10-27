@@ -18,6 +18,7 @@
 
 #include "velox/core/ITypedExpr.h"
 #include "velox/expression/Expr.h"
+#include "velox/expression/FunctionSignature.h"
 #include "velox/type/Type.h"
 
 #include <cudf/column/column.hpp>
@@ -62,14 +63,21 @@ using CudfFunctionFactory = std::function<std::shared_ptr<CudfFunction>(
     const std::string& name,
     const std::shared_ptr<velox::exec::Expr>& expr)>;
 
+struct CudfFunctionSpec {
+  CudfFunctionFactory factory;
+  std::vector<exec::FunctionSignaturePtr> signatures;
+};
+
 bool registerCudfFunction(
     const std::string& name,
     CudfFunctionFactory factory,
+    const std::vector<exec::FunctionSignaturePtr>& signatures,
     bool overwrite = true);
 
 void registerCudfFunctions(
-    std::vector<std::string> aliases,
+    const std::vector<std::string>& aliases,
     CudfFunctionFactory factory,
+    const std::vector<exec::FunctionSignaturePtr>& signatures,
     bool overwrite = true);
 
 bool registerBuiltinFunctions(const std::string& prefix);
