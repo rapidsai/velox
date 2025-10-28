@@ -197,4 +197,21 @@ TEST_F(CudfExpressionSelectionTest, signatureVarargsHashWithSeed) {
   ASSERT_FALSE(canBeEvaluatedByCudf(bad));
 }
 
+TEST_F(CudfExpressionSelectionTest, signatureTypeVariableCoalesce) {
+  // OK: same type BIGINT
+  auto ok1 = parseAndInferTypedExpr("coalesce(a, b)", rowType_, execCtx_.get());
+  ASSERT_TRUE(canBeEvaluatedByCudf(ok1));
+
+  // OK: VARCHAR with literal
+  auto ok2 =
+      parseAndInferTypedExpr("coalesce(name, 'x')", rowType_, execCtx_.get());
+  ASSERT_TRUE(canBeEvaluatedByCudf(ok2));
+}
+
+TEST_F(CudfExpressionSelectionTest, signatureTypeVariableSwitchIf) {
+  // OK: boolean + same type BIGINT
+  auto ok1 = parseAndInferTypedExpr("if(true, a, b)", rowType_, execCtx_.get());
+  ASSERT_TRUE(canBeEvaluatedByCudf(ok1));
+}
+
 } // namespace

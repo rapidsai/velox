@@ -762,20 +762,18 @@ bool registerBuiltinFunctions(const std::string& prefix) {
            .constantArgumentType("bigint")
            .build()});
 
-  // DM: Coalesce is treated as special. function return cannot be any
-  // std::vector<exec::FunctionSignaturePtr> coalesceSigs = {
-  //     FunctionSignatureBuilder()
-  //         .returnType("any")
-  //         .argumentType("any")
-  //         .constantVariableArity("any")
-  //         .build()};
-  // registerCudfFunction(
-  //     "coalesce",
-  //     [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr)
-  //     {
-  //       return std::make_shared<CoalesceFunction>(expr);
-  //     },
-  //     coalesceSigs);
+  // Coalesce is special form and doesn't have a prefix in its name.
+  registerCudfFunction(
+      "coalesce",
+      [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
+        return std::make_shared<CoalesceFunction>(expr);
+      },
+      {FunctionSignatureBuilder()
+           .typeVariable("T")
+           .returnType("T")
+           .argumentType("T")
+           .variableArity("T")
+           .build()});
 
   registerCudfFunction(
       prefix + "hash_with_seed",
@@ -873,20 +871,19 @@ bool registerBuiltinFunctions(const std::string& prefix) {
            .argumentType("double")
            .build()});
 
-  // std::vector<exec::FunctionSignaturePtr> switchSigs = {
-  //     FunctionSignatureBuilder()
-  //         .returnType("any")
-  //         .argumentType("boolean")
-  //         .argumentType("any")
-  //         .argumentType("any")
-  //         .build()};
-  // registerCudfFunctions(
-  //     {prefix + "switch", prefix + "if"},
-  //     [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr)
-  //     {
-  //       return std::make_shared<SwitchFunction>(expr);
-  //     },
-  //     switchSigs);
+  // No prefix because switch and if are special form
+  registerCudfFunctions(
+      {"switch", "if"},
+      [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
+        return std::make_shared<SwitchFunction>(expr);
+      },
+      {FunctionSignatureBuilder()
+           .typeVariable("T")
+           .returnType("T")
+           .argumentType("boolean")
+           .argumentType("T")
+           .argumentType("T")
+           .build()});
 
   return true;
 }
