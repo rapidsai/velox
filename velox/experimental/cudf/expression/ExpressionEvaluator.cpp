@@ -888,6 +888,173 @@ bool registerBuiltinFunctions(const std::string& prefix) {
   //     },
   //     switchSigs);
 
+  // Register aggregation functions
+  
+  registerCudfFunction(
+      prefix + "sum",
+      [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
+        return nullptr;
+      },
+      {
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("tinyint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("smallint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("integer")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("bigint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("real")
+           .argumentType("real")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("double")
+           .argumentType("double")
+           .build()});
+
+  registerCudfFunction(
+      prefix + "count",
+      [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
+        return nullptr;
+      },
+      {
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("tinyint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("smallint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("integer")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("bigint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("real")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("double")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("varchar")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("boolean")
+           .build(),
+       // count(*) case: no arguments specified
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .build()});
+
+  registerCudfFunction(
+      prefix + "min",
+      [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
+        return nullptr;
+      },
+      {
+       FunctionSignatureBuilder()
+           .returnType("tinyint")
+           .argumentType("tinyint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("smallint")
+           .argumentType("smallint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("integer")
+           .argumentType("integer")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("bigint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("real")
+           .argumentType("real")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("double")
+           .argumentType("double")
+           .build()
+       // varchar & boolean omitted
+      });
+
+  registerCudfFunction(
+      prefix + "max",
+      [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
+        return nullptr;
+      },
+      {
+       FunctionSignatureBuilder()
+           .returnType("tinyint")
+           .argumentType("tinyint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("smallint")
+           .argumentType("smallint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("integer")
+           .argumentType("integer")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("bigint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("real")
+           .argumentType("real")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("double")
+           .argumentType("double")
+           .build()
+       // varchar & boolean omitted
+      });
+
+  registerCudfFunction(
+      prefix + "avg",
+      [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
+        return nullptr;
+      },
+      {// Average always returns double for numeric inputs
+       // tinyint case: throws "Constants and lambdas not yet supported" exception
+       FunctionSignatureBuilder()
+           .returnType("double")
+           .argumentType("smallint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("double")
+           .argumentType("integer")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("double")
+           .argumentType("bigint")
+           .build(),
+       // real case: falls back to CPU due to return type mismatch
+       FunctionSignatureBuilder()
+           .returnType("double")
+           .argumentType("double")
+           .build()});
+
   return true;
 }
 
@@ -1067,6 +1234,82 @@ std::shared_ptr<CudfExpression> createCudfExpression(
   }
 
   return FunctionExpression::create(expr, inputRowSchema);
+}
+
+core::TypedExprPtr expandFieldReference(
+    const core::TypedExprPtr& expr, 
+    const core::PlanNode* sourceNode) {
+  // If this is a field reference and we have a source projection, expand it
+  if (expr->kind() == core::ExprKind::kFieldAccess && sourceNode) {
+    auto projectNode = dynamic_cast<const core::ProjectNode*>(sourceNode);
+    if (projectNode) {
+      auto fieldExpr = std::dynamic_pointer_cast<const core::FieldAccessTypedExpr>(expr);
+      if (fieldExpr) {
+        // Find the corresponding projection expression
+        const auto& projections = projectNode->projections();
+        const auto& names = projectNode->names();
+        for (size_t i = 0; i < names.size(); ++i) {
+          if (names[i] == fieldExpr->name()) {
+            return projections[i]; // Return the underlying expression
+          }
+        }
+      }
+    }
+  }
+  return expr; // Return original expression if no expansion needed
+}
+
+bool canGroupingKeysBeEvaluatedByCudf(
+    const std::vector<core::FieldAccessTypedExprPtr>& groupingKeys,
+    const core::PlanNode* sourceNode) {
+  
+  // Check grouping key expressions (with expansion)
+  for (const auto& groupingKey : groupingKeys) {
+    auto expandedKey = expandFieldReference(groupingKey, sourceNode);
+    if (!canBeEvaluatedByCudf(expandedKey)) {
+      return false;
+    }
+  }
+  
+  return true;
+}
+
+bool canBeEvaluatedByCudf(const core::AggregationNode& aggregationNode) {
+  const core::PlanNode* sourceNode = aggregationNode.sources().empty() ? nullptr : aggregationNode.sources()[0].get();
+
+  // Check supported aggregation functions using the registry (like function expressions) along with other checks
+  for (const auto& aggregate : aggregationNode.aggregates()) {
+
+    if (!canBeEvaluatedByCudf(aggregate.call)) {
+      return false;
+    }
+    
+    // `distinct` aggregations are not supported, in testing fails with "De-dup before aggregation is not yet supported"
+    if (aggregate.distinct) {
+      return false;
+    }
+    
+    // `mask` is NOT supported (in testing do not appear to be be applied and return incorrect results )
+    if (aggregate.mask) {
+      return false;
+    }
+    
+    // Check input expressions can be evaluated by CUDF, expand the input first
+    for (const auto& input : aggregate.call->inputs()) {
+      auto expandedInput = expandFieldReference(input, sourceNode);
+      if (!canBeEvaluatedByCudf(expandedInput)) {
+        return false;
+      }
+    }
+    
+  }
+  
+  // Check grouping key expressions
+  if (!canGroupingKeysBeEvaluatedByCudf(aggregationNode.groupingKeys(), sourceNode)) {
+    return false;
+  }
+  
+  return true;
 }
 
 } // namespace facebook::velox::cudf_velox

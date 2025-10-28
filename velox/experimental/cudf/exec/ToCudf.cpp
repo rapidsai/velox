@@ -132,6 +132,21 @@ bool CompileState::compile(bool force_replace) {
     return false;
   };
 
+  auto isAggregationSupported = [getPlanNode](const exec::Operator* op) {
+    if (!isAnyOf<exec::HashAggregation, exec::StreamingAggregation>(op)) {
+      return false;
+    }
+    
+    auto aggregationPlanNode = std::dynamic_pointer_cast<const core::AggregationNode>(
+        getPlanNode(op->planNodeId()));
+    if (!aggregationPlanNode) {
+      return false;
+    }
+    
+    // Use the centralized canBeEvaluatedByCudf function which includes expression expansion
+    return canBeEvaluatedByCudf(*aggregationPlanNode);
+  };
+
   auto isJoinSupported = [getPlanNode](const exec::Operator* op) {
     if (!isAnyOf<exec::HashBuild, exec::HashProbe>(op)) {
       return false;
@@ -153,19 +168,17 @@ bool CompileState::compile(bool force_replace) {
   };
 
   auto isSupportedGpuOperator =
-      [isFilterProjectSupported, isJoinSupported, isTableScanSupported](
+      [isFilterProjectSupported, isJoinSupported, isTableScanSupported, isAggregationSupported](
           const exec::Operator* op) {
         return isAnyOf<
                    exec::OrderBy,
                    exec::TopN,
-                   exec::HashAggregation,
-                   exec::StreamingAggregation,
                    exec::Limit,
                    exec::LocalPartition,
                    exec::LocalExchange,
                    exec::AssignUniqueId>(op) ||
             isFilterProjectSupported(op) || isJoinSupported(op) ||
-            isTableScanSupported(op);
+            isTableScanSupported(op) || isAggregationSupported(op);
       };
 
   std::vector<bool> isSupportedGpuOperators(operators.size());
@@ -175,31 +188,27 @@ bool CompileState::compile(bool force_replace) {
       isSupportedGpuOperators.begin(),
       isSupportedGpuOperator);
   auto acceptsGpuInput = [isFilterProjectSupported,
-                          isJoinSupported](const exec::Operator* op) {
+                          isJoinSupported, isAggregationSupported](const exec::Operator* op) {
     return isAnyOf<
                exec::OrderBy,
                exec::TopN,
-               exec::HashAggregation,
-               exec::StreamingAggregation,
                exec::Limit,
                exec::LocalPartition,
                exec::AssignUniqueId>(op) ||
-        isFilterProjectSupported(op) || isJoinSupported(op);
+        isFilterProjectSupported(op) || isJoinSupported(op) || isAggregationSupported(op);
   };
   auto producesGpuOutput = [isFilterProjectSupported,
                             isJoinSupported,
-                            isTableScanSupported](const exec::Operator* op) {
+                            isTableScanSupported, isAggregationSupported](const exec::Operator* op) {
     return isAnyOf<
                exec::OrderBy,
                exec::TopN,
-               exec::HashAggregation,
-               exec::StreamingAggregation,
                exec::Limit,
                exec::LocalExchange,
                exec::AssignUniqueId>(op) ||
         isFilterProjectSupported(op) ||
         (isAnyOf<exec::HashProbe>(op) && isJoinSupported(op)) ||
-        (isTableScanSupported(op));
+        (isTableScanSupported(op)) || isAggregationSupported(op);
   };
 
   int32_t operatorsOffset = 0;
@@ -279,8 +288,7 @@ bool CompileState::compile(bool force_replace) {
       VELOX_CHECK(planNode != nullptr);
       replaceOp.push_back(std::make_unique<CudfTopN>(id, ctx, planNode));
     } else if (
-        dynamic_cast<exec::HashAggregation*>(oper) or
-        dynamic_cast<exec::StreamingAggregation*>(oper)) {
+        isAggregationSupported(oper)) {
       auto planNode = std::dynamic_pointer_cast<const core::AggregationNode>(
           getPlanNode(oper->planNodeId()));
       VELOX_CHECK(planNode != nullptr);
