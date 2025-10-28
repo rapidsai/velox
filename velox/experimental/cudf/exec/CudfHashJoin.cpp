@@ -252,9 +252,8 @@ void CudfHashJoinBuild::noMoreInput() {
       std::dynamic_pointer_cast<CudfHashJoinBridge>(joinBridge);
 
   cudfHashJoinBridge->setBuildStream(stream);
-  cudfHashJoinBridge->setHashTable(
-      std::make_optional(
-          std::make_pair(std::move(shared_tbls), std::move(hashObjects))));
+  cudfHashJoinBridge->setHashTable(std::make_optional(
+      std::make_pair(std::move(shared_tbls), std::move(hashObjects))));
 }
 
 exec::BlockingReason CudfHashJoinBuild::isBlocked(ContinueFuture* future) {
@@ -385,6 +384,7 @@ CudfHashJoinProbe::CudfHashJoinProbe(
     // create ast tree
     std::vector<PrecomputeInstruction> rightPrecomputeInstructions;
     std::vector<PrecomputeInstruction> leftPrecomputeInstructions;
+    static constexpr bool kAllowPureAstOnly = true;
     if (joinNode_->isRightJoin() || joinNode_->isRightSemiFilterJoin()) {
       createAstTree(
           exprs.exprs()[0],
@@ -393,7 +393,8 @@ CudfHashJoinProbe::CudfHashJoinProbe(
           buildType,
           probeType,
           rightPrecomputeInstructions,
-          leftPrecomputeInstructions);
+          leftPrecomputeInstructions,
+          kAllowPureAstOnly);
     } else {
       createAstTree(
           exprs.exprs()[0],
@@ -402,7 +403,8 @@ CudfHashJoinProbe::CudfHashJoinProbe(
           probeType,
           buildType,
           leftPrecomputeInstructions,
-          rightPrecomputeInstructions);
+          rightPrecomputeInstructions,
+          kAllowPureAstOnly);
     }
     if (leftPrecomputeInstructions.size() > 0 ||
         rightPrecomputeInstructions.size() > 0) {

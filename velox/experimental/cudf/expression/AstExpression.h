@@ -71,7 +71,8 @@ cudf::ast::expression const& createAstTree(
     const RowTypePtr& leftRowSchema,
     const RowTypePtr& rightRowSchema,
     std::vector<PrecomputeInstruction>& leftPrecomputeInstructions,
-    std::vector<PrecomputeInstruction>& rightPrecomputeInstructions);
+    std::vector<PrecomputeInstruction>& rightPrecomputeInstructions,
+    const bool allowPureAstOnly);
 
 // Evaluates the expression tree
 class ASTExpression : public CudfExpression {
