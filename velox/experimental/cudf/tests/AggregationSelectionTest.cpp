@@ -522,4 +522,47 @@ TEST_F(CudfAggregationSelectionTest, filterMaskClausesRejected) {
   ASSERT_FALSE(canBeEvaluatedByCudf(*modifiedNode));
 }
 
+// Test return type validation 
+TEST_F(CudfAggregationSelectionTest, returnTypeMismatchShouldBeRejected) {
+  // These should be rejected because the return type doesn't match the registered signature
+  
+  // sum(integer) should return BIGINT, not VARCHAR
+  auto sumWrongReturnExpr = std::make_shared<core::CallTypedExpr>(
+      VARCHAR(), // Wrong return type - should be BIGINT
+      std::vector<core::TypedExprPtr>{
+          std::make_shared<core::FieldAccessTypedExpr>(INTEGER(), "c2")
+      },
+      "sum");
+  
+  // avg(integer) should return DOUBLE, not INTEGER  
+  auto avgWrongReturnExpr = std::make_shared<core::CallTypedExpr>(
+      INTEGER(), // Wrong return type - should be DOUBLE
+      std::vector<core::TypedExprPtr>{
+          std::make_shared<core::FieldAccessTypedExpr>(INTEGER(), "c2")
+      },
+      "avg");
+  
+  // count(integer) should return BIGINT, not INTEGER
+  auto countWrongReturnExpr = std::make_shared<core::CallTypedExpr>(
+      INTEGER(), // Wrong return type - should be BIGINT
+      std::vector<core::TypedExprPtr>{
+          std::make_shared<core::FieldAccessTypedExpr>(INTEGER(), "c2")
+      },
+      "count");
+  
+  // min(integer) should return INTEGER, not VARCHAR
+  auto minWrongReturnExpr = std::make_shared<core::CallTypedExpr>(
+      VARCHAR(), // Wrong return type - should be INTEGER (min preserves input type)
+      std::vector<core::TypedExprPtr>{
+          std::make_shared<core::FieldAccessTypedExpr>(INTEGER(), "c2")
+      },
+      "min");
+
+  // Without return type validation, these would incorrectly pass
+  ASSERT_FALSE(canBeEvaluatedByCudf(sumWrongReturnExpr));
+  ASSERT_FALSE(canBeEvaluatedByCudf(avgWrongReturnExpr));
+  ASSERT_FALSE(canBeEvaluatedByCudf(countWrongReturnExpr));
+  ASSERT_FALSE(canBeEvaluatedByCudf(minWrongReturnExpr));
+}
+
 } // namespace

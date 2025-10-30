@@ -129,6 +129,11 @@ bool matchTypedCallAgainstSignatures(
     if (!binder.tryBindWithCoercions(coercions)) {
       continue;
     }
+    auto expectedReturnType = binder.tryResolveReturnType();
+    if (!expectedReturnType || !call.type()->equivalent(*expectedReturnType)) {
+      continue;
+    }
+    
     // binder does not confirm whether positional arguments are
     // constants(scalars) as expected. we have to check manually
     const auto& constArgs = sig->constantArguments();
@@ -1049,7 +1054,6 @@ bool registerBuiltinFunctions(const std::string& prefix) {
            .returnType("double")
            .argumentType("bigint")
            .build(),
-       // real case: falls back to CPU due to return type mismatch
        FunctionSignatureBuilder()
            .returnType("double")
            .argumentType("double")
