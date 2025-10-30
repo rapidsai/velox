@@ -53,6 +53,8 @@ struct CudfConfig {
   /// Query session configs for the cuDF Operators.
   static constexpr const char* kCudfTopNBatchSize{"cudf.topk_batch_size"};
 
+  static constexpr const char* kCudfExchange{"cudf.exchange"};
+
   /// Singleton CudfConfig instance.
   /// Clients must set the configs below before invoking registerCudf().
   static CudfConfig& getInstance();
@@ -62,7 +64,7 @@ struct CudfConfig {
 
   /// Enable cudf by default.
   /// Clients can disable here and enable it via the QueryConfig as well.
-  bool enabled{true};
+  bool enabled{false};
 
   /// Enable debug printing.
   bool debugEnabled{false};
@@ -129,6 +131,8 @@ struct CudfConfig {
   // Register the Spark or Presto functions, the value could be either spark or
   // presto.
   std::string functionEngine{"presto"};
+
+  bool exchange{false};
 };
 
 } // namespace facebook::velox::cudf_velox

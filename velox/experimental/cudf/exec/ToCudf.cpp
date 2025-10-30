@@ -14,6 +14,10 @@
  * limitations under the License.
  */
 
+#include "velox/experimental/cudf-exchange/CudfExchange.h"
+#include "velox/experimental/cudf-exchange/CudfExchangeClient.h"
+#include "velox/experimental/cudf-exchange/CudfPartitionedOutput.h"
+#include "velox/experimental/cudf-exchange/ExchangeClientFacade.h"
 #include "velox/experimental/cudf/CudfConfig.h"
 #include "velox/experimental/cudf/exec/CudfConversion.h"
 #include "velox/experimental/cudf/exec/CudfHashAggregation.h"
@@ -41,6 +45,12 @@
 #include <iostream>
 
 static const std::string kCudfAdapterName = "cuDF";
+DEFINE_bool(velox_cudf_enabled, true, "Enable cuDF-Velox acceleration");
+DEFINE_string(velox_cudf_memory_resource, "async", "Memory resource for cuDF");
+DEFINE_bool(velox_cudf_debug, false, "Enable debug printing");
+DEFINE_bool(velox_cudf_exchange, true, "Enable cuDF exchange");
+
+using namespace facebook::velox::cudf_exchange;
 
 namespace facebook::velox::cudf_velox {
 
@@ -268,6 +278,7 @@ bool CompileState::compile(bool allowCpuFallback) {
     }
   }
 
+  VLOG(3) << "- CompileState::compile";
   return replacementsMade;
 }
 
@@ -411,11 +422,16 @@ void CudfConfig::initialize(
   if (config.find(kCudfLogFallback) != config.end()) {
     logFallback = folly::to<bool>(config[kCudfLogFallback]);
   }
+
   if (config.find(kCudfTopNBatchSize) != config.end()) {
     topNBatchSize = folly::to<int32_t>(config[kCudfTopNBatchSize]);
   }
   if (config.find(kCudfFunctionEngine) != config.end()) {
     functionEngine = config[kCudfFunctionEngine];
+  }
+
+  if (config.find(kCudfExchange) != config.end()) {
+    exchange = folly::to<bool>(config[kCudfExchange]);
   }
 }
 
