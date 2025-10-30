@@ -111,7 +111,7 @@ endif()
 if(VELOX_BUILD_SHARED)
   message(
     WARNING
-    "When building Velox as a shared library it's recommended to build against a shared build of folly to avoid issues with linking of gflags."
+    "When building Velox as a shared library it's recommended to build against a shared build of folly to avoid issues with linking of gflags. "
     "This is currently NOT being enforced so user discretion is advised."
   )
 endif()
@@ -223,6 +223,7 @@ if(VELOX_ENABLE_CUDF)
   message(STATUS "Building curl from source to satisfy cuDF curl version requirement")
   set(curl_SOURCE BUNDLED)
   velox_resolve_dependency(curl)
+  FetchContent_MakeAvailable(curl)
 endif()
 
 if(${VELOX_BUILD_TESTING} OR ${VELOX_BUILD_MINIMAL_WITH_DWIO} OR ${VELOX_ENABLE_HIVE_CONNECTOR})

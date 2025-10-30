@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include "velox/experimental/cudf/exec/Validation.h"
 #include "velox/experimental/cudf/exec/VeloxCudfInterop.h"
 #include "velox/experimental/cudf/expression/AstUtils.h"
 #include "velox/experimental/cudf/expression/ExpressionEvaluator.h"
@@ -187,6 +188,72 @@ class SplitFunction : public CudfFunction {
  private:
   std::unique_ptr<cudf::string_scalar> delimiterScalar_;
   cudf::size_type maxSplitCount_;
+};
+
+class CastFunction : public CudfFunction {
+ public:
+  CastFunction(const std::shared_ptr<velox::exec::Expr>& expr) {
+    VELOX_CHECK_EQ(expr->inputs().size(), 1, "cast expects exactly 1 input");
+
+    targetCudfType_ =
+        cudf::data_type(cudf_velox::veloxToCudfTypeId(expr->type()));
+    auto sourceType = cudf::data_type(
+        cudf_velox::veloxToCudfTypeId(expr->inputs()[0]->type()));
+    VELOX_CHECK(
+        cudf::is_supported_cast(sourceType, targetCudfType_),
+        "Cast from {} to {} is not supported",
+        expr->inputs()[0]->type()->toString(),
+        expr->type()->toString());
+  }
+
+  ColumnOrView eval(
+      std::vector<ColumnOrView>& inputColumns,
+      rmm::cuda_stream_view stream,
+      rmm::device_async_resource_ref mr) const override {
+    auto inputCol = asView(inputColumns[0]);
+    return cudf::cast(inputCol, targetCudfType_, stream, mr);
+  }
+
+ private:
+  cudf::data_type targetCudfType_;
+};
+
+// Spark date_add function implementation.
+// For the presto date_add, the first value is unit string,
+// may need to get the function with prefix, if the prefix is "", it is Spark
+// function.
+class DateAddFunction : public CudfFunction {
+ public:
+  DateAddFunction(const std::shared_ptr<velox::exec::Expr>& expr) {
+    VELOX_CHECK_EQ(
+        expr->inputs().size(), 2, "date_add function expects exactly 2 inputs");
+    VELOX_CHECK(
+        expr->inputs()[0]->type()->isDate(),
+        "First argument to date_add must be a date");
+    VELOX_CHECK_NULL(
+        std::dynamic_pointer_cast<velox::exec::ConstantExpr>(
+            expr->inputs()[0]));
+    // The date_add second argument could be int8_t, int16_t, int32_t.
+    value_ = makeScalarFromConstantExpr(
+        expr->inputs()[1], cudf::type_id::DURATION_DAYS);
+  }
+
+  ColumnOrView eval(
+      std::vector<ColumnOrView>& inputColumns,
+      rmm::cuda_stream_view stream,
+      rmm::device_async_resource_ref mr) const override {
+    auto inputCol = asView(inputColumns[0]);
+    return cudf::binary_operation(
+        inputCol,
+        *value_,
+        cudf::binary_operator::ADD,
+        cudf::data_type(cudf::type_id::TIMESTAMP_DAYS),
+        stream,
+        mr);
+  }
+
+ private:
+  std::unique_ptr<cudf::scalar> value_;
 };
 
 class CardinalityFunction : public CudfFunction {
@@ -885,6 +952,18 @@ bool registerBuiltinFunctions(const std::string& prefix) {
            .argumentType("T")
            .build()});
 
+  registerCudfFunctions(
+      {prefix + "try_cast", prefix + "cast"},
+      [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
+        return std::make_shared<CastFunction>(expr);
+      });
+
+  registerCudfFunction(
+      prefix + "date_add",
+      [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
+        return std::make_shared<DateAddFunction>(expr);
+      });
+
   return true;
 }
 
@@ -932,13 +1011,12 @@ ColumnOrView FunctionExpression::eval(
     }
 
     auto result = function_->eval(inputColumns, stream, mr);
-    if (finalize &&
-        std::holds_alternative<std::unique_ptr<cudf::column>>(result)) {
+    if (finalize) {
       const auto requestedType =
           cudf::data_type(cudf_velox::veloxToCudfTypeId(expr_->type()));
-      auto& owned = std::get<std::unique_ptr<cudf::column>>(result);
-      if (owned->type() != requestedType) {
-        owned = cudf::cast(*owned, requestedType, stream, mr);
+      auto resultView = asView(result);
+      if (resultView.type() != requestedType) {
+        return cudf::cast(resultView, requestedType, stream, mr);
       }
     }
     return result;
@@ -972,6 +1050,7 @@ bool FunctionExpression::canEvaluate(const core::TypedExprPtr& expr) {
     return true;
   }
   if (expr->kind() != ExprKind::kCall) {
+    LOG_FALLBACK(core::ExprKindName::toName(expr->kind()));
     return false;
   }
   const auto* call = expr->asUnchecked<core::CallTypedExpr>();
@@ -984,30 +1063,17 @@ bool FunctionExpression::canEvaluate(const core::TypedExprPtr& expr) {
   return matchTypedCallAgainstSignatures(*call, spec.signatures);
 }
 
-bool canBeEvaluatedByCudf(std::shared_ptr<velox::exec::Expr> expr, bool deep) {
+bool canBeEvaluatedByCudf(std::shared_ptr<velox::exec::Expr> expr) {
   ensureBuiltinExpressionEvaluatorsRegistered();
   const auto& registry = getCudfExpressionEvaluatorRegistry();
 
-  bool supported = false;
   for (const auto& [name, entry] : registry) {
     if (entry.canEvaluateCompiled && entry.canEvaluateCompiled(expr)) {
-      supported = true;
-      break;
-    }
-  }
-  if (!supported) {
-    return false;
-  }
-
-  if (deep) {
-    for (const auto& input : expr->inputs()) {
-      if (input->name() != "literal" && !canBeEvaluatedByCudf(input, true)) {
-        return false;
-      }
+      return true;
     }
   }
 
-  return true;
+  return false;
 }
 
 bool canBeEvaluatedByCudf(const core::TypedExprPtr& expr) {
@@ -1024,6 +1090,7 @@ bool canBeEvaluatedByCudf(const core::TypedExprPtr& expr) {
   }();
 
   if (!currentRootSupported) {
+    LOG_FALLBACK(expr->toString());
     return false;
   }
 

@@ -244,16 +244,16 @@ void CudfFilterProject::filter(
     std::vector<std::unique_ptr<cudf::column>>& inputTableColumns,
     rmm::cuda_stream_view stream) {
   // Evaluate the Filter
-  auto filterColumns = filterEvaluator_->eval(
+  auto filterColumn = filterEvaluator_->eval(
       inputTableColumns, stream, cudf::get_current_device_resource_ref(), true);
-  auto filterColumn = asView(filterColumns);
+  auto filterColumnView = asView(filterColumn);
   bool shouldApplyFilter = [&]() {
-    if (filterColumn.has_nulls()) {
+    if (filterColumnView.has_nulls()) {
       return true;
     }
-    // check if all values in filterColumn are true
+    // check if all values in filterColumnView are true
     auto isAllTrue = cudf::reduce(
-        filterColumn,
+        filterColumnView,
         *cudf::make_all_aggregation<cudf::reduce_aggregation>(),
         cudf::data_type(cudf::type_id::BOOL8),
         stream,
@@ -267,7 +267,7 @@ void CudfFilterProject::filter(
     auto filterTable =
         std::make_unique<cudf::table>(std::move(inputTableColumns));
     auto filteredTable =
-        cudf::apply_boolean_mask(*filterTable, filterColumn, stream);
+        cudf::apply_boolean_mask(*filterTable, filterColumnView, stream);
     inputTableColumns = filteredTable->release();
   }
 }
