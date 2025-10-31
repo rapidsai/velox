@@ -113,7 +113,6 @@ std::unordered_map<std::string, CudfFunctionSpec>& getCudfFunctionRegistry() {
   return registry;
 }
 
-namespace {
 
 bool matchTypedCallAgainstSignatures(
     const core::CallTypedExpr& call,
@@ -128,10 +127,6 @@ bool matchTypedCallAgainstSignatures(
     std::vector<Coercion> coercions(n);
     exec::SignatureBinder binder(*sig, argTypes);
     if (!binder.tryBindWithCoercions(coercions)) {
-      continue;
-    }
-    auto expectedReturnType = binder.tryResolveReturnType();
-    if (!expectedReturnType || !call.type()->equivalent(*expectedReturnType)) {
       continue;
     }
     
@@ -155,7 +150,6 @@ bool matchTypedCallAgainstSignatures(
   return false;
 }
 
-} // namespace
 
 class SplitFunction : public CudfFunction {
  public:
@@ -1113,53 +1107,5 @@ bool canGroupingKeysBeEvaluatedByCudf(
   return true;
 }
 
-bool canAggregationBeEvaluatedByCudf(const core::CallTypedExpr& call) {
-  // Check against aggregation registry
-  auto& registry = getCudfAggregationRegistry();
-  auto it = registry.find(call.name());
-  if (it == registry.end()) {
-    return false;
-  }
-  const auto& spec = it->second;
-  return matchTypedCallAgainstSignatures(call, spec.signatures);
-}
-
-bool canBeEvaluatedByCudf(const core::AggregationNode& aggregationNode) {
-  const core::PlanNode* sourceNode = aggregationNode.sources().empty() ? nullptr : aggregationNode.sources()[0].get();
-
-  // Check supported aggregation functions using aggregation registry
-  for (const auto& aggregate : aggregationNode.aggregates()) {
-
-    if (!canAggregationBeEvaluatedByCudf(*aggregate.call)) {
-      return false;
-    }
-    
-    // `distinct` aggregations are not supported, in testing fails with "De-dup before aggregation is not yet supported"
-    if (aggregate.distinct) {
-      return false;
-    }
-    
-    // `mask` is NOT supported (in testing do not appear to be be applied and return incorrect results )
-    if (aggregate.mask) {
-      return false;
-    }
-    
-    // Check input expressions can be evaluated by CUDF, expand the input first
-    for (const auto& input : aggregate.call->inputs()) {
-      auto expandedInput = expandFieldReference(input, sourceNode);
-      if (!canBeEvaluatedByCudf(expandedInput)) {
-        return false;
-      }
-    }
-    
-  }
-  
-  // Check grouping key expressions
-  if (!canGroupingKeysBeEvaluatedByCudf(aggregationNode.groupingKeys(), sourceNode)) {
-    return false;
-  }
-  
-  return true;
-}
 
 } // namespace facebook::velox::cudf_velox

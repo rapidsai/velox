@@ -185,8 +185,9 @@ bool canGroupingKeysBeEvaluatedByCudf(
     const std::vector<core::FieldAccessTypedExprPtr>& groupingKeys,
     const core::PlanNode* sourceNode = nullptr);
 
-bool canAggregationBeEvaluatedByCudf(const core::CallTypedExpr& call);
-
-bool canBeEvaluatedByCudf(const core::AggregationNode& aggregationNode);
+// Utility function to match a call against a list of signatures typically from a registry
+bool matchTypedCallAgainstSignatures(
+    const core::CallTypedExpr& call,
+    const std::vector<exec::FunctionSignaturePtr>& sigs);
 
 } // namespace facebook::velox::cudf_velox

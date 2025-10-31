@@ -167,4 +167,8 @@ bool registerCudfAggregationFunction(
 
 bool registerBuiltinAggregationFunctions(const std::string& prefix);
 
+// Aggregation-specific CUDF validation functions
+bool canAggregationBeEvaluatedByCudf(const core::CallTypedExpr& call);
+bool canBeEvaluatedByCudf(const core::AggregationNode& aggregationNode);
+
 } // namespace facebook::velox::cudf_velox
