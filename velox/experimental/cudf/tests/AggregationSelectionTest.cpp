@@ -524,11 +524,7 @@ TEST_F(CudfAggregationSelectionTest, filterMaskClausesRejected) {
 }
 
 // Test return type validation 
-// DISABLED: This test demonstrates failure modes when return type matching is enabled.
-// Since return type validation has been removed from signature matching, this test
-// would now pass (incorrectly allowing mismatched return types), so it's disabled.
-// The test shows that without return type validation, functions with wrong return types
-// would be incorrectly accepted by the CUDF validation logic.
+// DISABLED: This test demonstrates expected failure modes when return type matching is enabled.
 TEST_F(CudfAggregationSelectionTest, DISABLED_returnTypeMismatchShouldBeRejected) {
   // These should be rejected because the return type doesn't match the registered signature
   
