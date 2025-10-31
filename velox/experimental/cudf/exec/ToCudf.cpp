@@ -334,7 +334,6 @@ bool CompileState::compile(bool allow_cpu_fallback) {
               planNode,
               planNode->taskUniqueId(),
               planNode->uniqueIdCounter()));
-      replaceOp.back()->initialize();
     } else {
       keepOperator = 1;
     }
