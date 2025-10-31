@@ -953,16 +953,35 @@ bool registerBuiltinFunctions(const std::string& prefix) {
            .build()});
 
   registerCudfFunctions(
-      {prefix + "try_cast", prefix + "cast"},
+      // No signatures required for cast and try_cast. They are special forms.
+      {"try_cast", "cast"},
       [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
         return std::make_shared<CastFunction>(expr);
+      },
+      {
+          // Cast needs special handling dynamically using cudf.
       });
 
   registerCudfFunction(
       prefix + "date_add",
       [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
         return std::make_shared<DateAddFunction>(expr);
-      });
+      },
+      {FunctionSignatureBuilder()
+           .returnType("date")
+           .argumentType("date")
+           .constantArgumentType("tinyint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("date")
+           .argumentType("date")
+           .constantArgumentType("smallint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("date")
+           .argumentType("date")
+           .constantArgumentType("integer")
+           .build()});
 
   return true;
 }
@@ -1038,6 +1057,19 @@ bool FunctionExpression::canEvaluate(std::shared_ptr<velox::exec::Expr> expr) {
     return true;
   }
 
+  const auto& opName = expr->name();
+  if (opName == "cast" || opName == "try_cast") {
+    const auto& srcType =
+        expr->inputs().empty() ? nullptr : expr->inputs()[0]->type();
+    const auto& dstType = expr->type();
+    if (srcType == nullptr || dstType == nullptr) {
+      return false;
+    }
+    auto src = cudf::data_type(cudf_velox::veloxToCudfTypeId(srcType));
+    auto dst = cudf::data_type(cudf_velox::veloxToCudfTypeId(dstType));
+    return cudf::is_supported_cast(src, dst);
+  }
+
   auto& registry = getCudfFunctionRegistry();
   return registry.find(expr->name()) != registry.end();
 }
@@ -1048,6 +1080,14 @@ bool FunctionExpression::canEvaluate(const core::TypedExprPtr& expr) {
       expr->kind() == ExprKind::kDereference ||
       expr->kind() == ExprKind::kInput || expr->kind() == ExprKind::kConstant) {
     return true;
+  }
+  if (expr->kind() == ExprKind::kCast) {
+    const auto* cast = expr->asUnchecked<core::CastTypedExpr>();
+    const auto& srcType = cast->inputs()[0]->type();
+    const auto& dstType = cast->type();
+    auto src = cudf::data_type(cudf_velox::veloxToCudfTypeId(srcType));
+    auto dst = cudf::data_type(cudf_velox::veloxToCudfTypeId(dstType));
+    return cudf::is_supported_cast(src, dst);
   }
   if (expr->kind() != ExprKind::kCall) {
     LOG_FALLBACK(core::ExprKindName::toName(expr->kind()));

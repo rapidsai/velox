@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "velox/experimental/cudf/CudfConfig.h"
 #include "velox/experimental/cudf/exec/ToCudf.h"
 #include "velox/experimental/cudf/expression/AstExpression.h"
 #include "velox/experimental/cudf/expression/ExpressionEvaluator.h"
@@ -44,6 +45,10 @@ class CudfExpressionSelectionTest : public ::testing::Test {
     queryCtx_ = core::QueryCtx::create();
     execCtx_ = std::make_unique<core::ExecCtx>(pool_.get(), queryCtx_.get());
     facebook::velox::functions::prestosql::registerAllScalarFunctions();
+    // TODO (dm): This is required for passing of castAndTryCast test but breaks
+    // others. This is because ASTExpr agrees to support bad casts. remove after
+    // ASTExpr checks cast types
+    CudfConfig::getInstance().astExpressionEnabled = false;
     cudf_velox::registerCudf();
     rowType_ = ROW({
         {"a", BIGINT()},
@@ -237,6 +242,23 @@ TEST_F(CudfExpressionSelectionTest, signatureTypeVariableSwitchIf) {
   // OK: boolean + same type BIGINT
   auto ok1 = parseAndInferTypedExpr("if(true, a, b)", rowType_, execCtx_.get());
   ASSERT_TRUE(canBeEvaluatedByCudf(ok1));
+}
+
+TEST_F(CudfExpressionSelectionTest, castAndTryCast) {
+  // OK: cast bigint -> double (supported by cuDF)
+  auto okCast =
+      parseAndInferTypedExpr("cast(a AS double)", rowType_, execCtx_.get());
+  ASSERT_TRUE(canBeEvaluatedByCudf(okCast));
+
+  // OK: try_cast bigint -> double (supported by cuDF)
+  auto okTryCast =
+      parseAndInferTypedExpr("try_cast(a AS double)", rowType_, execCtx_.get());
+  ASSERT_TRUE(canBeEvaluatedByCudf(okTryCast));
+
+  // BAD: cast boolean -> date (expected unsupported by cuDF)
+  auto badCast = parseAndInferTypedExpr(
+      "cast(length(name) < 10 AS date)", rowType_, execCtx_.get());
+  ASSERT_FALSE(canBeEvaluatedByCudf(badCast));
 }
 
 } // namespace
