@@ -19,10 +19,15 @@
 #include "velox/experimental/cudf/vector/CudfVector.h"
 
 #include "velox/exec/Operator.h"
+#include "velox/expression/FunctionSignature.h"
 
 #include <cudf/groupby.hpp>
+#include <unordered_map>
 
 namespace facebook::velox::cudf_velox {
+
+// Forward declaration
+struct CudfFunctionSpec;
 
 class CudfHashAggregation : public exec::Operator, public NvtxHelper {
  public:
@@ -151,5 +156,15 @@ class CudfHashAggregation : public exec::Operator, public NvtxHelper {
 
   CudfVectorPtr partialOutput_;
 };
+
+// Separate registry for aggregation functions
+std::unordered_map<std::string, CudfFunctionSpec>& getCudfAggregationRegistry();
+
+bool registerCudfAggregationFunction(
+    const std::string& name,
+    const std::vector<exec::FunctionSignaturePtr>& signatures,
+    bool overwrite = true);
+
+bool registerBuiltinAggregationFunctions(const std::string& prefix);
 
 } // namespace facebook::velox::cudf_velox

@@ -16,6 +16,7 @@
 #include "velox/experimental/cudf/exec/VeloxCudfInterop.h"
 #include "velox/experimental/cudf/expression/AstUtils.h"
 #include "velox/experimental/cudf/expression/ExpressionEvaluator.h"
+#include "velox/experimental/cudf/exec/CudfHashAggregation.h"
 
 #include "velox/core/Expressions.h"
 #include "velox/expression/ConstantExpr.h"
@@ -893,172 +894,6 @@ bool registerBuiltinFunctions(const std::string& prefix) {
   //     },
   //     switchSigs);
 
-  // Register aggregation functions
-  
-  registerCudfFunction(
-      prefix + "sum",
-      [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
-        return nullptr;
-      },
-      {
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("tinyint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("smallint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("integer")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("bigint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("real")
-           .argumentType("real")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("double")
-           .argumentType("double")
-           .build()});
-
-  registerCudfFunction(
-      prefix + "count",
-      [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
-        return nullptr;
-      },
-      {
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("tinyint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("smallint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("integer")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("bigint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("real")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("double")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("varchar")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("boolean")
-           .build(),
-       // count(*) case: no arguments specified
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .build()});
-
-  registerCudfFunction(
-      prefix + "min",
-      [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
-        return nullptr;
-      },
-      {
-       FunctionSignatureBuilder()
-           .returnType("tinyint")
-           .argumentType("tinyint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("smallint")
-           .argumentType("smallint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("integer")
-           .argumentType("integer")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("bigint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("real")
-           .argumentType("real")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("double")
-           .argumentType("double")
-           .build()
-       // varchar & boolean omitted
-      });
-
-  registerCudfFunction(
-      prefix + "max",
-      [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
-        return nullptr;
-      },
-      {
-       FunctionSignatureBuilder()
-           .returnType("tinyint")
-           .argumentType("tinyint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("smallint")
-           .argumentType("smallint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("integer")
-           .argumentType("integer")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("bigint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("real")
-           .argumentType("real")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("double")
-           .argumentType("double")
-           .build()
-       // varchar & boolean omitted
-      });
-
-  registerCudfFunction(
-      prefix + "avg",
-      [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
-        return nullptr;
-      },
-      {// Average always returns double for numeric inputs
-       // tinyint case: throws "Constants and lambdas not yet supported" exception
-       FunctionSignatureBuilder()
-           .returnType("double")
-           .argumentType("smallint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("double")
-           .argumentType("integer")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("double")
-           .argumentType("bigint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("double")
-           .argumentType("double")
-           .build()});
-
   return true;
 }
 
@@ -1278,13 +1113,24 @@ bool canGroupingKeysBeEvaluatedByCudf(
   return true;
 }
 
+bool canAggregationBeEvaluatedByCudf(const core::CallTypedExpr& call) {
+  // Check against aggregation registry
+  auto& registry = getCudfAggregationRegistry();
+  auto it = registry.find(call.name());
+  if (it == registry.end()) {
+    return false;
+  }
+  const auto& spec = it->second;
+  return matchTypedCallAgainstSignatures(call, spec.signatures);
+}
+
 bool canBeEvaluatedByCudf(const core::AggregationNode& aggregationNode) {
   const core::PlanNode* sourceNode = aggregationNode.sources().empty() ? nullptr : aggregationNode.sources()[0].get();
 
-  // Check supported aggregation functions using the registry (like function expressions) along with other checks
+  // Check supported aggregation functions using aggregation registry
   for (const auto& aggregate : aggregationNode.aggregates()) {
 
-    if (!canBeEvaluatedByCudf(aggregate.call)) {
+    if (!canAggregationBeEvaluatedByCudf(*aggregate.call)) {
       return false;
     }
     

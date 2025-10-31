@@ -185,6 +185,8 @@ bool canGroupingKeysBeEvaluatedByCudf(
     const std::vector<core::FieldAccessTypedExprPtr>& groupingKeys,
     const core::PlanNode* sourceNode = nullptr);
 
+bool canAggregationBeEvaluatedByCudf(const core::CallTypedExpr& call);
+
 bool canBeEvaluatedByCudf(const core::AggregationNode& aggregationNode);
 
 } // namespace facebook::velox::cudf_velox

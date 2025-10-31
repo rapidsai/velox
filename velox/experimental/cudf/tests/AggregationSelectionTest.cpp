@@ -408,41 +408,41 @@ TEST_F(CudfAggregationSelectionTest, comprehensiveTypeSupportValidation) {
       DOUBLE(), std::vector<core::TypedExprPtr>{
           std::make_shared<core::FieldAccessTypedExpr>(DOUBLE(), "c3")}, "avg");
 
-  ASSERT_TRUE(canBeEvaluatedByCudf(sumTinyintExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(sumSmallintExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(sumIntegerExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(sumBigintExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(sumRealExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(sumDoubleExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*sumTinyintExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*sumSmallintExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*sumIntegerExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*sumBigintExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*sumRealExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*sumDoubleExpr));
 
-  ASSERT_TRUE(canBeEvaluatedByCudf(countTinyintExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(countSmallintExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(countIntegerExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(countBigintExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(countRealExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(countDoubleExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(countVarcharExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(countBooleanExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(countStarExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countTinyintExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countSmallintExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countIntegerExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countBigintExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countRealExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countDoubleExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countVarcharExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countBooleanExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countStarExpr));
 
-  ASSERT_TRUE(canBeEvaluatedByCudf(minTinyintExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(minSmallintExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(minIntegerExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(minBigintExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(minRealExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(minDoubleExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*minTinyintExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*minSmallintExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*minIntegerExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*minBigintExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*minRealExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*minDoubleExpr));
 
-  ASSERT_TRUE(canBeEvaluatedByCudf(maxTinyintExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(maxSmallintExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(maxIntegerExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(maxBigintExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(maxRealExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(maxDoubleExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*maxTinyintExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*maxSmallintExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*maxIntegerExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*maxBigintExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*maxRealExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*maxDoubleExpr));
 
-  ASSERT_TRUE(canBeEvaluatedByCudf(avgSmallintExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(avgIntegerExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(avgBigintExpr));
-  ASSERT_TRUE(canBeEvaluatedByCudf(avgDoubleExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*avgSmallintExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*avgIntegerExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*avgBigintExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*avgDoubleExpr));
 
 }
 

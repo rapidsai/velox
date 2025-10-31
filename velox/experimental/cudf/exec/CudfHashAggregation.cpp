@@ -18,6 +18,7 @@
 #include "velox/experimental/cudf/exec/CudfHashAggregation.h"
 #include "velox/experimental/cudf/exec/Utilities.h"
 #include "velox/experimental/cudf/exec/VeloxCudfInterop.h"
+#include "velox/experimental/cudf/expression/ExpressionEvaluator.h"
 
 #include "velox/exec/Aggregate.h"
 #include "velox/exec/AggregateFunctionRegistry.h"
@@ -963,6 +964,174 @@ void CudfHashAggregation::noMoreInput() {
 
 bool CudfHashAggregation::isFinished() {
   return finished_;
+}
+
+std::unordered_map<std::string, CudfFunctionSpec>& getCudfAggregationRegistry() {
+  static std::unordered_map<std::string, CudfFunctionSpec> registry;
+  return registry;
+}
+
+bool registerCudfAggregationFunction(
+    const std::string& name,
+    const std::vector<exec::FunctionSignaturePtr>& signatures,
+    bool overwrite) {
+  auto& registry = getCudfAggregationRegistry();
+  if (!overwrite && registry.find(name) != registry.end()) {
+    return false;
+  }
+  registry[name] = CudfFunctionSpec{nullptr, signatures}; // No factory needed for aggregations
+  return true;
+}
+
+bool registerBuiltinAggregationFunctions(const std::string& prefix) {
+  using exec::FunctionSignatureBuilder;
+
+  registerCudfAggregationFunction(
+      prefix + "sum",
+      {
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("tinyint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("smallint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("integer")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("bigint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("real")
+           .argumentType("real")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("double")
+           .argumentType("double")
+           .build()});
+
+  registerCudfAggregationFunction(
+      prefix + "count",
+      {
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("tinyint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("smallint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("integer")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("bigint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("real")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("double")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("varchar")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("boolean")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .build()});
+
+  registerCudfAggregationFunction(
+      prefix + "min",
+      {
+       FunctionSignatureBuilder()
+           .returnType("tinyint")
+           .argumentType("tinyint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("smallint")
+           .argumentType("smallint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("integer")
+           .argumentType("integer")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("bigint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("real")
+           .argumentType("real")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("double")
+           .argumentType("double")
+           .build()
+      });
+
+  registerCudfAggregationFunction(
+      prefix + "max",
+      {
+       FunctionSignatureBuilder()
+           .returnType("tinyint")
+           .argumentType("tinyint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("smallint")
+           .argumentType("smallint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("integer")
+           .argumentType("integer")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("bigint")
+           .argumentType("bigint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("real")
+           .argumentType("real")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("double")
+           .argumentType("double")
+           .build()
+      });
+
+  registerCudfAggregationFunction(
+      prefix + "avg",
+      {
+       FunctionSignatureBuilder()
+           .returnType("double")
+           .argumentType("smallint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("double")
+           .argumentType("integer")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("double")
+           .argumentType("bigint")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("double")
+           .argumentType("double")
+           .build()});
+
+  return true;
 }
 
 } // namespace facebook::velox::cudf_velox
