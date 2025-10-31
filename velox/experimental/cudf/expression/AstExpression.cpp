@@ -14,10 +14,10 @@
  * limitations under the License.
  */
 #include "velox/experimental/cudf/CudfConfig.h"
+#include "velox/experimental/cudf/exec/VeloxCudfInterop.h"
 #include "velox/experimental/cudf/expression/AstExpression.h"
 #include "velox/experimental/cudf/expression/AstUtils.h"
 
-#include "velox/core/Expressions.h"
 #include "velox/expression/ConstantExpr.h"
 #include "velox/expression/FieldReference.h"
 #include "velox/vector/ComplexVector.h"
@@ -26,6 +26,7 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/transform.hpp>
+#include <cudf/unary.hpp>
 
 namespace facebook::velox::cudf_velox {
 namespace {
@@ -393,7 +394,11 @@ cudf::ast::expression const& AstContext::pushExprToTree(
     } else if (expr->type()->kind() == TypeKind::DOUBLE) {
       return tree.push(Operation{Op::CAST_TO_FLOAT64, op1});
     } else {
-      VELOX_FAIL("Unsupported type for cast operation");
+      // TODO (dm): Similar to else block in switch/if, remove this once
+      // ASTEvaluator provides type based canEvaluate
+      auto node =
+          createCudfExpression(expr, inputRowSchema[0], kAstEvaluatorName);
+      return addPrecomputeInstructionOnSide(0, 0, name, "", node);
     }
   } else if (name == "switch" || name == "if") {
     VELOX_CHECK_EQ(len, 3);
@@ -540,7 +545,7 @@ cudf::ast::expression const& createAstTree(
 ASTExpression::ASTExpression(
     std::shared_ptr<velox::exec::Expr> expr,
     const RowTypePtr& inputRowSchema)
-    : inputRowSchema_(inputRowSchema) {
+    : expr_(expr), inputRowSchema_(inputRowSchema) {
   createAstTree(
       expr, cudfTree_, scalars_, inputRowSchema, precomputeInstructions_);
 }
@@ -577,20 +582,31 @@ ColumnOrView ASTExpression::eval(
 
   cudf::table_view astInputTableView(allColumnViews);
 
-  if (auto colRefPtr =
-          dynamic_cast<cudf::ast::column_reference const*>(&cudfTree_.back())) {
-    auto columnIndex = colRefPtr->get_column_index();
-    if (columnIndex < inputTableColumns.size()) {
-      return inputTableColumns[columnIndex]->view();
+  auto result = [&]() -> ColumnOrView {
+    if (auto colRefPtr = dynamic_cast<cudf::ast::column_reference const*>(
+            &cudfTree_.back())) {
+      auto columnIndex = colRefPtr->get_column_index();
+      if (columnIndex < inputTableColumns.size()) {
+        return inputTableColumns[columnIndex]->view();
+      } else {
+        // Referencing a precomputed column return as it is (view or owned)
+        return std::move(
+            precomputedColumns[columnIndex - inputTableColumns.size()]);
+      }
     } else {
-      // Referencing a precomputed column return as it is (view or owned)
-      return std::move(
-          precomputedColumns[columnIndex - inputTableColumns.size()]);
+      return cudf::compute_column(
+          astInputTableView, cudfTree_.back(), stream, mr);
     }
-  } else {
-    return cudf::compute_column(
-        astInputTableView, cudfTree_.back(), stream, mr);
+  }();
+  if (finalize) {
+    const auto requestedType =
+        cudf::data_type(cudf_velox::veloxToCudfTypeId(expr_->type()));
+    auto resultView = asView(result);
+    if (resultView.type() != requestedType) {
+      result = cudf::cast(resultView, requestedType, stream, mr);
+    }
   }
+  return result;
 }
 
 bool ASTExpression::canEvaluate(std::shared_ptr<velox::exec::Expr> expr) {
@@ -598,39 +614,10 @@ bool ASTExpression::canEvaluate(std::shared_ptr<velox::exec::Expr> expr) {
       std::dynamic_pointer_cast<velox::exec::FieldReference>(expr) != nullptr;
 }
 
-bool ASTExpression::canEvaluate(const core::TypedExprPtr& expr) {
-  using core::ExprKind;
-  switch (expr->kind()) {
-    case ExprKind::kFieldAccess:
-    case ExprKind::kDereference:
-    case ExprKind::kConstant:
-    case ExprKind::kInput:
-      return true;
-    case ExprKind::kCall: {
-      const auto* call =
-          expr->asUnchecked<facebook::velox::core::CallTypedExpr>();
-      return detail::isAstSupported(call->name());
-    }
-    case core::ExprKind::kCast: {
-      const auto* cast = expr->asUnchecked<core::CastTypedExpr>();
-      if (cast->isTryCast()) {
-        return false;
-      }
-      return true;
-    }
-
-    default:
-      return false;
-  }
-}
-
 void registerAstEvaluator(int priority) {
   registerCudfExpressionEvaluator(
       kAstEvaluatorName,
       priority,
-      [](const core::TypedExprPtr& typed) {
-        return ASTExpression::canEvaluate(typed);
-      },
       [](std::shared_ptr<velox::exec::Expr> expr) {
         return ASTExpression::canEvaluate(expr);
       },

@@ -98,8 +98,6 @@ class CudfExpression {
 using CudfExpressionPtr = std::shared_ptr<CudfExpression>;
 
 using CudfExpressionEvaluatorCanEvaluate =
-    std::function<bool(const core::TypedExprPtr& expr)>;
-using CudfExpressionEvaluatorCanEvaluateCompiled =
     std::function<bool(std::shared_ptr<velox::exec::Expr> expr)>;
 using CudfExpressionEvaluatorCreate =
     std::function<std::shared_ptr<CudfExpression>(
@@ -116,7 +114,6 @@ bool registerCudfExpressionEvaluator(
     const std::string& name,
     int priority,
     CudfExpressionEvaluatorCanEvaluate canEvaluate,
-    CudfExpressionEvaluatorCanEvaluateCompiled canEvaluateCompiled,
     CudfExpressionEvaluatorCreate create,
     bool overwrite = true);
 
@@ -140,9 +137,6 @@ class FunctionExpression : public CudfExpression {
   // Check if this specific operation can be evaluated by FunctionExpression
   // (does not recursively check children)
   static bool canEvaluate(std::shared_ptr<velox::exec::Expr> expr);
-
-  // TypedExpr-based shallow check for planner-time gating.
-  static bool canEvaluate(const core::TypedExprPtr& expr);
 
  private:
   std::shared_ptr<velox::exec::Expr> expr_;

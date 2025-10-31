@@ -95,10 +95,10 @@ class ASTExpression : public CudfExpression {
   // Check if this specific operation (not its children) can be evaluated by
   // ASTExpression
   static bool canEvaluate(std::shared_ptr<velox::exec::Expr> expr);
-  // Used for checking before compiling to exec::Expr like in ToCudf.
-  static bool canEvaluate(const core::TypedExprPtr& expr);
 
  private:
+  std::shared_ptr<velox::exec::Expr> expr_;
+
   cudf::ast::tree cudfTree_;
   std::vector<std::unique_ptr<cudf::scalar>> scalars_;
   // instruction on dependent column to get new column index on non-ast

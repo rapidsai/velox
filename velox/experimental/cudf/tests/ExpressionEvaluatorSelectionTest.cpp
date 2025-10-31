@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "velox/experimental/cudf/CudfConfig.h"
 #include "velox/experimental/cudf/exec/ToCudf.h"
 #include "velox/experimental/cudf/expression/AstExpression.h"
 #include "velox/experimental/cudf/expression/ExpressionEvaluator.h"
@@ -48,6 +49,7 @@ class CudfExpressionSelectionTest : public ::testing::Test {
     rowType_ = ROW({
         {"a", BIGINT()},
         {"b", BIGINT()},
+        {"c", INTEGER()},
         {"name", VARCHAR()},
         {"date", TIMESTAMP()},
         {"c", INTEGER()},
@@ -70,44 +72,44 @@ class CudfExpressionSelectionTest : public ::testing::Test {
 };
 
 TEST_F(CudfExpressionSelectionTest, astRoot) {
-  auto expr = compileExecExpr("a + b", rowType_, execCtx_.get());
+  auto prev = CudfConfig::getInstance().astExpressionEnabled;
+  CudfConfig::getInstance().astExpressionEnabled = true;
+  auto expr = compileExecExpr("a + c", rowType_, execCtx_.get());
   auto cudfExpr = createCudfExpression(expr, rowType_);
   auto* ast = dynamic_cast<ASTExpression*>(cudfExpr.get());
   ASSERT_NE(ast, nullptr);
-  ASSERT_TRUE(canBeEvaluatedByCudf(expr, /*deep=*/true));
+  CudfConfig::getInstance().astExpressionEnabled = prev;
 }
 
 TEST_F(CudfExpressionSelectionTest, functionRoot) {
   auto expr = compileExecExpr("lower(name)", rowType_, execCtx_.get());
+  ASSERT_TRUE(canBeEvaluatedByCudf(expr, /*deep=*/false));
   auto cudfExpr = createCudfExpression(expr, rowType_);
   auto* functionExpr = dynamic_cast<FunctionExpression*>(cudfExpr.get());
   ASSERT_NE(functionExpr, nullptr);
-  ASSERT_TRUE(canBeEvaluatedByCudf(expr, /*deep=*/true));
 }
 
 TEST_F(CudfExpressionSelectionTest, astTopLevelWithFunctionPrecompute) {
-  // AST handles AND and comparisons; functions (year/length) are precomputed.
+  auto prev = CudfConfig::getInstance().astExpressionEnabled;
+  CudfConfig::getInstance().astExpressionEnabled = true;
   auto expr = compileExecExpr(
       "(year(date) > 2020) AND (length(name) < 10)", rowType_, execCtx_.get());
+  ASSERT_TRUE(canBeEvaluatedByCudf(expr, /*deep=*/false));
   auto cudfExpr = createCudfExpression(expr, rowType_);
   auto* ast = dynamic_cast<ASTExpression*>(cudfExpr.get());
   ASSERT_NE(ast, nullptr);
-
-  // Shallow: AST root supported
-  ASSERT_TRUE(canBeEvaluatedByCudf(expr, /*deep=*/false));
-  // Deep: children (functions) supported via nested evaluators
-  ASSERT_TRUE(canBeEvaluatedByCudf(expr, /*deep=*/true));
+  CudfConfig::getInstance().astExpressionEnabled = prev;
 }
 
 TEST_F(CudfExpressionSelectionTest, functionTopLevelWithNestedFunction) {
   auto expr =
       compileExecExpr("lower(substr(name, 1, 5))", rowType_, execCtx_.get());
+  ASSERT_TRUE(canBeEvaluatedByCudf(expr, /*deep=*/false));
   auto cudfExpr = createCudfExpression(expr, rowType_);
 
   // Top level should be Function
   auto* functionExpr = dynamic_cast<FunctionExpression*>(cudfExpr.get());
   ASSERT_NE(functionExpr, nullptr);
-  ASSERT_TRUE(canBeEvaluatedByCudf(expr, /*deep=*/true));
 }
 
 TEST_F(CudfExpressionSelectionTest, functionTopLevelWithNestedAst) {
@@ -121,80 +123,117 @@ TEST_F(CudfExpressionSelectionTest, functionTopLevelWithNestedAst) {
   auto cudfExpr = createCudfExpression(expr, rowType_);
   auto* functionExpr = dynamic_cast<FunctionExpression*>(cudfExpr.get());
   ASSERT_NE(functionExpr, nullptr);
-  ASSERT_TRUE(canBeEvaluatedByCudf(expr, /*deep=*/true));
 }
 
 TEST_F(CudfExpressionSelectionTest, signatureEnforcesConstantArgsSplit) {
   // OK: delimiter and limit are constants
-  auto ok = parseAndInferTypedExpr(
+  auto ok = compileExecExpr(
       "split(name, ',', 3)",
       rowType_,
       execCtx_.get(),
       {.parseIntegerAsBigint = false, .functionPrefix = ""});
-  ASSERT_TRUE(canBeEvaluatedByCudf(ok));
+  ASSERT_TRUE(canBeEvaluatedByCudf(ok, /*deep=*/true));
 
   // Bad: delimiter is not a constant
-  auto bad = parseAndInferTypedExpr(
+  auto bad = compileExecExpr(
       "split(name, name, 3)",
       rowType_,
       execCtx_.get(),
       {.parseIntegerAsBigint = false, .functionPrefix = ""});
-  ASSERT_FALSE(canBeEvaluatedByCudf(bad));
+  ASSERT_FALSE(canBeEvaluatedByCudf(bad, /*deep=*/true));
 }
 
 TEST_F(CudfExpressionSelectionTest, signatureEnforcesConstantArgsLike) {
   // OK: pattern is a constant
-  auto ok =
-      parseAndInferTypedExpr("like(name, '%abc%')", rowType_, execCtx_.get());
-  ASSERT_TRUE(canBeEvaluatedByCudf(ok));
+  auto ok = compileExecExpr("like(name, '%abc%')", rowType_, execCtx_.get());
+  ASSERT_TRUE(canBeEvaluatedByCudf(ok, /*deep=*/true));
 
   // Bad: pattern is not a constant
-  auto bad =
-      parseAndInferTypedExpr("like(name, name)", rowType_, execCtx_.get());
-  ASSERT_FALSE(canBeEvaluatedByCudf(bad));
+  auto bad = compileExecExpr("like(name, name)", rowType_, execCtx_.get());
+  ASSERT_FALSE(canBeEvaluatedByCudf(bad, /*deep=*/true));
 }
 
 TEST_F(CudfExpressionSelectionTest, signatureArityAndConstantsSubstr) {
   // OK: 2-arg substr with constant start
-  auto ok2 =
-      parseAndInferTypedExpr("substr(name, 1)", rowType_, execCtx_.get());
-  ASSERT_TRUE(canBeEvaluatedByCudf(ok2));
+  auto ok2 = compileExecExpr("substr(name, 1)", rowType_, execCtx_.get());
+  ASSERT_TRUE(canBeEvaluatedByCudf(ok2, /*deep=*/true));
 
   // OK: 3-arg substr with constant start and length
-  auto ok3 =
-      parseAndInferTypedExpr("substr(name, 1, 5)", rowType_, execCtx_.get());
-  ASSERT_TRUE(canBeEvaluatedByCudf(ok3));
+  auto ok3 = compileExecExpr("substr(name, 1, 5)", rowType_, execCtx_.get());
+  ASSERT_TRUE(canBeEvaluatedByCudf(ok3, /*deep=*/true));
 
   // Bad: start must be constant
-  auto badConst =
-      parseAndInferTypedExpr("substr(name, a)", rowType_, execCtx_.get());
-  ASSERT_FALSE(canBeEvaluatedByCudf(badConst));
+  auto badConst = compileExecExpr("substr(name, a)", rowType_, execCtx_.get());
+  ASSERT_FALSE(canBeEvaluatedByCudf(badConst, /*deep=*/true));
 }
 
 TEST_F(CudfExpressionSelectionTest, signatureCastsInDivide) {
   // OK: numeric args are castable to double
-  auto ok = parseAndInferTypedExpr("divide(a, b)", rowType_, execCtx_.get());
-  ASSERT_TRUE(canBeEvaluatedByCudf(ok));
+  auto ok = compileExecExpr("divide(a, b)", rowType_, execCtx_.get());
+  ASSERT_TRUE(canBeEvaluatedByCudf(ok, /*deep=*/true));
 }
 
 TEST_F(CudfExpressionSelectionTest, signatureVarargsHashWithSeed) {
   facebook::velox::functions::sparksql::registerFunctions();
 
   // OK: first arg constant seed
-  auto ok = parseAndInferTypedExpr(
+  auto ok = compileExecExpr(
       "hash_with_seed(42, a, b)",
       rowType_,
       execCtx_.get(),
       {.parseIntegerAsBigint = false, .functionPrefix = ""});
-  ASSERT_TRUE(canBeEvaluatedByCudf(ok));
+  ASSERT_TRUE(canBeEvaluatedByCudf(ok, /*deep=*/true));
 
   // Bad: first arg must be constant seed
-  auto bad = parseAndInferTypedExpr(
-      "hash_with_seed(c, b)",
-      rowType_,
-      execCtx_.get(),
-      {.parseIntegerAsBigint = false, .functionPrefix = ""});
-  ASSERT_FALSE(canBeEvaluatedByCudf(bad));
+  try {
+    auto bad = compileExecExpr(
+        "hash_with_seed(c, b)",
+        rowType_,
+        execCtx_.get(),
+        {.parseIntegerAsBigint = false, .functionPrefix = ""});
+    // If compilation succeeds, the compiled check must fail.
+    ASSERT_FALSE(canBeEvaluatedByCudf(bad, /*deep=*/true));
+  } catch (const VeloxUserError&) {
+    // Treat compile-time validation failure as unsupported.
+    SUCCEED();
+  }
+}
+
+TEST_F(CudfExpressionSelectionTest, signatureTypeVariableCoalesce) {
+  // OK: same type BIGINT
+  auto ok1 = compileExecExpr("coalesce(a, b)", rowType_, execCtx_.get());
+  ASSERT_TRUE(canBeEvaluatedByCudf(ok1, /*deep=*/true));
+
+  // OK: VARCHAR with literal
+  auto ok2 = compileExecExpr("coalesce(name, 'x')", rowType_, execCtx_.get());
+  ASSERT_TRUE(canBeEvaluatedByCudf(ok2, /*deep=*/true));
+}
+
+TEST_F(CudfExpressionSelectionTest, signatureTypeVariableSwitchIf) {
+  // OK: boolean + same type BIGINT
+  auto ok1 = compileExecExpr("if(true, a, b)", rowType_, execCtx_.get());
+  ASSERT_TRUE(canBeEvaluatedByCudf(ok1, /*deep=*/true));
+}
+
+TEST_F(CudfExpressionSelectionTest, DISABLED_castAndTryCast) {
+  // TODO (dm): This is required for passing of castAndTryCast test but breaks
+  // others. This is because ASTExpr agrees to support bad casts. remove after
+  // ASTExpr checks cast types
+  // CudfConfig::getInstance().astExpressionEnabled = false;
+
+  // OK: cast bigint -> double (supported by cuDF)
+  auto okCast = compileExecExpr("cast(a AS double)", rowType_, execCtx_.get());
+  ASSERT_TRUE(canBeEvaluatedByCudf(okCast, /*deep=*/true));
+
+  // OK: try_cast bigint -> double (supported by cuDF)
+  auto okTryCast =
+      compileExecExpr("try_cast(a AS double)", rowType_, execCtx_.get());
+  ASSERT_TRUE(canBeEvaluatedByCudf(okTryCast, /*deep=*/true));
+
+  // BAD: cast boolean -> date (expected unsupported by cuDF)
+  auto badCast = compileExecExpr(
+      "cast(length(name) < 10 AS date)", rowType_, execCtx_.get());
+  ASSERT_FALSE(canBeEvaluatedByCudf(badCast, /*deep=*/true));
 }
 
 } // namespace

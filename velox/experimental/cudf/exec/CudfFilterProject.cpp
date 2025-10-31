@@ -20,6 +20,7 @@
 #include "velox/experimental/cudf/exec/VeloxCudfInterop.h"
 #include "velox/experimental/cudf/vector/CudfVector.h"
 
+#include "velox/common/memory/Memory.h"
 #include "velox/expression/Expr.h"
 #include "velox/expression/FieldReference.h"
 
@@ -96,6 +97,30 @@ std::vector<exec::OperatorStats> splitStats(
 }
 
 } // namespace
+
+bool canBeEvaluatedByCudf(
+    const std::vector<core::TypedExprPtr>& exprs,
+    core::QueryCtx* queryCtx) {
+  if (exprs.empty()) {
+    return true;
+  }
+
+  auto precompilePool = memory::memoryManager()->addLeafPool(
+      "cudf-expr-precompile", /*threadSafe*/ false);
+  core::ExecCtx precompileCtx(precompilePool.get(), queryCtx);
+
+  bool lazyDereference = false;
+  std::vector<core::TypedExprPtr> exprsCopy = exprs;
+  std::unique_ptr<exec::ExprSet> exprSet = exec::makeExprSetFromFlag(
+      std::move(exprsCopy), &precompileCtx, lazyDereference);
+
+  for (const auto& e : exprSet->exprs()) {
+    if (!canBeEvaluatedByCudf(e)) {
+      return false;
+    }
+  }
+  return true;
+}
 
 CudfFilterProject::CudfFilterProject(
     int32_t operatorId,
@@ -244,16 +269,16 @@ void CudfFilterProject::filter(
     std::vector<std::unique_ptr<cudf::column>>& inputTableColumns,
     rmm::cuda_stream_view stream) {
   // Evaluate the Filter
-  auto filterColumns = filterEvaluator_->eval(
+  auto filterColumn = filterEvaluator_->eval(
       inputTableColumns, stream, cudf::get_current_device_resource_ref(), true);
-  auto filterColumn = asView(filterColumns);
+  auto filterColumnView = asView(filterColumn);
   bool shouldApplyFilter = [&]() {
-    if (filterColumn.has_nulls()) {
+    if (filterColumnView.has_nulls()) {
       return true;
     }
-    // check if all values in filterColumn are true
+    // check if all values in filterColumnView are true
     auto isAllTrue = cudf::reduce(
-        filterColumn,
+        filterColumnView,
         *cudf::make_all_aggregation<cudf::reduce_aggregation>(),
         cudf::data_type(cudf::type_id::BOOL8),
         stream,
@@ -267,7 +292,7 @@ void CudfFilterProject::filter(
     auto filterTable =
         std::make_unique<cudf::table>(std::move(inputTableColumns));
     auto filteredTable =
-        cudf::apply_boolean_mask(*filterTable, filterColumn, stream);
+        cudf::apply_boolean_mask(*filterTable, filterColumnView, stream);
     inputTableColumns = filteredTable->release();
   }
 }
