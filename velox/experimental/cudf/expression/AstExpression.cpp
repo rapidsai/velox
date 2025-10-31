@@ -18,7 +18,6 @@
 #include "velox/experimental/cudf/expression/AstExpression.h"
 #include "velox/experimental/cudf/expression/AstUtils.h"
 
-#include "velox/core/Expressions.h"
 #include "velox/expression/ConstantExpr.h"
 #include "velox/expression/FieldReference.h"
 #include "velox/vector/ComplexVector.h"
@@ -451,7 +450,7 @@ cudf::ast::expression const& AstContext::pushExprToTree(
       }
     }
     VELOX_FAIL("Field not found, " + name);
-  } else if (canBeEvaluatedByCudf(expr)) {
+  } else if (canBeEvaluatedByCudf(expr, /*deep=*/false)) {
     // Shallow check: only verify this operation is supported
     // Children will be recursively handled by createCudfExpression
     auto node =
@@ -615,39 +614,10 @@ bool ASTExpression::canEvaluate(std::shared_ptr<velox::exec::Expr> expr) {
       std::dynamic_pointer_cast<velox::exec::FieldReference>(expr) != nullptr;
 }
 
-bool ASTExpression::canEvaluate(const core::TypedExprPtr& expr) {
-  using core::ExprKind;
-  switch (expr->kind()) {
-    case ExprKind::kFieldAccess:
-    case ExprKind::kDereference:
-    case ExprKind::kConstant:
-    case ExprKind::kInput:
-      return true;
-    case ExprKind::kCall: {
-      const auto* call =
-          expr->asUnchecked<facebook::velox::core::CallTypedExpr>();
-      return detail::isAstSupported(call->name());
-    }
-    case core::ExprKind::kCast: {
-      const auto* cast = expr->asUnchecked<core::CastTypedExpr>();
-      if (cast->isTryCast()) {
-        return false;
-      }
-      return true;
-    }
-
-    default:
-      return false;
-  }
-}
-
 void registerAstEvaluator(int priority) {
   registerCudfExpressionEvaluator(
       kAstEvaluatorName,
       priority,
-      [](const core::TypedExprPtr& typed) {
-        return ASTExpression::canEvaluate(typed);
-      },
       [](std::shared_ptr<velox::exec::Expr> expr) {
         return ASTExpression::canEvaluate(expr);
       },
