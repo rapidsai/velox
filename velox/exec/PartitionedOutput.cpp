@@ -203,7 +203,6 @@ PartitionedOutput::PartitionedOutput(
           operatorId,
           planNode->id(),
           OperatorType::kPartitionedOutput),
-      eagerFlush_(eagerFlush),
       keyChannels_(toChannels(planNode->inputType(), planNode->keys())),
       numDestinations_(planNode->numPartitions()),
       replicateNullsAndAny_(planNode->isReplicateNullsAndAny()),
