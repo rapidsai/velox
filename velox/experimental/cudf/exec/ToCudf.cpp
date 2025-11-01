@@ -143,7 +143,7 @@ bool CompileState::compile(bool allow_cpu_fallback) {
     return false;
   };
 
-  auto isAggregationSupported = [getPlanNode](const exec::Operator* op) {
+  auto isAggregationSupported = [getPlanNode, ctx](const exec::Operator* op) {
     if (!isAnyOf<exec::HashAggregation, exec::StreamingAggregation>(op)) {
       return false;
     }
@@ -155,7 +155,7 @@ bool CompileState::compile(bool allow_cpu_fallback) {
     }
     
     // Use the centralized canBeEvaluatedByCudf function which includes expression expansion
-    return canBeEvaluatedByCudf(*aggregationPlanNode);
+    return canBeEvaluatedByCudf(*aggregationPlanNode, ctx->task->queryCtx().get());
   };
 
   auto isJoinSupported = [getPlanNode](const exec::Operator* op) {

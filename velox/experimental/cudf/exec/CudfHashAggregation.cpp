@@ -16,6 +16,7 @@
 
 #include "velox/experimental/cudf/CudfConfig.h"
 #include "velox/experimental/cudf/exec/CudfHashAggregation.h"
+#include "velox/experimental/cudf/exec/CudfFilterProject.h"
 #include "velox/experimental/cudf/exec/Utilities.h"
 #include "velox/experimental/cudf/exec/VeloxCudfInterop.h"
 #include "velox/experimental/cudf/expression/ExpressionEvaluator.h"
@@ -1135,6 +1136,29 @@ bool registerBuiltinAggregationFunctions(const std::string& prefix) {
   return true;
 }
 
+bool matchTypedCallAgainstSignatures(
+    const core::CallTypedExpr& call,
+    const std::vector<exec::FunctionSignaturePtr>& sigs) {
+  const auto n = call.inputs().size();
+  std::vector<TypePtr> argTypes;
+  argTypes.reserve(n);
+  for (const auto& input : call.inputs()) {
+    argTypes.push_back(input->type());
+  }
+  for (const auto& sig : sigs) {
+    std::vector<Coercion> coercions(n);
+    exec::SignatureBinder binder(*sig, argTypes);
+    if (!binder.tryBindWithCoercions(coercions)) {
+      continue;
+    }
+    
+    // For TypedExpr, we can't easily check if arguments are constants
+    // since we don't have the compiled expression. Skip constant checking for now.
+    return true;
+  }
+  return false;
+}
+
 bool canAggregationBeEvaluatedByCudf(const core::CallTypedExpr& call) {
   // Check against aggregation registry
   auto& registry = getCudfAggregationRegistry();
@@ -1147,7 +1171,7 @@ bool canAggregationBeEvaluatedByCudf(const core::CallTypedExpr& call) {
 }
 
 
-bool canBeEvaluatedByCudf(const core::AggregationNode& aggregationNode) {
+bool canBeEvaluatedByCudf(const core::AggregationNode& aggregationNode, core::QueryCtx* queryCtx) {
   const core::PlanNode* sourceNode = aggregationNode.sources().empty() ? nullptr : aggregationNode.sources()[0].get();
 
   // Check supported aggregation functions using aggregation registry
@@ -1170,7 +1194,8 @@ bool canBeEvaluatedByCudf(const core::AggregationNode& aggregationNode) {
     // Check input expressions can be evaluated by CUDF, expand the input first
     for (const auto& input : aggregate.call->inputs()) {
       auto expandedInput = expandFieldReference(input, sourceNode);
-      if (!canBeEvaluatedByCudf(expandedInput)) {
+      std::vector<core::TypedExprPtr> exprs = {expandedInput};
+      if (!canBeEvaluatedByCudf(exprs, queryCtx)) {
         return false;
       }
     }
@@ -1178,7 +1203,7 @@ bool canBeEvaluatedByCudf(const core::AggregationNode& aggregationNode) {
   }
   
   // Check grouping key expressions
-  if (!canGroupingKeysBeEvaluatedByCudf(aggregationNode.groupingKeys(), sourceNode)) {
+  if (!canGroupingKeysBeEvaluatedByCudf(aggregationNode.groupingKeys(), sourceNode, queryCtx)) {
     return false;
   }
   

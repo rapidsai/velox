@@ -177,7 +177,8 @@ core::TypedExprPtr expandFieldReference(
 // (AggregationNode, GroupIdNode, WindowNode), this is not just aggregation-specific validation
 bool canGroupingKeysBeEvaluatedByCudf(
     const std::vector<core::FieldAccessTypedExprPtr>& groupingKeys,
-    const core::PlanNode* sourceNode = nullptr);
+    const core::PlanNode* sourceNode,
+    core::QueryCtx* queryCtx);
 
 // Utility function to match a call against a list of signatures typically from a registry
 bool matchTypedCallAgainstSignatures(
