@@ -200,9 +200,39 @@ bool isOpAndInputsSupported(
 }
 
 // check if the expression (name + input types) is supported in AST
-bool isFunctionNameAndInputsSupported(
-    const std::string& funcName,
-    const std::vector<cudf::data_type>& inputCudfDataTypes) {
+bool isAstExprSupported(const std::shared_ptr<velox::exec::Expr>& expr) {
+  // get input types as cudf data types
+  std::vector<cudf::data_type> inputCudfDataTypes;
+  for (const auto& input : expr->inputs()) {
+    inputCudfDataTypes.push_back(
+        cudf::data_type(veloxToCudfTypeId(input->type())));
+  }
+
+  // check special kinds
+  if (expr->isConstant()) {
+    // all constants supported
+    // CHECK THIS!
+    return true;
+  } else if (expr->isCast()) {
+    // support casting of numeric types only for now
+    // DO WE NEED TO SUPPORT NON-NUMERIC TYPES?
+    return inputCudfDataTypes.size() == 1 &&
+        cudf::is_numeric(inputCudfDataTypes[0]);
+  } else if (expr->isConditional()) {
+    // NOT YET IMPLEMENTED
+    // JUST REPORT AS SUPPORTED
+    return true;
+  } else if (expr->isSwitch()) {
+    // NOT YET IMPLEMENTED
+    // JUST REPORT AS SUPPORTED
+    return true;
+  }
+  // others?
+
+  // get plain function name
+  const auto funcName =
+      stripPrefix(expr->name(), CudfConfig::getInstance().functionNamePrefix);
+
   // check by function name
   if (funcName == "between") {
     return inputCudfDataTypes.size() == 3 &&
@@ -238,56 +268,6 @@ bool isFunctionNameAndInputsSupported(
 
   // check op + input types
   return isOpAndInputsSupported(*maybeOp, inputCudfDataTypes);
-}
-
-// check if the expression (name + input types) is supported in AST
-bool isAstExprSupported(const std::shared_ptr<velox::exec::Expr>& expr) {
-  // get plain function name
-  const auto funcName =
-      stripPrefix(expr->name(), CudfConfig::getInstance().functionNamePrefix);
-
-  // get input types as cudf data types
-  std::vector<cudf::data_type> inputCudfDataTypes;
-  for (const auto& input : expr->inputs()) {
-    inputCudfDataTypes.push_back(
-        cudf::data_type(veloxToCudfTypeId(input->type())));
-  }
-
-  // check special kinds
-  if (expr->isConstant()) {
-    // all constants supported
-    // CHECK THIS!
-    return true;
-  } else if (expr->isCast()) {
-    // support casting of numeric types only for now
-    // DO WE NEED TO SUPPORT NON-NUMERIC TYPES?
-    return inputCudfDataTypes.size() == 1 &&
-        cudf::is_numeric(inputCudfDataTypes[0]);
-  } else if (expr->isConditional() || expr->isSwitch()) {
-    // NOT YET IMPLEMENTED
-    // JUST REPORT AS SUPPORTED
-    return true;
-  }
-  // others?
-
-  // just check by name and input types
-  return isFunctionNameAndInputsSupported(funcName, inputCudfDataTypes);
-}
-
-bool isAstCallTypedExprSupported(const core::CallTypedExpr* expr) {
-  // get plain function name
-  const auto funcName =
-      stripPrefix(expr->name(), CudfConfig::getInstance().functionNamePrefix);
-
-  // get input types as cudf data types
-  std::vector<cudf::data_type> inputCudfDataTypes;
-  for (const auto& input : expr->inputs()) {
-    inputCudfDataTypes.push_back(
-        cudf::data_type(veloxToCudfTypeId(input->type())));
-  }
-
-  // just check by name and input types
-  return isFunctionNameAndInputsSupported(funcName, inputCudfDataTypes);
 }
 
 } // namespace detail
