@@ -182,8 +182,8 @@ bool isOpAndInputsSupported(
   // check arity
   const auto arity = cudf::ast::detail::ast_operator_arity(op);
   if (arity != static_cast<int>(inputCudfDataTypes.size())) {
-    // arity mismatch
-    // throw a warning?
+    LOG(WARNING) << "Arity mismatch for operator: " << static_cast<int>(op)
+                 << " with input types size " << inputCudfDataTypes.size();
     return false;
   }
   // check for a cuDF implementation of this op with these inputs
@@ -199,75 +199,147 @@ bool isOpAndInputsSupported(
   return false;
 }
 
+// not special form, name = function, so unsupported for astpure
+// "in", "between", "isnotnull" are not special form, but supported for astpure
+// enum class SpecialFormKind : int32_t {
+//   kFieldAccess = 0, supported if not nested column / function
+//   kConstant = 1, "literal" for fixed_width and VARCHAR / function
+//   kCast = 2, "cast" or "try_cast" to int32, int64, double only / function
+//   kCoalesce = 3, unsupported/function
+//   kSwitch = 4, special case: if(cond, 1, 0) only / function
+//   kLambda = 5, unsupported
+//   kTry = 6, unsupported
+//   kAnd = 7, "and" or "or" with multiple inputs
+//   kOr = 8,
+//   kCustom = 999,
+// };
 // check if the expression (name + input types) is supported in AST
 bool isAstExprSupported(const std::shared_ptr<velox::exec::Expr>& expr) {
-  // get input types as cudf data types
-  std::vector<cudf::data_type> inputCudfDataTypes;
-  for (const auto& input : expr->inputs()) {
-    inputCudfDataTypes.push_back(
-        cudf::data_type(veloxToCudfTypeId(input->type())));
-  }
+  using velox::exec::FieldReference;
+  using Op = cudf::ast::ast_operator;
 
-  // check special kinds
-  if (expr->isConstant()) {
-    // all constants supported
-    // CHECK THIS!
-    return true;
-  } else if (expr->isCast()) {
-    // support casting of numeric types only for now
-    // DO WE NEED TO SUPPORT NON-NUMERIC TYPES?
-    return inputCudfDataTypes.size() == 1 &&
-        cudf::is_numeric(inputCudfDataTypes[0]);
-  } else if (expr->isConditional()) {
-    // NOT YET IMPLEMENTED
-    // JUST REPORT AS SUPPORTED
-    return true;
-  } else if (expr->isSwitch()) {
-    // NOT YET IMPLEMENTED
-    // JUST REPORT AS SUPPORTED
-    return true;
-  }
-  // others?
-
-  // get plain function name
-  const auto funcName =
+  const auto name =
       stripPrefix(expr->name(), CudfConfig::getInstance().functionNamePrefix);
+  const auto len = expr->inputs().size();
 
-  // check by function name
-  if (funcName == "between") {
-    return inputCudfDataTypes.size() == 3 &&
-        isOpAndInputsSupported(
-               cudf::ast::ast_operator::GREATER_EQUAL,
-               {inputCudfDataTypes[0], inputCudfDataTypes[1]}) &&
-        isOpAndInputsSupported(
-               cudf::ast::ast_operator::LESS_EQUAL,
-               {inputCudfDataTypes[0], inputCudfDataTypes[2]});
-  } else if (funcName == "in") {
-    // NOT SURE HOW TO TEST THIS
-    // "a IN (1,2,3)" does not work
-    return inputCudfDataTypes.size() == 2 &&
-        cudf::is_numeric(inputCudfDataTypes[0]) &&
-        inputCudfDataTypes[1].id() == cudf::type_id::LIST;
-  } else if (funcName == "cast") {
-    // support casting of numeric types only for now
-    // DO WE NEED TO SUPPORT NON-NUMERIC TYPES?
-    return inputCudfDataTypes.size() == 1 &&
-        cudf::is_numeric(inputCudfDataTypes[0]);
-  } else if (funcName == "switch" || funcName == "if") {
-    // NOT YET IMPLEMENTED
-    // JUST REPORT AS SUPPORTED
-    return true;
+  // Literals and field references are always supported
+  auto isSupportedLiteral = [&](const TypePtr& type) {
+    try {
+      auto cudfType = cudf::data_type(veloxToCudfTypeId(type));
+      return cudf::is_fixed_width(cudfType) ||
+          cudfType.id() == cudf::type_id::STRING;
+    } catch (...) {
+      LOG(WARNING) << "Unsupported type for literal: " << type->toString();
+      return false;
+    }
+  };
+  if (name == "literal") {
+    auto type = expr->type();
+    return isSupportedLiteral(type);
   }
-
-  // get regular op from name
-  const auto maybeOp = opFromFunctionName(funcName);
-  if (!maybeOp.has_value()) {
-    // not a supported regular op
+  if (auto fieldExpr = std::dynamic_pointer_cast<FieldReference>(expr)) {
+    const auto fieldName =
+        fieldExpr->inputs().empty() ? name : fieldExpr->inputs()[0]->name();
+    if (fieldExpr->field() == fieldName) {
+      return true;
+      // } else if (!allowPureAstOnly ) {
+      //   return true;
+    }
+    LOG(WARNING) << "Field " << name << "not found, in expression "
+                 << expr->toString();
     return false;
   }
 
-  // check op + input types
-  return isOpAndInputsSupported(*maybeOp, inputCudfDataTypes);
+  // Convert input types to CUDF types once
+  std::vector<cudf::data_type> inputCudfDataTypes;
+  inputCudfDataTypes.reserve(len);
+  for (const auto& input : expr->inputs()) {
+    try {
+      inputCudfDataTypes.push_back(
+          cudf::data_type(veloxToCudfTypeId(input->type())));
+    } catch (...) {
+      return false;
+    }
+  }
+
+  // Binary operations
+  if (binaryOps.find(name) != binaryOps.end()) {
+    // AND/OR can handle multiple inputs by chaining
+    if ((name == "and" || name == "or") && len > 2) {
+      for (size_t i = 1; i < len; i++) {
+        if (!isOpAndInputsSupported(
+                binaryOps.at(name),
+                {inputCudfDataTypes[0], inputCudfDataTypes[i]})) {
+          return false;
+        }
+      }
+      return true;
+    }
+    return len == 2 &&
+        isOpAndInputsSupported(binaryOps.at(name), inputCudfDataTypes);
+  }
+
+  // Unary operations (includes both unaryOps and "isnotnull")
+  if (unaryOps.find(name) != unaryOps.end()) {
+    return isOpAndInputsSupported(unaryOps.at(name), inputCudfDataTypes);
+  }
+  if (name == "isnotnull" && len == 1) {
+    return isOpAndInputsSupported(Op::IS_NULL, inputCudfDataTypes);
+  }
+
+  // Between: value >= lower AND value <= upper
+  if (name == "between" && len == 3) {
+    return isOpAndInputsSupported(
+               Op::GREATER_EQUAL,
+               {inputCudfDataTypes[0], inputCudfDataTypes[1]}) &&
+        isOpAndInputsSupported(
+               Op::LESS_EQUAL, {inputCudfDataTypes[0], inputCudfDataTypes[2]});
+  }
+
+  // In: chain of EQUAL operations
+  if (name == "in") {
+    return len == 2 && isSupportedLiteral(expr->inputs()[0]->type()) &&
+        isOpAndInputsSupported(
+               Op::EQUAL, {inputCudfDataTypes[0], inputCudfDataTypes[0]});
+  }
+
+  // Cast operations: only INTEGER, BIGINT, DOUBLE supported in pure AST
+  if ((name == "cast" || name == "try_cast") && len == 1) {
+    const auto outputKind = expr->type()->kind();
+    if (outputKind == TypeKind::INTEGER || outputKind == TypeKind::BIGINT) {
+      return isOpAndInputsSupported(Op::CAST_TO_INT64, inputCudfDataTypes);
+    }
+    if (outputKind == TypeKind::DOUBLE) {
+      return isOpAndInputsSupported(Op::CAST_TO_FLOAT64, inputCudfDataTypes);
+    }
+    return false;
+  }
+
+  // Switch/If: only specific patterns supported in pure AST
+  if ((name == "switch" || name == "if") && len == 3) {
+    auto c1 = dynamic_cast<velox::exec::ConstantExpr*>(expr->inputs()[1].get());
+    auto c2 = dynamic_cast<velox::exec::ConstantExpr*>(expr->inputs()[2].get());
+
+    if (!c1 || !c2) {
+      return false;
+    }
+
+    const auto str1 = c1->toString();
+    const auto str2 = c2->toString();
+
+    // Pattern: if(cond, 1, 0) -> CAST_TO_INT64
+    if ((str1 == "1:BIGINT" && str2 == "0:BIGINT") ||
+        (str1 == "1:INTEGER" && str2 == "0:INTEGER")) {
+      return isOpAndInputsSupported(Op::CAST_TO_INT64, inputCudfDataTypes);
+    }
+
+    // Pattern: if(cond, x, 0.0) -> CAST_TO_FLOAT64 then MUL
+    if (str2 == "0:DOUBLE") {
+      return true;
+    }
+  }
+  LOG(WARNING) << "Unsupported expression by AST: " << expr->toString();
+  return false;
 }
 
 } // namespace detail
@@ -416,7 +488,7 @@ cudf::ast::expression const& AstContext::pushExprToTree(
 
     return tree.push(createLiteral(value, scalars));
   } else if (binaryOps.find(name) != binaryOps.end()) {
-    if (len > 2 and (name == "and" or name == "or")) {
+    if (name == "and" or name == "or") {
       return multipleInputsToPairWise(expr);
     }
     VELOX_CHECK_EQ(len, 2);
@@ -490,12 +562,14 @@ cudf::ast::expression const& AstContext::pushExprToTree(
       return tree.push(Operation{Op::CAST_TO_INT64, op1});
     } else if (expr->type()->kind() == TypeKind::DOUBLE) {
       return tree.push(Operation{Op::CAST_TO_FLOAT64, op1});
-    } else {
+    } else if (!allowPureAstOnly) {
       // TODO (dm): Similar to else block in switch/if, remove this once
       // ASTEvaluator provides type based canEvaluate
       auto node =
           createCudfExpression(expr, inputRowSchema[0], kAstEvaluatorName);
       return addPrecomputeInstructionOnSide(0, 0, name, "", node);
+    } else {
+      VELOX_FAIL("Unsupported type for cast operation");
     }
   } else if (name == "switch" || name == "if") {
     VELOX_CHECK_EQ(len, 3);
@@ -542,9 +616,11 @@ cudf::ast::expression const& AstContext::pushExprToTree(
         auto side = static_cast<cudf::ast::table_reference>(sideIdx);
         if (fieldExpr->field() == fieldName) {
           return tree.push(cudf::ast::column_reference(columnIndex, side));
-        } else {
+        } else if (!allowPureAstOnly) {
           return addPrecomputeInstruction(
               fieldName, "nested_column", fieldExpr->field());
+        } else {
+          VELOX_FAIL("Unsupported type for nested column operation");
         }
       }
     }
