@@ -167,8 +167,22 @@ bool registerCudfAggregationFunction(
 
 bool registerBuiltinAggregationFunctions(const std::string& prefix);
 
-// Aggregation-specific CUDF validation functions
+// CUDF validation functions
 bool canAggregationBeEvaluatedByCudf(const core::CallTypedExpr& call, core::QueryCtx* queryCtx);
 bool canBeEvaluatedByCudf(const core::AggregationNode& aggregationNode, core::QueryCtx* queryCtx);
+
+// Utility functions
+core::TypedExprPtr expandFieldReference(
+    const core::TypedExprPtr& expr, 
+    const core::PlanNode* sourceNode);
+
+bool canGroupingKeysBeEvaluatedByCudf(
+    const std::vector<core::FieldAccessTypedExprPtr>& groupingKeys,
+    const core::PlanNode* sourceNode,
+    core::QueryCtx* queryCtx);
+
+bool matchTypedCallAgainstSignatures(
+    const core::CallTypedExpr& call,
+    const std::vector<exec::FunctionSignaturePtr>& sigs);
 
 } // namespace facebook::velox::cudf_velox

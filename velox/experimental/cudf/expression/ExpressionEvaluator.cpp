@@ -1123,45 +1123,6 @@ std::shared_ptr<CudfExpression> createCudfExpression(
   return FunctionExpression::create(expr, inputRowSchema);
 }
 
-core::TypedExprPtr expandFieldReference(
-    const core::TypedExprPtr& expr, 
-    const core::PlanNode* sourceNode) {
-  // If this is a field reference and we have a source projection, expand it
-  if (expr->kind() == core::ExprKind::kFieldAccess && sourceNode) {
-    auto projectNode = dynamic_cast<const core::ProjectNode*>(sourceNode);
-    if (projectNode) {
-      auto fieldExpr = std::dynamic_pointer_cast<const core::FieldAccessTypedExpr>(expr);
-      if (fieldExpr) {
-        // Find the corresponding projection expression
-        const auto& projections = projectNode->projections();
-        const auto& names = projectNode->names();
-        for (size_t i = 0; i < names.size(); ++i) {
-          if (names[i] == fieldExpr->name()) {
-            return projections[i]; // Return the underlying expression
-          }
-        }
-      }
-    }
-  }
-  return expr; // Return original expression if no expansion needed
-}
-
-bool canGroupingKeysBeEvaluatedByCudf(
-    const std::vector<core::FieldAccessTypedExprPtr>& groupingKeys,
-    const core::PlanNode* sourceNode,
-    core::QueryCtx* queryCtx) {
-  
-  // Check grouping key expressions (with expansion)
-  for (const auto& groupingKey : groupingKeys) {
-    auto expandedKey = expandFieldReference(groupingKey, sourceNode);
-    std::vector<core::TypedExprPtr> exprs = {expandedKey};
-    if (!canBeEvaluatedByCudf(exprs, queryCtx)) {
-      return false;
-    }
-  }
-  
-  return true;
-}
 
 
 } // namespace facebook::velox::cudf_velox

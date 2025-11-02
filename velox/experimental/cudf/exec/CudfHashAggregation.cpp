@@ -1151,9 +1151,10 @@ bool matchTypedCallAgainstSignatures(
     if (!binder.tryBindWithCoercions(coercions)) {
       continue;
     }
+
+    // For simplicity we skip checking for constant agruments, this may be added
+    // in the future
     
-    // For TypedExpr, we can't easily check if arguments are constants
-    // since we don't have the compiled expression. Skip constant checking for now.
     return true;
   }
   return false;
@@ -1205,6 +1206,46 @@ bool canBeEvaluatedByCudf(const core::AggregationNode& aggregationNode, core::Qu
   // Check grouping key expressions
   if (!canGroupingKeysBeEvaluatedByCudf(aggregationNode.groupingKeys(), sourceNode, queryCtx)) {
     return false;
+  }
+  
+  return true;
+}
+
+core::TypedExprPtr expandFieldReference(
+    const core::TypedExprPtr& expr, 
+    const core::PlanNode* sourceNode) {
+  // If this is a field reference and we have a source projection, expand it
+  if (expr->kind() == core::ExprKind::kFieldAccess && sourceNode) {
+    auto projectNode = dynamic_cast<const core::ProjectNode*>(sourceNode);
+    if (projectNode) {
+      auto fieldExpr = std::dynamic_pointer_cast<const core::FieldAccessTypedExpr>(expr);
+      if (fieldExpr) {
+        // Find the corresponding projection expression
+        const auto& projections = projectNode->projections();
+        const auto& names = projectNode->names();
+        for (size_t i = 0; i < names.size(); ++i) {
+          if (names[i] == fieldExpr->name()) {
+            return projections[i];
+          }
+        }
+      }
+    }
+  }
+  return expr;
+}
+
+bool canGroupingKeysBeEvaluatedByCudf(
+    const std::vector<core::FieldAccessTypedExprPtr>& groupingKeys,
+    const core::PlanNode* sourceNode,
+    core::QueryCtx* queryCtx) {
+  
+  // Check grouping key expressions (with expansion)
+  for (const auto& groupingKey : groupingKeys) {
+    auto expandedKey = expandFieldReference(groupingKey, sourceNode);
+    std::vector<core::TypedExprPtr> exprs = {expandedKey};
+    if (!canBeEvaluatedByCudf(exprs, queryCtx)) {
+      return false;
+    }
   }
   
   return true;

@@ -167,26 +167,4 @@ bool canBeEvaluatedByCudf(const core::TypedExprPtr& expr);
 
 bool canBeEvaluatedByCudf(const std::vector<core::TypedExprPtr>& exprs);
 
-// Utility function to expand field references to their underlying expressions
-// by looking at source projections
-core::TypedExprPtr expandFieldReference(
-    const core::TypedExprPtr& expr, 
-    const core::PlanNode* sourceNode);
-
-// TODO: this probably should be applied to all operators with grouping keys
-// (AggregationNode, GroupIdNode, WindowNode), this is not just aggregation-specific validation
-bool canGroupingKeysBeEvaluatedByCudf(
-    const std::vector<core::FieldAccessTypedExprPtr>& groupingKeys,
-    const core::PlanNode* sourceNode,
-    core::QueryCtx* queryCtx);
-
-// Utility function to match a call against a list of signatures typically from a registry
-bool matchCallAgainstSignatures(
-    const velox::exec::Expr& call,
-    const std::vector<exec::FunctionSignaturePtr>& sigs);
-
-bool matchTypedCallAgainstSignatures(
-    const core::CallTypedExpr& call,
-    const std::vector<exec::FunctionSignaturePtr>& sigs);
-
 } // namespace facebook::velox::cudf_velox
