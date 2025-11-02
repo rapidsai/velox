@@ -867,6 +867,10 @@ bool registerBuiltinFunctions(const std::string& prefix) {
       {FunctionSignatureBuilder()
            .returnType("integer")
            .argumentType("timestamp")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("integer")
+           .argumentType("date")
            .build()});
 
   registerCudfFunction(
