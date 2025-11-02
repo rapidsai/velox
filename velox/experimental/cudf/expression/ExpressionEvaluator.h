@@ -181,6 +181,10 @@ bool canGroupingKeysBeEvaluatedByCudf(
     core::QueryCtx* queryCtx);
 
 // Utility function to match a call against a list of signatures typically from a registry
+bool matchCallAgainstSignatures(
+    const velox::exec::Expr& call,
+    const std::vector<exec::FunctionSignaturePtr>& sigs);
+
 bool matchTypedCallAgainstSignatures(
     const core::CallTypedExpr& call,
     const std::vector<exec::FunctionSignaturePtr>& sigs);

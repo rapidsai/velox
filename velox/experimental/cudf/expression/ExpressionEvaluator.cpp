@@ -107,7 +107,7 @@ std::unordered_map<std::string, CudfFunctionSpec>& getCudfFunctionRegistry() {
 }
 
 
-static bool matchCallAgainstSignatures(
+bool matchCallAgainstSignatures(
     const velox::exec::Expr& call,
     const std::vector<exec::FunctionSignaturePtr>& sigs) {
   const auto n = call.inputs().size();

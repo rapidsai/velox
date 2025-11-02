@@ -301,8 +301,8 @@ TEST_F(CudfAggregationSelectionTest, unsupportedAggregationFunctionSignatures) {
       },
       "variance");
   
-  ASSERT_FALSE(canAggregationBeEvaluatedByCudf(*stddevExpr));
-  ASSERT_FALSE(canAggregationBeEvaluatedByCudf(*varianceExpr));
+  ASSERT_FALSE(canAggregationBeEvaluatedByCudf(*stddevExpr, queryCtx_.get()));
+  ASSERT_FALSE(canAggregationBeEvaluatedByCudf(*varianceExpr, queryCtx_.get()));
 }
 
 // Test comprehensive type support validation - all registered CUDF aggregation signatures
@@ -409,41 +409,41 @@ TEST_F(CudfAggregationSelectionTest, comprehensiveTypeSupportValidation) {
       DOUBLE(), std::vector<core::TypedExprPtr>{
           std::make_shared<core::FieldAccessTypedExpr>(DOUBLE(), "c3")}, "avg");
 
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*sumTinyintExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*sumSmallintExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*sumIntegerExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*sumBigintExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*sumRealExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*sumDoubleExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*sumTinyintExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*sumSmallintExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*sumIntegerExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*sumBigintExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*sumRealExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*sumDoubleExpr, queryCtx_.get()));
 
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countTinyintExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countSmallintExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countIntegerExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countBigintExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countRealExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countDoubleExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countVarcharExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countBooleanExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countStarExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countTinyintExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countSmallintExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countIntegerExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countBigintExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countRealExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countDoubleExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countVarcharExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countBooleanExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*countStarExpr, queryCtx_.get()));
 
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*minTinyintExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*minSmallintExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*minIntegerExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*minBigintExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*minRealExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*minDoubleExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*minTinyintExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*minSmallintExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*minIntegerExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*minBigintExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*minRealExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*minDoubleExpr, queryCtx_.get()));
 
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*maxTinyintExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*maxSmallintExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*maxIntegerExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*maxBigintExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*maxRealExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*maxDoubleExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*maxTinyintExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*maxSmallintExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*maxIntegerExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*maxBigintExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*maxRealExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*maxDoubleExpr, queryCtx_.get()));
 
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*avgSmallintExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*avgIntegerExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*avgBigintExpr));
-  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*avgDoubleExpr));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*avgSmallintExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*avgIntegerExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*avgBigintExpr, queryCtx_.get()));
+  ASSERT_TRUE(canAggregationBeEvaluatedByCudf(*avgDoubleExpr, queryCtx_.get()));
 
 }
 
@@ -467,10 +467,10 @@ TEST_F(CudfAggregationSelectionTest, invalidTypeCombinationsRejected) {
       BOOLEAN(), std::vector<core::TypedExprPtr>{
           std::make_shared<core::FieldAccessTypedExpr>(BOOLEAN(), "c7")}, "max");
 
-  ASSERT_FALSE(canAggregationBeEvaluatedByCudf(*avgVarcharExpr));
-  ASSERT_FALSE(canAggregationBeEvaluatedByCudf(*sumVarcharExpr));
-  ASSERT_FALSE(canAggregationBeEvaluatedByCudf(*minVarcharExpr));
-  ASSERT_FALSE(canAggregationBeEvaluatedByCudf(*maxBooleanExpr));
+  ASSERT_FALSE(canAggregationBeEvaluatedByCudf(*avgVarcharExpr, queryCtx_.get()));
+  ASSERT_FALSE(canAggregationBeEvaluatedByCudf(*sumVarcharExpr, queryCtx_.get()));
+  ASSERT_FALSE(canAggregationBeEvaluatedByCudf(*minVarcharExpr, queryCtx_.get()));
+  ASSERT_FALSE(canAggregationBeEvaluatedByCudf(*maxBooleanExpr, queryCtx_.get()));
 }
 
 // Test `distinct` aggregations should be rejected early (otherwise the throw NYI)
@@ -561,10 +561,10 @@ TEST_F(CudfAggregationSelectionTest, DISABLED_returnTypeMismatchShouldBeRejected
       "min");
 
   // Without return type validation, these would incorrectly pass
-  ASSERT_FALSE(canAggregationBeEvaluatedByCudf(*sumWrongReturnExpr));
-  ASSERT_FALSE(canAggregationBeEvaluatedByCudf(*avgWrongReturnExpr));
-  ASSERT_FALSE(canAggregationBeEvaluatedByCudf(*countWrongReturnExpr));
-  ASSERT_FALSE(canAggregationBeEvaluatedByCudf(*minWrongReturnExpr));
+  ASSERT_FALSE(canAggregationBeEvaluatedByCudf(*sumWrongReturnExpr, queryCtx_.get()));
+  ASSERT_FALSE(canAggregationBeEvaluatedByCudf(*avgWrongReturnExpr, queryCtx_.get()));
+  ASSERT_FALSE(canAggregationBeEvaluatedByCudf(*countWrongReturnExpr, queryCtx_.get()));
+  ASSERT_FALSE(canAggregationBeEvaluatedByCudf(*minWrongReturnExpr, queryCtx_.get()));
 }
 
 } // namespace

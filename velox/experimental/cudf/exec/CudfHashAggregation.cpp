@@ -1159,7 +1159,7 @@ bool matchTypedCallAgainstSignatures(
   return false;
 }
 
-bool canAggregationBeEvaluatedByCudf(const core::CallTypedExpr& call) {
+bool canAggregationBeEvaluatedByCudf(const core::CallTypedExpr& call, core::QueryCtx* queryCtx) {
   // Check against aggregation registry
   auto& registry = getCudfAggregationRegistry();
   auto it = registry.find(call.name());
@@ -1177,7 +1177,7 @@ bool canBeEvaluatedByCudf(const core::AggregationNode& aggregationNode, core::Qu
   // Check supported aggregation functions using aggregation registry
   for (const auto& aggregate : aggregationNode.aggregates()) {
 
-    if (!canAggregationBeEvaluatedByCudf(*aggregate.call)) {
+    if (!canAggregationBeEvaluatedByCudf(*aggregate.call, queryCtx)) {
       return false;
     }
     
