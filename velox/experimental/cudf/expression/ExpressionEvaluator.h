@@ -17,7 +17,6 @@
 #pragma once
 
 #include "velox/core/ITypedExpr.h"
-#include "velox/core/PlanNode.h"
 #include "velox/expression/Expr.h"
 #include "velox/expression/FunctionSignature.h"
 #include "velox/type/Type.h"
