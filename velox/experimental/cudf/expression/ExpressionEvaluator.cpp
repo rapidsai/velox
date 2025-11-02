@@ -17,8 +17,6 @@
 #include "velox/experimental/cudf/exec/VeloxCudfInterop.h"
 #include "velox/experimental/cudf/expression/AstUtils.h"
 #include "velox/experimental/cudf/expression/ExpressionEvaluator.h"
-#include "velox/experimental/cudf/exec/CudfHashAggregation.h"
-#include "velox/experimental/cudf/exec/CudfFilterProject.h"
 
 #include "velox/expression/ConstantExpr.h"
 #include "velox/expression/FieldReference.h"
@@ -107,7 +105,7 @@ std::unordered_map<std::string, CudfFunctionSpec>& getCudfFunctionRegistry() {
 }
 
 
-bool matchCallAgainstSignatures(
+static bool matchCallAgainstSignatures(
     const velox::exec::Expr& call,
     const std::vector<exec::FunctionSignaturePtr>& sigs) {
   const auto n = call.inputs().size();
@@ -122,7 +120,6 @@ bool matchCallAgainstSignatures(
     if (!binder.tryBindWithCoercions(coercions)) {
       continue;
     }
-    
     // binder does not confirm whether positional arguments are
     // constants(scalars) as expected. we have to check manually
     const auto& constArgs = sig->constantArguments();
@@ -1122,7 +1119,5 @@ std::shared_ptr<CudfExpression> createCudfExpression(
 
   return FunctionExpression::create(expr, inputRowSchema);
 }
-
-
 
 } // namespace facebook::velox::cudf_velox
