@@ -990,174 +990,6 @@ bool registerAggregationFunctionForStep(
   return true;
 }
 
-// Legacy registry for backward compatibility
-std::unordered_map<std::string, CudfFunctionSpec>& getCudfAggregationRegistry() {
-  static std::unordered_map<std::string, CudfFunctionSpec> registry;
-  return registry;
-}
-
-bool registerCudfAggregationFunction(
-    const std::string& name,
-    const std::vector<exec::FunctionSignaturePtr>& signatures,
-    bool overwrite) {
-  auto& registry = getCudfAggregationRegistry();
-  if (!overwrite && registry.find(name) != registry.end()) {
-    return false;
-  }
-  registry[name] = CudfFunctionSpec{nullptr, signatures}; // No factory needed for aggregations
-  return true;
-}
-
-bool registerBuiltinAggregationFunctions(const std::string& prefix) {
-  using exec::FunctionSignatureBuilder;
-
-  registerCudfAggregationFunction(
-      prefix + "sum",
-      {
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("tinyint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("smallint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("integer")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("bigint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("real")
-           .argumentType("real")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("double")
-           .argumentType("double")
-           .build()});
-
-  registerCudfAggregationFunction(
-      prefix + "count",
-      {
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("tinyint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("smallint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("integer")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("bigint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("real")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("double")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("varchar")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("boolean")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .build()});
-
-  registerCudfAggregationFunction(
-      prefix + "min",
-      {
-       FunctionSignatureBuilder()
-           .returnType("tinyint")
-           .argumentType("tinyint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("smallint")
-           .argumentType("smallint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("integer")
-           .argumentType("integer")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("bigint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("real")
-           .argumentType("real")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("double")
-           .argumentType("double")
-           .build()
-      });
-
-  registerCudfAggregationFunction(
-      prefix + "max",
-      {
-       FunctionSignatureBuilder()
-           .returnType("tinyint")
-           .argumentType("tinyint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("smallint")
-           .argumentType("smallint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("integer")
-           .argumentType("integer")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("bigint")
-           .argumentType("bigint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("real")
-           .argumentType("real")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("double")
-           .argumentType("double")
-           .build()
-      });
-
-  registerCudfAggregationFunction(
-      prefix + "avg",
-      {
-       FunctionSignatureBuilder()
-           .returnType("double")
-           .argumentType("smallint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("double")
-           .argumentType("integer")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("double")
-           .argumentType("bigint")
-           .build(),
-       FunctionSignatureBuilder()
-           .returnType("double")
-           .argumentType("double")
-           .build()});
-
-  return true;
-}
 
 // Register step-aware builtin aggregation functions
 bool registerStepAwareBuiltinAggregationFunctions(const std::string& prefix) {
@@ -1248,9 +1080,6 @@ bool registerStepAwareBuiltinAggregationFunctions(const std::string& prefix) {
   
   // Intermediate step: avg(row(sum input_type, count bigint)) -> row(sum input_type, count bigint)
   auto avgIntermediateSignatures = std::vector<exec::FunctionSignaturePtr>{
-      FunctionSignatureBuilder().returnType("row(smallint,bigint)").argumentType("row(smallint,bigint)").build(),
-      FunctionSignatureBuilder().returnType("row(integer,bigint)").argumentType("row(integer,bigint)").build(),
-      FunctionSignatureBuilder().returnType("row(bigint,bigint)").argumentType("row(bigint,bigint)").build(),
       FunctionSignatureBuilder().returnType("row(double,bigint)").argumentType("row(double,bigint)").build()
   };
   registerAggregationFunctionForStep(prefix + "avg", core::AggregationNode::Step::kIntermediate, avgIntermediateSignatures);
@@ -1282,16 +1111,6 @@ bool matchTypedCallAgainstSignatures(
   return false;
 }
 
-bool canAggregationBeEvaluatedByCudf(const core::CallTypedExpr& call, core::QueryCtx* queryCtx) {
-  // Check against aggregation registry
-  auto& registry = getCudfAggregationRegistry();
-  auto it = registry.find(call.name());
-  if (it == registry.end()) {
-    return false;
-  }
-  const auto& spec = it->second;
-  return matchTypedCallAgainstSignatures(call, spec.signatures);
-}
 
 // Step-aware aggregation validation function
 bool canAggregationBeEvaluatedByCudf(

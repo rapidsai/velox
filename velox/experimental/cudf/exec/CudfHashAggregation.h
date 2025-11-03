@@ -174,21 +174,8 @@ bool registerAggregationFunctionForStep(
     const std::vector<exec::FunctionSignaturePtr>& signatures,
     bool overwrite = true);
 
-// Legacy registry for backward compatibility
-std::unordered_map<std::string, CudfFunctionSpec>& getCudfAggregationRegistry();
-
-bool registerCudfAggregationFunction(
-    const std::string& name,
-    const std::vector<exec::FunctionSignaturePtr>& signatures,
-    bool overwrite = true);
-
-bool registerBuiltinAggregationFunctions(const std::string& prefix);
-
 // Register step-aware builtin aggregation functions
 bool registerStepAwareBuiltinAggregationFunctions(const std::string& prefix);
-
-// CUDF validation functions
-bool canAggregationBeEvaluatedByCudf(const core::CallTypedExpr& call, core::QueryCtx* queryCtx);
 
 // Step-aware aggregation validation function
 bool canAggregationBeEvaluatedByCudf(

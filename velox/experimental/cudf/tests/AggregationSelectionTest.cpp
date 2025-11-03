@@ -20,6 +20,22 @@
 #include "velox/experimental/cudf/tests/utils/ExpressionTestUtil.h"
 
 #include "velox/common/memory/Memory.h"
+
+namespace {
+// Simple wrapper for test compatibility - assumes kSingle step
+bool canAggregationBeEvaluatedByCudf(const facebook::velox::core::CallTypedExpr& call, facebook::velox::core::QueryCtx* queryCtx) {
+  // For tests, assume kSingle step and extract input types from the call
+  std::vector<facebook::velox::TypePtr> rawInputTypes;
+  for (const auto& input : call.inputs()) {
+    rawInputTypes.push_back(input->type());
+  }
+  return facebook::velox::cudf_velox::canAggregationBeEvaluatedByCudf(
+      call, 
+      facebook::velox::core::AggregationNode::Step::kSingle, 
+      rawInputTypes, 
+      queryCtx);
+}
+}
 #include "velox/core/QueryCtx.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
 #include "velox/functions/prestosql/registration/RegistrationFunctions.h"
