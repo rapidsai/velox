@@ -38,11 +38,10 @@ class TpchBenchmark : public facebook::velox::QueryBenchmarkBase {
 
  protected:
   std::unordered_map<std::string, std::string> queryConfigs_;
+  std::shared_ptr<facebook::velox::exec::test::TpchQueryBuilder> queryBuilder_;
 
  private:
   void initQueryBuilder();
-
-  std::shared_ptr<facebook::velox::exec::test::TpchQueryBuilder> queryBuilder_;
 };
 
 extern std::unique_ptr<TpchBenchmark> benchmark;
