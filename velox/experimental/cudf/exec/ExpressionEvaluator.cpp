@@ -338,6 +338,7 @@ const std::unordered_set<std::string> supportedOps = {
     "split",
     "coalesce",
     "lower",
+    "upper",
     "round",
     "hash_with_seed"};
 
@@ -692,6 +693,13 @@ cudf::ast::expression const& AstContext::pushExprToTree(
         std::dynamic_pointer_cast<FieldReference>(expr->inputs()[0]);
     VELOX_CHECK_NOT_NULL(fieldExpr, "Expression is not a field");
     return addPrecomputeInstruction(fieldExpr->name(), "lower");
+  } else if (name == "upper") {
+    VELOX_CHECK_EQ(len, 1);
+
+    auto fieldExpr =
+        std::dynamic_pointer_cast<FieldReference>(expr->inputs()[0]);
+    VELOX_CHECK_NOT_NULL(fieldExpr, "Expression is not a field");
+    return addPrecomputeInstruction(fieldExpr->name(), "upper");
   } else if (name == "substr" or name == "substring") {
     // Build a cudf expression node for recursive evaluation
     auto node = CudfExpressionNode::create(expr);
@@ -1481,6 +1489,12 @@ void addPrecomputedColumns(
       inputTableColumns.emplace_back(std::move(newColumn));
     } else if (ins_name == "lower") {
       auto newColumn = cudf::strings::to_lower(
+          inputTableColumns[dependent_column_index]->view(),
+          stream,
+          cudf::get_current_device_resource_ref());
+      inputTableColumns.emplace_back(std::move(newColumn));
+    } else if (ins_name == "upper") {
+      auto newColumn = cudf::strings::to_upper(
           inputTableColumns[dependent_column_index]->view(),
           stream,
           cudf::get_current_device_resource_ref());
