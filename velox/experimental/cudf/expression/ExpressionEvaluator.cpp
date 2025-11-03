@@ -104,7 +104,6 @@ std::unordered_map<std::string, CudfFunctionSpec>& getCudfFunctionRegistry() {
   return registry;
 }
 
-
 static bool matchCallAgainstSignatures(
     const velox::exec::Expr& call,
     const std::vector<exec::FunctionSignaturePtr>& sigs) {
@@ -138,7 +137,6 @@ static bool matchCallAgainstSignatures(
   }
   return false;
 }
-
 
 class SplitFunction : public CudfFunction {
  public:

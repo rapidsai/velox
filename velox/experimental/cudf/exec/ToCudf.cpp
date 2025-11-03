@@ -147,15 +147,18 @@ bool CompileState::compile(bool allow_cpu_fallback) {
     if (!isAnyOf<exec::HashAggregation, exec::StreamingAggregation>(op)) {
       return false;
     }
-    
-    auto aggregationPlanNode = std::dynamic_pointer_cast<const core::AggregationNode>(
-        getPlanNode(op->planNodeId()));
+
+    auto aggregationPlanNode =
+        std::dynamic_pointer_cast<const core::AggregationNode>(
+            getPlanNode(op->planNodeId()));
     if (!aggregationPlanNode) {
       return false;
     }
-    
-    // Use the centralized canBeEvaluatedByCudf function which includes expression expansion
-    return canBeEvaluatedByCudf(*aggregationPlanNode, ctx->task->queryCtx().get());
+
+    // Use the centralized canBeEvaluatedByCudf function which includes
+    // expression expansion
+    return canBeEvaluatedByCudf(
+        *aggregationPlanNode, ctx->task->queryCtx().get());
   };
 
   auto isJoinSupported = [getPlanNode](const exec::Operator* op) {
@@ -179,8 +182,10 @@ bool CompileState::compile(bool allow_cpu_fallback) {
   };
 
   auto isSupportedGpuOperator =
-      [isFilterProjectSupported, isJoinSupported, isTableScanSupported, isAggregationSupported](
-          const exec::Operator* op) {
+      [isFilterProjectSupported,
+       isJoinSupported,
+       isTableScanSupported,
+       isAggregationSupported](const exec::Operator* op) {
         return isAnyOf<
                    exec::OrderBy,
                    exec::TopN,
@@ -199,18 +204,21 @@ bool CompileState::compile(bool allow_cpu_fallback) {
       isSupportedGpuOperators.begin(),
       isSupportedGpuOperator);
   auto acceptsGpuInput = [isFilterProjectSupported,
-                          isJoinSupported, isAggregationSupported](const exec::Operator* op) {
+                          isJoinSupported,
+                          isAggregationSupported](const exec::Operator* op) {
     return isAnyOf<
                exec::OrderBy,
                exec::TopN,
                exec::Limit,
                exec::LocalPartition,
                exec::AssignUniqueId>(op) ||
-        isFilterProjectSupported(op) || isJoinSupported(op) || isAggregationSupported(op);
+        isFilterProjectSupported(op) || isJoinSupported(op) ||
+        isAggregationSupported(op);
   };
   auto producesGpuOutput = [isFilterProjectSupported,
                             isJoinSupported,
-                            isTableScanSupported, isAggregationSupported](const exec::Operator* op) {
+                            isTableScanSupported,
+                            isAggregationSupported](const exec::Operator* op) {
     return isAnyOf<
                exec::OrderBy,
                exec::TopN,
@@ -299,8 +307,7 @@ bool CompileState::compile(bool allow_cpu_fallback) {
           getPlanNode(topNOp->planNodeId()));
       VELOX_CHECK(planNode != nullptr);
       replaceOp.push_back(std::make_unique<CudfTopN>(id, ctx, planNode));
-    } else if (
-        isAggregationSupported(oper)) {
+    } else if (isAggregationSupported(oper)) {
       auto planNode = std::dynamic_pointer_cast<const core::AggregationNode>(
           getPlanNode(oper->planNodeId()));
       VELOX_CHECK(planNode != nullptr);

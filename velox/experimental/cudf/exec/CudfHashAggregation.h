@@ -22,6 +22,7 @@
 #include "velox/expression/FunctionSignature.h"
 
 #include <cudf/groupby.hpp>
+
 #include <unordered_map>
 
 namespace facebook::velox::cudf_velox {
@@ -160,9 +161,10 @@ class CudfHashAggregation : public exec::Operator, public NvtxHelper {
 // Step-aware aggregation function registry
 // Map of function name -> Map of step -> signatures
 using StepAwareAggregationRegistry = std::unordered_map<
-    std::string, 
-    std::unordered_map<core::AggregationNode::Step, std::vector<exec::FunctionSignaturePtr>>
->;
+    std::string,
+    std::unordered_map<
+        core::AggregationNode::Step,
+        std::vector<exec::FunctionSignaturePtr>>>;
 
 // Get the step-aware aggregation registry
 StepAwareAggregationRegistry& getStepAwareAggregationRegistry();
@@ -179,16 +181,18 @@ bool registerStepAwareBuiltinAggregationFunctions(const std::string& prefix);
 
 // Step-aware aggregation validation function
 bool canAggregationBeEvaluatedByCudf(
-    const core::CallTypedExpr& call, 
+    const core::CallTypedExpr& call,
     core::AggregationNode::Step step,
     const std::vector<TypePtr>& rawInputTypes,
     core::QueryCtx* queryCtx);
 
-bool canBeEvaluatedByCudf(const core::AggregationNode& aggregationNode, core::QueryCtx* queryCtx);
+bool canBeEvaluatedByCudf(
+    const core::AggregationNode& aggregationNode,
+    core::QueryCtx* queryCtx);
 
 // Utility functions
 core::TypedExprPtr expandFieldReference(
-    const core::TypedExprPtr& expr, 
+    const core::TypedExprPtr& expr,
     const core::PlanNode* sourceNode);
 
 bool canGroupingKeysBeEvaluatedByCudf(

@@ -46,7 +46,8 @@ class ToCudfSelectionTest : public OperatorTestBase {
     OperatorTestBase::TearDown();
   }
 
-  std::vector<RowVectorPtr> makeVectors(const RowTypePtr& rowType, size_t size, int numVectors) {
+  std::vector<RowVectorPtr>
+  makeVectors(const RowTypePtr& rowType, size_t size, int numVectors) {
     std::vector<RowVectorPtr> vectors;
     VectorFuzzer fuzzer({.vectorSize = size}, pool());
     for (int32_t i = 0; i < numVectors; ++i) {
@@ -98,17 +99,19 @@ TEST_F(ToCudfSelectionTest, supportedAggregationUsesCudf) {
   auto plan = PlanBuilder()
                   .values(vectors)
                   .aggregation(
-                      {"c0"}, 
+                      {"c0"},
                       {"sum(c1)", "count(c2)", "min(c3)", "max(c4)", "avg(c5)"},
                       {},
                       core::AggregationNode::Step::kSingle,
                       false)
                   .planNode();
 
-  auto task = AssertQueryBuilder(duckDbQueryRunner_)
-                  .config("cudf.enabled", true)
-                  .plan(plan)
-                  .assertResults("SELECT c0, sum(c1), count(c2), min(c3), max(c4), avg(c5) FROM tmp GROUP BY c0");
+  auto task =
+      AssertQueryBuilder(duckDbQueryRunner_)
+          .config("cudf.enabled", true)
+          .plan(plan)
+          .assertResults(
+              "SELECT c0, sum(c1), count(c2), min(c3), max(c4), avg(c5) FROM tmp GROUP BY c0");
 
   ASSERT_TRUE(wasCudfAggregationUsed(task));
   ASSERT_FALSE(wasDefaultHashAggregationUsed(task));
@@ -121,13 +124,20 @@ TEST_F(ToCudfSelectionTest, unsupportedAggregationFallsBack) {
 
   auto plan = PlanBuilder()
                   .values(vectors)
-                  .aggregation({"c0"}, {"stddev(c1)", "variance(c2)"}, {}, core::AggregationNode::Step::kSingle, false)
+                  .aggregation(
+                      {"c0"},
+                      {"stddev(c1)", "variance(c2)"},
+                      {},
+                      core::AggregationNode::Step::kSingle,
+                      false)
                   .planNode();
 
-  auto task = AssertQueryBuilder(duckDbQueryRunner_)
-                  .config("cudf.enabled", true)
-                  .plan(plan)
-                  .assertResults("SELECT c0, stddev(c1), variance(c2) FROM tmp GROUP BY c0");
+  auto task =
+      AssertQueryBuilder(duckDbQueryRunner_)
+          .config("cudf.enabled", true)
+          .plan(plan)
+          .assertResults(
+              "SELECT c0, stddev(c1), variance(c2) FROM tmp GROUP BY c0");
 
   ASSERT_FALSE(wasCudfAggregationUsed(task));
   ASSERT_TRUE(wasDefaultHashAggregationUsed(task));
@@ -140,13 +150,19 @@ TEST_F(ToCudfSelectionTest, mixedSupportFallsBack) {
 
   auto plan = PlanBuilder()
                   .values(vectors)
-                  .aggregation({"c0"}, {"sum(c1)", "stddev(c2)"}, {}, core::AggregationNode::Step::kSingle, false)
+                  .aggregation(
+                      {"c0"},
+                      {"sum(c1)", "stddev(c2)"},
+                      {},
+                      core::AggregationNode::Step::kSingle,
+                      false)
                   .planNode();
 
-  auto task = AssertQueryBuilder(duckDbQueryRunner_)
-                  .config("cudf.enabled", true)
-                  .plan(plan)
-                  .assertResults("SELECT c0, sum(c1), stddev(c2) FROM tmp GROUP BY c0");
+  auto task =
+      AssertQueryBuilder(duckDbQueryRunner_)
+          .config("cudf.enabled", true)
+          .plan(plan)
+          .assertResults("SELECT c0, sum(c1), stddev(c2) FROM tmp GROUP BY c0");
 
   ASSERT_FALSE(wasCudfAggregationUsed(task));
   ASSERT_TRUE(wasDefaultHashAggregationUsed(task));
@@ -159,7 +175,12 @@ TEST_F(ToCudfSelectionTest, supportedGlobalAggregationUsesCudf) {
 
   auto plan = PlanBuilder()
                   .values(vectors)
-                  .aggregation({}, {"sum(c1)", "count(c2)", "max(c3)"}, {}, core::AggregationNode::Step::kSingle, false)
+                  .aggregation(
+                      {},
+                      {"sum(c1)", "count(c2)", "max(c3)"},
+                      {},
+                      core::AggregationNode::Step::kSingle,
+                      false)
                   .planNode();
 
   auto task = AssertQueryBuilder(duckDbQueryRunner_)
@@ -178,7 +199,12 @@ TEST_F(ToCudfSelectionTest, unsupportedGlobalAggregationFallsBack) {
 
   auto plan = PlanBuilder()
                   .values(vectors)
-                  .aggregation({}, {"stddev(c1)"}, {}, core::AggregationNode::Step::kSingle, false)
+                  .aggregation(
+                      {},
+                      {"stddev(c1)"},
+                      {},
+                      core::AggregationNode::Step::kSingle,
+                      false)
                   .planNode();
 
   auto task = AssertQueryBuilder(duckDbQueryRunner_)
@@ -197,14 +223,30 @@ TEST_F(ToCudfSelectionTest, supportedGroupingKeyExpressionsUsesCudf) {
 
   auto plan = PlanBuilder()
                   .values(vectors)
-                  .project({"c0", "c1", "c2", "c3", "c4", "c5", "c6", "c0 + c1 as key1", "length(c6) as key2"})
-                  .aggregation({"key1", "key2"}, {"sum(c2)"}, {}, core::AggregationNode::Step::kSingle, false)
+                  .project(
+                      {"c0",
+                       "c1",
+                       "c2",
+                       "c3",
+                       "c4",
+                       "c5",
+                       "c6",
+                       "c0 + c1 as key1",
+                       "length(c6) as key2"})
+                  .aggregation(
+                      {"key1", "key2"},
+                      {"sum(c2)"},
+                      {},
+                      core::AggregationNode::Step::kSingle,
+                      false)
                   .planNode();
 
-  auto task = AssertQueryBuilder(duckDbQueryRunner_)
-                  .config("cudf.enabled", true)
-                  .plan(plan)
-                  .assertResults("SELECT c0 + c1, length(c6), sum(c2) FROM tmp GROUP BY c0 + c1, length(c6)");
+  auto task =
+      AssertQueryBuilder(duckDbQueryRunner_)
+          .config("cudf.enabled", true)
+          .plan(plan)
+          .assertResults(
+              "SELECT c0 + c1, length(c6), sum(c2) FROM tmp GROUP BY c0 + c1, length(c6)");
 
   ASSERT_TRUE(wasCudfAggregationUsed(task));
   ASSERT_FALSE(wasDefaultHashAggregationUsed(task));
@@ -217,13 +259,19 @@ TEST_F(ToCudfSelectionTest, unsupportedAggregationFunctionsFallsBack) {
 
   auto plan = PlanBuilder()
                   .values(vectors)
-                  .aggregation({"c0"}, {"sum(c1)", "stddev(c2)"}, {}, core::AggregationNode::Step::kSingle, false)
+                  .aggregation(
+                      {"c0"},
+                      {"sum(c1)", "stddev(c2)"},
+                      {},
+                      core::AggregationNode::Step::kSingle,
+                      false)
                   .planNode();
 
-  auto task = AssertQueryBuilder(duckDbQueryRunner_)
-                  .config("cudf.enabled", true)
-                  .plan(plan)
-                  .assertResults("SELECT c0, sum(c1), stddev(c2) FROM tmp GROUP BY c0");
+  auto task =
+      AssertQueryBuilder(duckDbQueryRunner_)
+          .config("cudf.enabled", true)
+          .plan(plan)
+          .assertResults("SELECT c0, sum(c1), stddev(c2) FROM tmp GROUP BY c0");
 
   ASSERT_FALSE(wasCudfAggregationUsed(task));
   ASSERT_TRUE(wasDefaultHashAggregationUsed(task));
@@ -237,13 +285,19 @@ TEST_F(ToCudfSelectionTest, complexGroupingKeyExpressionsFallsBack) {
   auto plan = PlanBuilder()
                   .values(vectors)
                   .project({"c0", "c1", "c2", "abs(c0) AS complex_key"})
-                  .aggregation({"complex_key"}, {"sum(c2)"}, {}, core::AggregationNode::Step::kSingle, false)
+                  .aggregation(
+                      {"complex_key"},
+                      {"sum(c2)"},
+                      {},
+                      core::AggregationNode::Step::kSingle,
+                      false)
                   .planNode();
 
-  auto task = AssertQueryBuilder(duckDbQueryRunner_)
-                  .config("cudf.enabled", true)
-                  .plan(plan)
-                  .assertResults("SELECT abs(c0), sum(c2) FROM tmp GROUP BY abs(c0)");
+  auto task =
+      AssertQueryBuilder(duckDbQueryRunner_)
+          .config("cudf.enabled", true)
+          .plan(plan)
+          .assertResults("SELECT abs(c0), sum(c2) FROM tmp GROUP BY abs(c0)");
 
   ASSERT_FALSE(wasCudfAggregationUsed(task));
   ASSERT_TRUE(wasDefaultHashAggregationUsed(task));
@@ -256,13 +310,19 @@ TEST_F(ToCudfSelectionTest, supportedAggregationInputExpressionsUsesCudf) {
 
   auto plan = PlanBuilder()
                   .values(vectors)
-                  .aggregation({"c0"}, {"sum(c1)", "max(c2)"}, {}, core::AggregationNode::Step::kSingle, false)
+                  .aggregation(
+                      {"c0"},
+                      {"sum(c1)", "max(c2)"},
+                      {},
+                      core::AggregationNode::Step::kSingle,
+                      false)
                   .planNode();
 
-  auto task = AssertQueryBuilder(duckDbQueryRunner_)
-                  .config("cudf.enabled", true)
-                  .plan(plan)
-                  .assertResults("SELECT c0, sum(c1), max(c2) FROM tmp GROUP BY c0");
+  auto task =
+      AssertQueryBuilder(duckDbQueryRunner_)
+          .config("cudf.enabled", true)
+          .plan(plan)
+          .assertResults("SELECT c0, sum(c1), max(c2) FROM tmp GROUP BY c0");
 
   ASSERT_TRUE(wasCudfAggregationUsed(task));
   ASSERT_FALSE(wasDefaultHashAggregationUsed(task));
@@ -275,13 +335,19 @@ TEST_F(ToCudfSelectionTest, unsupportedAggregationInputExpressionsFallsBack) {
 
   auto plan = PlanBuilder()
                   .values(vectors)
-                  .aggregation({"c0"}, {"sum(c1)", "variance(c2)"}, {}, core::AggregationNode::Step::kSingle, false)
+                  .aggregation(
+                      {"c0"},
+                      {"sum(c1)", "variance(c2)"},
+                      {},
+                      core::AggregationNode::Step::kSingle,
+                      false)
                   .planNode();
 
   auto task = AssertQueryBuilder(duckDbQueryRunner_)
                   .config("cudf.enabled", true)
                   .plan(plan)
-                  .assertResults("SELECT c0, sum(c1), variance(c2) FROM tmp GROUP BY c0");
+                  .assertResults(
+                      "SELECT c0, sum(c1), variance(c2) FROM tmp GROUP BY c0");
 
   ASSERT_FALSE(wasCudfAggregationUsed(task));
   ASSERT_TRUE(wasDefaultHashAggregationUsed(task));
@@ -294,13 +360,19 @@ TEST_F(ToCudfSelectionTest, cudfDisabledUsesRegularAggregation) {
 
   auto plan = PlanBuilder()
                   .values(vectors)
-                  .aggregation({"c0"}, {"sum(c1)", "count(c2)"}, {}, core::AggregationNode::Step::kSingle, false)
+                  .aggregation(
+                      {"c0"},
+                      {"sum(c1)", "count(c2)"},
+                      {},
+                      core::AggregationNode::Step::kSingle,
+                      false)
                   .planNode();
 
-  auto task = AssertQueryBuilder(duckDbQueryRunner_)
-                  .config("cudf.enabled", false)
-                  .plan(plan)
-                  .assertResults("SELECT c0, sum(c1), count(c2) FROM tmp GROUP BY c0");
+  auto task =
+      AssertQueryBuilder(duckDbQueryRunner_)
+          .config("cudf.enabled", false)
+          .plan(plan)
+          .assertResults("SELECT c0, sum(c1), count(c2) FROM tmp GROUP BY c0");
 
   ASSERT_FALSE(wasCudfAggregationUsed(task));
   ASSERT_TRUE(wasDefaultHashAggregationUsed(task));
