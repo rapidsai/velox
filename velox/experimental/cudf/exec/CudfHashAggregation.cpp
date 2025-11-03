@@ -1019,8 +1019,7 @@ bool registerStepAwareBuiltinAggregationFunctions(const std::string& prefix) {
       FunctionSignatureBuilder().returnType("bigint").argumentType("real").build(),
       FunctionSignatureBuilder().returnType("bigint").argumentType("double").build(),
       FunctionSignatureBuilder().returnType("bigint").argumentType("varchar").build(),
-      FunctionSignatureBuilder().returnType("bigint").argumentType("boolean").build(),
-      FunctionSignatureBuilder().returnType("bigint").build()
+      FunctionSignatureBuilder().returnType("bigint").argumentType("boolean").build()
   };
   
   registerAggregationFunctionForStep(prefix + "count", core::AggregationNode::Step::kSingle, countSignatures);
