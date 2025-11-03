@@ -157,7 +157,24 @@ class CudfHashAggregation : public exec::Operator, public NvtxHelper {
   CudfVectorPtr partialOutput_;
 };
 
-// Separate registry for aggregation functions
+// Step-aware aggregation function registry
+// Map of function name -> Map of step -> signatures
+using StepAwareAggregationRegistry = std::unordered_map<
+    std::string, 
+    std::unordered_map<core::AggregationNode::Step, std::vector<exec::FunctionSignaturePtr>>
+>;
+
+// Get the step-aware aggregation registry
+StepAwareAggregationRegistry& getStepAwareAggregationRegistry();
+
+// Register aggregation function signatures for a specific step
+bool registerAggregationFunctionForStep(
+    const std::string& name,
+    core::AggregationNode::Step step,
+    const std::vector<exec::FunctionSignaturePtr>& signatures,
+    bool overwrite = true);
+
+// Legacy registry for backward compatibility
 std::unordered_map<std::string, CudfFunctionSpec>& getCudfAggregationRegistry();
 
 bool registerCudfAggregationFunction(
@@ -166,6 +183,9 @@ bool registerCudfAggregationFunction(
     bool overwrite = true);
 
 bool registerBuiltinAggregationFunctions(const std::string& prefix);
+
+// Register step-aware builtin aggregation functions
+bool registerStepAwareBuiltinAggregationFunctions(const std::string& prefix);
 
 // CUDF validation functions
 bool canAggregationBeEvaluatedByCudf(const core::CallTypedExpr& call, core::QueryCtx* queryCtx);

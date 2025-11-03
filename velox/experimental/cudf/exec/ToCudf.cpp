@@ -466,6 +466,7 @@ void registerCudf() {
   auto prefix = CudfConfig::getInstance().functionNamePrefix;
   registerBuiltinFunctions(prefix);
   registerBuiltinAggregationFunctions(prefix);
+  registerStepAwareBuiltinAggregationFunctions(prefix);
 
   CUDF_FUNC_RANGE();
   cudaFree(nullptr); // Initialize CUDA context at startup
