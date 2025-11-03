@@ -236,25 +236,4 @@ TEST_F(CudfExpressionSelectionTest, DISABLED_castAndTryCast) {
   ASSERT_FALSE(canBeEvaluatedByCudf(badCast, /*deep=*/true));
 }
 
-#if 0
-TEST_F(CudfExpressionSelectionTest, astInteractive) {
-  std::string e;
-  std::cout << "Enter expression: ";
-  std::getline(std::cin, e);
-
-  // driver adapter stage
-  std::cout << "***** DEBUG ***** Driver Adapter stage" << std::endl;
-  auto typedexpr = parseAndInferTypedExpr(e, rowType_, execCtx_.get());
-  ASSERT_TRUE(canBeEvaluatedByCudf(typedexpr));
-
-  // exec stage
-  std::cout << "***** DEBUG ***** Exec stage" << std::endl;
-  auto expr = compileExecExpr(e, rowType_, execCtx_.get());
-  // implicitly calls canBeEvaluatedByCudf(exec::Expr)
-  auto cudfExpr = createCudfExpression(expr, rowType_);
-  auto* ast = dynamic_cast<ASTExpression*>(cudfExpr.get());
-  ASSERT_NE(ast, nullptr);
-}
-#endif
-
 } // namespace
