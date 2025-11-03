@@ -20,3 +20,6 @@ target_link_libraries(
   velox_cudf_exec_test_lib
   velox_tpch_benchmark_lib
 )
+
+# Add Python bindings subdirectory
+add_subdirectory(python)
