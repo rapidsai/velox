@@ -790,6 +790,15 @@ bool registerBuiltinFunctions(const std::string& prefix) {
            .argumentType("varchar")
            .constantArgumentType("varchar")
            .constantArgumentType("integer")
+           .build(),
+       FunctionSignatureBuilder()
+           .returnType("array(varchar)")
+           .argumentType("varchar")
+           .constantArgumentType("varchar")
+           // cuDF expects cudf::size_type (int32) but we may get bigint from
+           // presto. SplitFunction hacks around this by converting to string
+           // and back
+           .constantArgumentType("bigint")
            .build()});
 
   registerCudfFunction(
