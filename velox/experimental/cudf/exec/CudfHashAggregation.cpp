@@ -1171,14 +1171,123 @@ bool canAggregationBeEvaluatedByCudf(const core::CallTypedExpr& call, core::Quer
   return matchTypedCallAgainstSignatures(call, spec.signatures);
 }
 
+// Step-aware aggregation validation function
+bool canAggregationBeEvaluatedByCudf(
+    const core::CallTypedExpr& call, 
+    core::AggregationNode::Step step,
+    const std::vector<TypePtr>& rawInputTypes,
+    core::QueryCtx* queryCtx) {
+  
+  // Check against aggregation registry
+  auto& registry = getCudfAggregationRegistry();
+  auto it = registry.find(call.name());
+  if (it == registry.end()) {
+    return false;
+  }
+  
+  // For step-aware validation, we need to generate the appropriate signature
+  // based on the aggregation step
+  
+  std::vector<exec::FunctionSignaturePtr> stepSpecificSignatures;
+  
+  for (const auto& baseSig : it->second.signatures) {
+    // Generate step-specific signatures based on the base single-step signature
+    
+    if (step == core::AggregationNode::Step::kSingle) {
+      // Single step: use original signature as-is
+      stepSpecificSignatures.push_back(baseSig);
+      
+    } else if (step == core::AggregationNode::Step::kPartial) {
+      // Partial step: input same as single, but output is intermediate type
+      
+      if (call.name() == "avg") {
+        // For avg: input DOUBLE -> output ROW(sum DOUBLE, count BIGINT)
+        auto partialSig = exec::FunctionSignatureBuilder()
+            .returnType("row(double,bigint)")  // Intermediate type
+            .argumentType(baseSig->argumentTypes()[0].baseName())  // Same input
+            .build();
+        stepSpecificSignatures.push_back(partialSig);
+        
+      } else if (call.name() == "sum" || call.name() == "min" || call.name() == "max") {
+        // For sum/min/max: partial has same signature as single
+        stepSpecificSignatures.push_back(baseSig);
+        
+      } else if (call.name() == "count") {
+        // For count: partial output is always BIGINT
+        auto partialSig = exec::FunctionSignatureBuilder()
+            .returnType("bigint")
+            .argumentType(baseSig->argumentTypes().empty() ? 
+                         "" : baseSig->argumentTypes()[0].baseName())
+            .build();
+        stepSpecificSignatures.push_back(partialSig);
+      }
+      
+    } else if (step == core::AggregationNode::Step::kFinal) {
+      // Final step: input is intermediate type, output same as single
+      
+      if (call.name() == "avg") {
+        // For avg: input ROW(sum DOUBLE, count BIGINT) -> output DOUBLE
+        auto finalSig = exec::FunctionSignatureBuilder()
+            .returnType(baseSig->returnType().baseName())  // Same output as single
+            .argumentType("row(double,bigint)")  // Intermediate input
+            .build();
+        stepSpecificSignatures.push_back(finalSig);
+        
+      } else if (call.name() == "sum" || call.name() == "min" || call.name() == "max") {
+        // For sum/min/max: final has same signature as single
+        stepSpecificSignatures.push_back(baseSig);
+        
+      } else if (call.name() == "count") {
+        // For count: final input is BIGINT, output is BIGINT
+        auto finalSig = exec::FunctionSignatureBuilder()
+            .returnType("bigint")
+            .argumentType("bigint")
+            .build();
+        stepSpecificSignatures.push_back(finalSig);
+      }
+      
+    } else if (step == core::AggregationNode::Step::kIntermediate) {
+      // Intermediate step: input and output are both intermediate types
+      
+      if (call.name() == "avg") {
+        // For avg: input ROW(DOUBLE, BIGINT) -> output ROW(DOUBLE, BIGINT)
+        auto intermediateSig = exec::FunctionSignatureBuilder()
+            .returnType("row(double,bigint)")
+            .argumentType("row(double,bigint)")
+            .build();
+        stepSpecificSignatures.push_back(intermediateSig);
+        
+      } else if (call.name() == "sum" || call.name() == "min" || call.name() == "max") {
+        // For sum/min/max: intermediate has same signature as single
+        stepSpecificSignatures.push_back(baseSig);
+        
+      } else if (call.name() == "count") {
+        // For count: intermediate input and output are both BIGINT
+        auto intermediateSig = exec::FunctionSignatureBuilder()
+            .returnType("bigint")
+            .argumentType("bigint")
+            .build();
+        stepSpecificSignatures.push_back(intermediateSig);
+      }
+    }
+  }
+  
+  // Validate against step-specific signatures
+  return matchTypedCallAgainstSignatures(call, stepSpecificSignatures);
+}
+
 
 bool canBeEvaluatedByCudf(const core::AggregationNode& aggregationNode, core::QueryCtx* queryCtx) {
   const core::PlanNode* sourceNode = aggregationNode.sources().empty() ? nullptr : aggregationNode.sources()[0].get();
 
-  // Check supported aggregation functions using aggregation registry
+  // Get the aggregation step from the node
+  auto step = aggregationNode.step();
+
+  // Check supported aggregation functions using step-aware aggregation registry
   for (const auto& aggregate : aggregationNode.aggregates()) {
 
-    if (!canAggregationBeEvaluatedByCudf(*aggregate.call, queryCtx)) {
+    // Use step-aware validation that handles partial/final/intermediate steps
+    if (!canAggregationBeEvaluatedByCudf(*aggregate.call, step, aggregate.rawInputTypes, queryCtx)) {
       return false;
     }
     
