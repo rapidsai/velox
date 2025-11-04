@@ -21,7 +21,6 @@
 #include "velox/parse/ExpressionsParser.h"
 #include "velox/parse/TypeResolver.h"
 
-#include <iostream>
 #include <memory>
 #include <string>
 
@@ -42,11 +41,8 @@ inline std::shared_ptr<exec::Expr> compileExecExpr(
     const RowTypePtr& rowType,
     core::ExecCtx* execCtx,
     const parse::ParseOptions& options = {}) {
-  std::cout << "sql: " << sql << std::endl;
   auto typed = parseAndInferTypedExpr(sql, rowType, execCtx, options);
-  std::cout << "typed: " << typed->toString() << std::endl;
   exec::ExprSet exprSet({typed}, execCtx, /*enableConstantFolding*/ false);
-  std::cout << "exprSet: " << exprSet.expr(0)->toString() << std::endl;
   return exprSet.expr(0);
 }
 
