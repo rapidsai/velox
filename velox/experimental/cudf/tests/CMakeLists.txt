@@ -243,16 +243,6 @@ target_link_libraries(
 )
 
 target_link_libraries(velox_cudf_config_test velox_cudf_exec velox_test_util gtest gtest_main)
-target_link_libraries(
-  velox_cudf_expression_selection_test
-  velox_cudf_exec
-  velox_exec
-  velox_exec_test_lib
-  velox_test_util
-  velox_functions_spark
-  gtest
-  gtest_main
-)
 
 target_link_libraries(
   velox_cudf_expression_selection_test
