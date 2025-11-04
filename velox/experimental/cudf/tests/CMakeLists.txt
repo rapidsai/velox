@@ -27,8 +27,8 @@ add_executable(velox_cudf_expression_selection_test Main.cpp ExpressionEvaluator
 add_executable(velox_cudf_aggregation_selection_test Main.cpp AggregationSelectionTest.cpp)
 add_executable(velox_cudf_tocudf_selection_test Main.cpp ToCudfSelectionTest.cpp)
 add_executable(velox_cudf_step_aware_aggregation_registry_test Main.cpp StepAwareAggregationRegistryTest.cpp)
-add_executable(velox_cudf_config_test Main.cpp ConfigTest.cpp)
 add_executable(velox_cudf_assign_unique_id_test Main.cpp AssignUniqueIdTest.cpp)
+add_executable(velox_cudf_config_test Main.cpp ConfigTest.cpp)
 
 add_test(
   NAME velox_cudf_hash_join_test
@@ -138,8 +138,8 @@ set_tests_properties(
   velox_cudf_tocudf_selection_test
   PROPERTIES LABELS cuda_driver TIMEOUT 3000
 )
-set_tests_properties(velox_cudf_config_test PROPERTIES LABELS cuda_driver TIMEOUT 300)
 set_tests_properties(velox_cudf_assign_unique_id_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
+set_tests_properties(velox_cudf_config_test PROPERTIES LABELS cuda_driver TIMEOUT 300)
 
 target_link_libraries(
   velox_cudf_hash_join_test

@@ -22,6 +22,7 @@
 
 #include "velox/common/memory/Memory.h"
 #include "velox/core/QueryCtx.h"
+#include "velox/expression/ConstantExpr.h"
 #include "velox/functions/prestosql/registration/RegistrationFunctions.h"
 #include "velox/functions/sparksql/registration/Register.h"
 #include "velox/type/Type.h"
@@ -234,6 +235,26 @@ TEST_F(CudfExpressionSelectionTest, DISABLED_castAndTryCast) {
   auto badCast = compileExecExpr(
       "cast(length(name) < 10 AS date)", rowType_, execCtx_.get());
   ASSERT_FALSE(canBeEvaluatedByCudf(badCast, /*deep=*/true));
+}
+
+TEST_F(CudfExpressionSelectionTest, constantFoldingStringAllocatesOnCompile) {
+  // Build a constant string expression that should be folded at compile time.
+  // This triggers creation of a ConstantExpr and allocates memory for the
+  // folded string using the ExecCtx pool.
+  auto typed =
+      parseAndInferTypedExpr("lower('ABCDEF')", rowType_, execCtx_.get());
+
+  std::vector<core::TypedExprPtr> exprs;
+  exprs.push_back(typed);
+
+  auto exprSet = exec::makeExprSetFromFlag(
+      std::move(exprs), execCtx_.get(), /*lazyDereference=*/false);
+
+  auto compiled = exprSet->expr(0);
+  auto* c = dynamic_cast<facebook::velox::exec::ConstantExpr*>(compiled.get());
+  ASSERT_NE(c, nullptr);
+  // Verify the constant vector was created using the provided ExecCtx pool.
+  ASSERT_EQ(c->value()->pool(), execCtx_->pool());
 }
 
 } // namespace
