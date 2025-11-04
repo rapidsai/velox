@@ -26,7 +26,6 @@ add_executable(velox_cudf_limit_test Main.cpp LimitTest.cpp)
 add_executable(velox_cudf_expression_selection_test Main.cpp ExpressionEvaluatorSelectionTest.cpp)
 add_executable(velox_cudf_assign_unique_id_test Main.cpp AssignUniqueIdTest.cpp)
 add_executable(velox_cudf_config_test Main.cpp ConfigTest.cpp)
-add_executable(velox_cudf_assign_unique_id_test Main.cpp AssignUniqueIdTest.cpp)
 
 add_test(
   NAME velox_cudf_hash_join_test
