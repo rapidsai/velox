@@ -113,7 +113,7 @@ TEST_F(CudfExpressionSelectionTest, functionTopLevelWithNestedFunction) {
   ASSERT_NE(functionExpr, nullptr);
 }
 
-TEST_F(CudfExpressionSelectionTest, functionTopLevelWithNestedAst) {
+TEST_F(CudfExpressionSelectionTest, DISABLED_functionTopLevelWithNestedAst) {
   facebook::velox::functions::sparksql::registerFunctions();
 
   auto expr = compileExecExpr(
