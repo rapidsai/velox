@@ -113,7 +113,7 @@ TEST_F(CudfExpressionSelectionTest, functionTopLevelWithNestedFunction) {
   ASSERT_NE(functionExpr, nullptr);
 }
 
-TEST_F(CudfExpressionSelectionTest, DISABLED_functionTopLevelWithNestedAst) {
+TEST_F(CudfExpressionSelectionTest, functionTopLevelWithNestedAst) {
   facebook::velox::functions::sparksql::registerFunctions();
 
   auto expr = compileExecExpr(
@@ -121,8 +121,11 @@ TEST_F(CudfExpressionSelectionTest, DISABLED_functionTopLevelWithNestedAst) {
       rowType_,
       execCtx_.get(),
       {.parseIntegerAsBigint = false, .functionPrefix = ""});
+  std::cout << "compiled" << std::endl;
   auto cudfExpr = createCudfExpression(expr, rowType_);
+  std::cout << "created" << std::endl;
   auto* functionExpr = dynamic_cast<FunctionExpression*>(cudfExpr.get());
+  std::cout << "dynamic_cast" << std::endl;
   ASSERT_NE(functionExpr, nullptr);
 }
 
