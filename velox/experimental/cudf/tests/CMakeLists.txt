@@ -26,7 +26,11 @@ add_executable(velox_cudf_limit_test Main.cpp LimitTest.cpp)
 add_executable(velox_cudf_expression_selection_test Main.cpp ExpressionEvaluatorSelectionTest.cpp)
 add_executable(velox_cudf_aggregation_selection_test Main.cpp AggregationSelectionTest.cpp)
 add_executable(velox_cudf_tocudf_selection_test Main.cpp ToCudfSelectionTest.cpp)
-add_executable(velox_cudf_step_aware_aggregation_registry_test Main.cpp StepAwareAggregationRegistryTest.cpp)
+add_executable(
+  velox_cudf_step_aware_aggregation_registry_test
+  Main.cpp
+  StepAwareAggregationRegistryTest.cpp
+)
 add_executable(velox_cudf_assign_unique_id_test Main.cpp AssignUniqueIdTest.cpp)
 add_executable(velox_cudf_config_test Main.cpp ConfigTest.cpp)
 
@@ -134,10 +138,7 @@ set_tests_properties(
   velox_cudf_aggregation_selection_test
   PROPERTIES LABELS cuda_driver TIMEOUT 3000
 )
-set_tests_properties(
-  velox_cudf_tocudf_selection_test
-  PROPERTIES LABELS cuda_driver TIMEOUT 3000
-)
+set_tests_properties(velox_cudf_tocudf_selection_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
 set_tests_properties(velox_cudf_assign_unique_id_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
 set_tests_properties(velox_cudf_config_test PROPERTIES LABELS cuda_driver TIMEOUT 300)
 
