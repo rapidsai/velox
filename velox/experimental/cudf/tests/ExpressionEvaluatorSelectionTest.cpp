@@ -39,13 +39,14 @@ class CudfExpressionSelectionTest : public ::testing::Test {
  protected:
   static void SetUpTestCase() {
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
+    facebook::velox::functions::sparksql::registerFunctions();
+    facebook::velox::functions::prestosql::registerAllScalarFunctions();
   }
 
   void SetUp() override {
     pool_ = memory::memoryManager()->addLeafPool();
     queryCtx_ = core::QueryCtx::create();
     execCtx_ = std::make_unique<core::ExecCtx>(pool_.get(), queryCtx_.get());
-    facebook::velox::functions::prestosql::registerAllScalarFunctions();
     cudf_velox::registerCudf();
     rowType_ = ROW({
         {"a", BIGINT()},
