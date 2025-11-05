@@ -44,7 +44,7 @@ class CudfExpressionSelectionTest : public ::testing::Test {
   }
 
   void SetUp() override {
-    pool_ = memory::memoryManager()->addLeafPool();
+    pool_ = memory::memoryManager()->addLeafPool("", false);
     queryCtx_ = core::QueryCtx::create();
     execCtx_ = std::make_unique<core::ExecCtx>(pool_.get(), queryCtx_.get());
     cudf_velox::registerCudf();
