@@ -108,7 +108,6 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-
 add_test(
   NAME velox_cudf_step_aware_aggregation_registry_test
   COMMAND velox_cudf_step_aware_aggregation_registry_test

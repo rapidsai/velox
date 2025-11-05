@@ -39,7 +39,8 @@ using ColumnOrView =
 inline cudf::column_view asView(ColumnOrView& holder) {
   return std::visit(
       [](auto& h) -> cudf::column_view {
-        using T = std::decay_t<decltype(h)>; if constexpr (std::is_same_v<T, cudf::column_view>) {
+        using T = std::decay_t<decltype(h)>;
+        if constexpr (std::is_same_v<T, cudf::column_view>) {
           return h;
         } else {
           return h->view();
