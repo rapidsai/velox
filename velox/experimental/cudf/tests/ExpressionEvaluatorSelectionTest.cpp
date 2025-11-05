@@ -116,7 +116,7 @@ TEST_F(CudfExpressionSelectionTest, functionTopLevelWithNestedFunction) {
 
 // Disabled because this test segfaults in CI in compileExecExpr step which does
 // not use cudf code.
-TEST_F(CudfExpressionSelectionTest, DISABLED_functionTopLevelWithNestedAst) {
+TEST_F(CudfExpressionSelectionTest, functionTopLevelWithNestedAst) {
   auto expr = compileExecExpr(
       "hash_with_seed(42, add(a, b))",
       rowType_,
@@ -134,7 +134,7 @@ TEST_F(CudfExpressionSelectionTest, signatureEnforcesConstantArgsSplit) {
       rowType_,
       execCtx_.get(),
       {.parseIntegerAsBigint = false, .functionPrefix = ""});
-  // ASSERT_TRUE(canBeEvaluatedByCudf(ok, /*deep=*/true));
+  ASSERT_TRUE(canBeEvaluatedByCudf(ok, /*deep=*/true));
 
   // Bad: delimiter is not a constant
   auto bad = compileExecExpr(
@@ -142,7 +142,7 @@ TEST_F(CudfExpressionSelectionTest, signatureEnforcesConstantArgsSplit) {
       rowType_,
       execCtx_.get(),
       {.parseIntegerAsBigint = false, .functionPrefix = ""});
-  // ASSERT_FALSE(canBeEvaluatedByCudf(bad, /*deep=*/true));
+  ASSERT_FALSE(canBeEvaluatedByCudf(bad, /*deep=*/true));
 }
 
 TEST_F(CudfExpressionSelectionTest, signatureEnforcesConstantArgsLike) {
