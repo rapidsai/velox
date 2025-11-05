@@ -626,6 +626,22 @@ class LowerFunction : public CudfFunction {
   }
 };
 
+class UpperFunction : public CudfFunction {
+ public:
+  explicit UpperFunction(const std::shared_ptr<velox::exec::Expr>& expr) {
+    VELOX_CHECK_EQ(
+        expr->inputs().size(), 1, "upper expects exactly 1 input column");
+  }
+
+  ColumnOrView eval(
+      std::vector<ColumnOrView>& inputColumns,
+      rmm::cuda_stream_view stream,
+      rmm::device_async_resource_ref mr) const override {
+    auto inputCol = asView(inputColumns[0]);
+    return cudf::strings::to_upper(inputCol, stream, mr);
+  }
+};
+
 class LikeFunction : public CudfFunction {
  public:
   explicit LikeFunction(const std::shared_ptr<velox::exec::Expr>& expr) {
@@ -896,6 +912,16 @@ bool registerBuiltinFunctions(const std::string& prefix) {
       prefix + "lower",
       [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
         return std::make_shared<LowerFunction>(expr);
+      },
+      {FunctionSignatureBuilder()
+           .returnType("varchar")
+           .argumentType("varchar")
+           .build()});
+
+  registerCudfFunction(
+      prefix + "upper",
+      [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
+        return std::make_shared<UpperFunction>(expr);
       },
       {FunctionSignatureBuilder()
            .returnType("varchar")
