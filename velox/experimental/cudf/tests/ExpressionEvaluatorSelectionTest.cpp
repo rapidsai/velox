@@ -116,7 +116,7 @@ TEST_F(CudfExpressionSelectionTest, functionTopLevelWithNestedFunction) {
 
 // Disabled because this test segfaults in CI in compileExecExpr step which does
 // not use cudf code.
-TEST_F(CudfExpressionSelectionTest, DISABLED_functionTopLevelWithNestedAst) {
+TEST_F(CudfExpressionSelectionTest, functionTopLevelWithNestedAst) {
   auto expr = compileExecExpr(
       "hash_with_seed(42, add(a, b))",
       rowType_,
