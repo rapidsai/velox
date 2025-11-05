@@ -114,17 +114,17 @@ TEST_F(CudfExpressionSelectionTest, functionTopLevelWithNestedFunction) {
   ASSERT_NE(functionExpr, nullptr);
 }
 
-TEST_F(CudfExpressionSelectionTest, functionTopLevelWithNestedAst) {
-  facebook::velox::functions::sparksql::registerFunctions();
-
+// Disabled because this test segfaults in CI in compileExecExpr step which does
+// not use cudf code.
+TEST_F(CudfExpressionSelectionTest, DISABLED_functionTopLevelWithNestedAst) {
   auto expr = compileExecExpr(
       "hash_with_seed(42, add(a, b))",
       rowType_,
       execCtx_.get(),
       {.parseIntegerAsBigint = false, .functionPrefix = ""});
-  // auto cudfExpr = createCudfExpression(expr, rowType_);
-  // auto* functionExpr = dynamic_cast<FunctionExpression*>(cudfExpr.get());
-  // ASSERT_NE(functionExpr, nullptr);
+  auto cudfExpr = createCudfExpression(expr, rowType_);
+  auto* functionExpr = dynamic_cast<FunctionExpression*>(cudfExpr.get());
+  ASSERT_NE(functionExpr, nullptr);
 }
 
 TEST_F(CudfExpressionSelectionTest, signatureEnforcesConstantArgsSplit) {
