@@ -3033,7 +3033,8 @@ PartitionedOutputNode::PartitionedOutputNode(
     PartitionFunctionSpecPtr partitionFunctionSpec,
     RowTypePtr outputType,
     std::string serdeKind,
-    PlanNodePtr source)
+    PlanNodePtr source,
+    bool rootFragment)
     : PlanNode(id),
       kind_(kind),
       sources_{{std::move(source)}},
@@ -3043,6 +3044,7 @@ PartitionedOutputNode::PartitionedOutputNode(
       partitionFunctionSpec_(std::move(partitionFunctionSpec)),
       serdeKind_(std::move(serdeKind)),
       outputType_(std::move(outputType)) {
+      rootFragment_(rootFragment) {
   VELOX_USER_CHECK_GT(numPartitions_, 0);
   if (numPartitions_ == 1) {
     VELOX_USER_CHECK(
@@ -3105,7 +3107,8 @@ std::shared_ptr<PartitionedOutputNode> PartitionedOutputNode::single(
     const PlanNodeId& id,
     RowTypePtr outputType,
     std::string serdeKind,
-    PlanNodePtr source) {
+    PlanNodePtr source,
+    bool rootFragment) {
   std::vector<TypedExprPtr> noKeys;
   return std::make_shared<PartitionedOutputNode>(
       id,
@@ -3116,7 +3119,8 @@ std::shared_ptr<PartitionedOutputNode> PartitionedOutputNode::single(
       std::make_shared<GatherPartitionFunctionSpec>(),
       std::move(outputType),
       serdeKind,
-      std::move(source));
+      std::move(source),
+      rootFragment);
 }
 
 void EnforceSingleRowNode::addDetails(std::stringstream& /* stream */) const {
