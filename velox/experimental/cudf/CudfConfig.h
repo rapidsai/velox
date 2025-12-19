@@ -54,6 +54,8 @@ struct CudfConfig {
   static constexpr const char* kCudfTopNBatchSize{"cudf.topk_batch_size"};
 
   static constexpr const char* kCudfExchange{"cudf.exchange"};
+  static constexpr const char* kUcxxErrorHandling{"ucxx.error_handling"};
+  static constexpr const char* kUcxxBlockingPolling{"ucxx.blocking_polling"};
 
   /// Singleton CudfConfig instance.
   /// Clients must set the configs below before invoking registerCudf().
@@ -132,7 +134,14 @@ struct CudfConfig {
   // presto.
   std::string functionEngine{"presto"};
 
+  /// Whether cudf exchange is enabled.
   bool exchange{false};
+
+  /// Whether to enable error handling in UCXX endpoints.
+  bool ucxxErrorHandling{true};
+
+  /// Whether to use blocking polling in UCXX.
+  bool ucxxBlockingPolling{true};
 };
 
 } // namespace facebook::velox::cudf_velox
