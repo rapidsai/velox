@@ -35,6 +35,8 @@ struct CudfConfig {
       "cudf.ast_expression_priority"};
   static constexpr const char* kCudfAllowCpuFallback{"cudf.allow_cpu_fallback"};
   static constexpr const char* kCudfLogFallback{"cudf.log_fallback"};
+  static constexpr const char* kCudfSortMergeJoinCardinalityThreshold{
+      "cudf.sort_merge_join.cardinality_threshold"};
 
   /// Singleton CudfConfig instance.
   /// Clients must set the configs below before invoking registerCudf().
@@ -78,6 +80,11 @@ struct CudfConfig {
 
   /// Whether to log a reason for falling back to Velox CPU execution.
   bool logFallback{true};
+
+  /// Cardinality threshold for sort-merge join. When the ratio of distinct keys
+  /// to total rows in the build table is below this threshold, sort-merge join
+  /// is used instead of hash join for inner and left joins.
+  double sortMergeJoinCardinalityThreshold{0.1};
 };
 
 } // namespace facebook::velox::cudf_velox

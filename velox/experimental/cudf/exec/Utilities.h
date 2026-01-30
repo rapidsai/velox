@@ -111,6 +111,22 @@ getConcatenatedTableBatched(
  *   // ... launch kernels on stream2 (will wait for stream1 to reach event) ...
  * @endcode
  */
+/**
+ * @brief Estimates the number of distinct values in the specified key columns.
+ *
+ * Uses HyperLogLog algorithm via cudf::approx_distinct_count with precision 12,
+ * providing approximately 1.6% standard error in the estimate.
+ *
+ * @param table Table to analyze
+ * @param keyIndices Column indices for the key columns
+ * @param stream CUDA stream for operations
+ * @return Approximate count of distinct key combinations
+ */
+[[nodiscard]] std::size_t estimateDistinctCount(
+    cudf::table_view table,
+    const std::vector<cudf::size_type>& keyIndices,
+    rmm::cuda_stream_view stream);
+
 class CudaEvent {
  public:
   /**

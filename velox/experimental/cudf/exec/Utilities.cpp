@@ -19,6 +19,7 @@
 
 #include <cudf/column/column_factories.hpp>
 #include <cudf/concatenate.hpp>
+#include <cudf/reduction/approx_distinct_count.hpp>
 #include <cudf/detail/utilities/stream_pool.hpp>
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/error.hpp>
@@ -259,6 +260,23 @@ std::vector<std::unique_ptr<cudf::table>> getConcatenatedTableBatched(
   }
   stream.synchronize();
   return outputTables;
+}
+
+std::size_t estimateDistinctCount(
+    cudf::table_view table,
+    const std::vector<cudf::size_type>& keyIndices,
+    rmm::cuda_stream_view stream) {
+  auto keyTable = table.select(keyIndices);
+  // Precision 12 gives ~1.6% standard error, good balance of accuracy and
+  // memory
+  constexpr int32_t kPrecision = 12;
+  auto estimator = cudf::approx_distinct_count(
+      keyTable,
+      kPrecision,
+      cudf::null_policy::EXCLUDE,
+      cudf::nan_policy::NAN_IS_NULL,
+      stream);
+  return estimator.estimate(stream);
 }
 
 CudaEvent::CudaEvent(unsigned int flags) {

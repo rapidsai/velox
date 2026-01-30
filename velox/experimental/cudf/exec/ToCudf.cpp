@@ -556,6 +556,10 @@ void CudfConfig::initialize(
   if (config.find(kCudfLogFallback) != config.end()) {
     logFallback = folly::to<bool>(config[kCudfLogFallback]);
   }
+  if (config.find(kCudfSortMergeJoinCardinalityThreshold) != config.end()) {
+    sortMergeJoinCardinalityThreshold =
+        folly::to<double>(config[kCudfSortMergeJoinCardinalityThreshold]);
+  }
 }
 
 } // namespace facebook::velox::cudf_velox

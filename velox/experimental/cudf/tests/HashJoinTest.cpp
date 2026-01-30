@@ -8494,4 +8494,164 @@ DEBUG_ONLY_TEST_F(HashJoinTest, hashTableCleanupAfterProbeFinish) {
   ASSERT_TRUE(tableEmpty);
 }
 
+// Tests for Sort-Merge Join strategy selection based on cardinality
+
+TEST_F(HashJoinTest, sortMergeJoinInner) {
+  // Create build table with very low cardinality (few distinct keys)
+  // This should trigger sort-merge join strategy
+  auto buildVectors = std::vector<RowVectorPtr>{makeRowVector(
+      {"u_k1", "u_v1"},
+      {makeFlatVector<int32_t>(1000, [](auto row) { return row % 5; }),
+       makeFlatVector<int32_t>(1000, [](auto row) { return row; })})};
+
+  auto probeVectors = std::vector<RowVectorPtr>{makeRowVector(
+      {"t_k1", "t_v1"},
+      {makeFlatVector<int32_t>(500, [](auto row) { return row % 5; }),
+       makeFlatVector<int32_t>(500, [](auto row) { return row; })})};
+
+  createDuckDbTable("t", probeVectors);
+  createDuckDbTable("u", buildVectors);
+
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  auto plan = PlanBuilder(planNodeIdGenerator)
+                  .values(probeVectors, true)
+                  .hashJoin(
+                      {"t_k1"},
+                      {"u_k1"},
+                      PlanBuilder(planNodeIdGenerator)
+                          .values(buildVectors, true)
+                          .planNode(),
+                      "",
+                      {"t_k1", "t_v1", "u_k1", "u_v1"},
+                      core::JoinType::kInner)
+                  .planNode();
+
+  HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
+      .planNode(plan)
+      .numDrivers(1)
+      .injectSpill(false)
+      .referenceQuery(
+          "SELECT t_k1, t_v1, u_k1, u_v1 FROM t INNER JOIN u ON t_k1 = u_k1")
+      .run();
+}
+
+TEST_F(HashJoinTest, sortMergeJoinLeft) {
+  // Create build table with very low cardinality for left join
+  auto buildVectors = std::vector<RowVectorPtr>{makeRowVector(
+      {"u_k1", "u_v1"},
+      {makeFlatVector<int32_t>(1000, [](auto row) { return row % 3; }),
+       makeFlatVector<int32_t>(1000, [](auto row) { return row; })})};
+
+  auto probeVectors = std::vector<RowVectorPtr>{makeRowVector(
+      {"t_k1", "t_v1"},
+      {makeFlatVector<int32_t>(500, [](auto row) { return row % 10; }),
+       makeFlatVector<int32_t>(500, [](auto row) { return row; })})};
+
+  createDuckDbTable("t", probeVectors);
+  createDuckDbTable("u", buildVectors);
+
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  auto plan = PlanBuilder(planNodeIdGenerator)
+                  .values(probeVectors, true)
+                  .hashJoin(
+                      {"t_k1"},
+                      {"u_k1"},
+                      PlanBuilder(planNodeIdGenerator)
+                          .values(buildVectors, true)
+                          .planNode(),
+                      "",
+                      {"t_k1", "t_v1", "u_k1", "u_v1"},
+                      core::JoinType::kLeft)
+                  .planNode();
+
+  HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
+      .planNode(plan)
+      .numDrivers(1)
+      .injectSpill(false)
+      .referenceQuery(
+          "SELECT t_k1, t_v1, u_k1, u_v1 FROM t LEFT JOIN u ON t_k1 = u_k1")
+      .run();
+}
+
+TEST_F(HashJoinTest, sortMergeJoinHighCardinalityUsesHashJoin) {
+  // Create build table with high cardinality (unique keys)
+  // This should use hash join strategy instead of sort-merge join
+  auto buildVectors = std::vector<RowVectorPtr>{makeRowVector(
+      {"u_k1", "u_v1"},
+      {makeFlatVector<int32_t>(1000, [](auto row) { return row; }),
+       makeFlatVector<int32_t>(1000, [](auto row) { return row; })})};
+
+  auto probeVectors = std::vector<RowVectorPtr>{makeRowVector(
+      {"t_k1", "t_v1"},
+      {makeFlatVector<int32_t>(500, [](auto row) { return row; }),
+       makeFlatVector<int32_t>(500, [](auto row) { return row; })})};
+
+  createDuckDbTable("t", probeVectors);
+  createDuckDbTable("u", buildVectors);
+
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  auto plan = PlanBuilder(planNodeIdGenerator)
+                  .values(probeVectors, true)
+                  .hashJoin(
+                      {"t_k1"},
+                      {"u_k1"},
+                      PlanBuilder(planNodeIdGenerator)
+                          .values(buildVectors, true)
+                          .planNode(),
+                      "",
+                      {"t_k1", "t_v1", "u_k1", "u_v1"},
+                      core::JoinType::kInner)
+                  .planNode();
+
+  HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
+      .planNode(plan)
+      .numDrivers(1)
+      .injectSpill(false)
+      .referenceQuery(
+          "SELECT t_k1, t_v1, u_k1, u_v1 FROM t INNER JOIN u ON t_k1 = u_k1")
+      .run();
+}
+
+TEST_F(HashJoinTest, sortMergeJoinThresholdConfig) {
+  // Test that the cardinality threshold configuration affects strategy
+  // selection. Set threshold to 0 to force hash join even with low cardinality.
+  auto buildVectors = std::vector<RowVectorPtr>{makeRowVector(
+      {"u_k1", "u_v1"},
+      {makeFlatVector<int32_t>(1000, [](auto row) { return row % 5; }),
+       makeFlatVector<int32_t>(1000, [](auto row) { return row; })})};
+
+  auto probeVectors = std::vector<RowVectorPtr>{makeRowVector(
+      {"t_k1", "t_v1"},
+      {makeFlatVector<int32_t>(500, [](auto row) { return row % 5; }),
+       makeFlatVector<int32_t>(500, [](auto row) { return row; })})};
+
+  createDuckDbTable("t", probeVectors);
+  createDuckDbTable("u", buildVectors);
+
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  auto plan = PlanBuilder(planNodeIdGenerator)
+                  .values(probeVectors, true)
+                  .hashJoin(
+                      {"t_k1"},
+                      {"u_k1"},
+                      PlanBuilder(planNodeIdGenerator)
+                          .values(buildVectors, true)
+                          .planNode(),
+                      "",
+                      {"t_k1", "t_v1", "u_k1", "u_v1"},
+                      core::JoinType::kInner)
+                  .planNode();
+
+  // Set threshold to 0 to force hash join
+  HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
+      .planNode(plan)
+      .numDrivers(1)
+      .injectSpill(false)
+      .config(
+          cudf_velox::CudfConfig::kCudfSortMergeJoinCardinalityThreshold, "0.0")
+      .referenceQuery(
+          "SELECT t_k1, t_v1, u_k1, u_v1 FROM t INNER JOIN u ON t_k1 = u_k1")
+      .run();
+}
+
 } // namespace

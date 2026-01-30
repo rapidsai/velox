@@ -27,11 +27,13 @@
 #include <cudf/ast/expressions.hpp>
 #include <cudf/copying.hpp>
 #include <cudf/join/hash_join.hpp>
+#include <cudf/join/sort_merge_join.hpp>
 #include <cudf/table/table.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
 
 #include <memory>
+#include <variant>
 
 namespace facebook::velox::cudf_velox {
 
@@ -52,6 +54,9 @@ class CudaEvent;
  */
 class CudfHashJoinBridge : public exec::JoinBridge {
  public:
+  /// Join strategy discriminator
+  enum class JoinStrategy { kHashJoin, kSortMergeJoin };
+
   // The bridge transfers all build side batches and the hash join objects
   // constructed from them to the probe operator
   /** @brief Hash tables paired with their corresponding join objects for
@@ -60,9 +65,23 @@ class CudfHashJoinBridge : public exec::JoinBridge {
       std::vector<std::shared_ptr<cudf::table>>,
       std::vector<std::shared_ptr<cudf::hash_join>>>;
 
+  /** @brief Sort-merge join type with same structure for batching support */
+  using sort_merge_join_type = std::pair<
+      std::vector<std::shared_ptr<cudf::table>>,
+      std::vector<std::shared_ptr<cudf::sort_merge_join>>>;
+
+  /** @brief Union type supporting both hash join and sort-merge join */
+  using join_type = std::variant<hash_type, sort_merge_join_type>;
+
   void setHashTable(std::optional<hash_type> hashObject);
 
   std::optional<hash_type> hashOrFuture(ContinueFuture* future);
+
+  /// Set join data (supports both hash join and sort-merge join)
+  void setJoinData(std::optional<join_type> joinData);
+
+  /// Get join data or register for future notification
+  std::optional<join_type> joinDataOrFuture(ContinueFuture* future);
 
   // Store and retrieve the CUDA stream used for building the hash join.
   void setBuildStream(rmm::cuda_stream_view buildStream);
@@ -73,6 +92,8 @@ class CudfHashJoinBridge : public exec::JoinBridge {
   /** @brief Hash tables and join objects transferred from build to probe
    * operators */
   std::optional<hash_type> hashObject_;
+  /** @brief Join data (hash or sort-merge) transferred from build to probe */
+  std::optional<join_type> joinData_;
   /** @brief CUDA stream used by build operator for proper synchronization */
   std::optional<rmm::cuda_stream_view> buildStream_;
 };
@@ -107,6 +128,25 @@ class CudfHashJoinBuild : public exec::Operator, public NvtxHelper {
   bool isFinished() override;
 
  private:
+  /// Determines whether to use hash join or sort-merge join based on
+  /// cardinality ratio of build table keys
+  CudfHashJoinBridge::JoinStrategy determineJoinStrategy(
+      const std::vector<std::unique_ptr<cudf::table>>& tbls,
+      const std::vector<cudf::size_type>& buildKeyIndices,
+      rmm::cuda_stream_view stream);
+
+  /// Build hash join objects and set them via the bridge
+  void buildHashJoin(
+      std::vector<std::unique_ptr<cudf::table>>&& tbls,
+      const std::vector<cudf::size_type>& buildKeyIndices,
+      rmm::cuda_stream_view stream);
+
+  /// Build sort-merge join objects and set them via the bridge
+  void buildSortMergeJoin(
+      std::vector<std::unique_ptr<cudf::table>>&& tbls,
+      const std::vector<cudf::size_type>& buildKeyIndices,
+      rmm::cuda_stream_view stream);
+
   std::shared_ptr<const core::HashJoinNode> joinNode_;
   std::vector<CudfVectorPtr> inputs_;
   ContinueFuture future_{ContinueFuture::makeEmpty()};
@@ -126,6 +166,7 @@ class CudfHashJoinBuild : public exec::Operator, public NvtxHelper {
 class CudfHashJoinProbe : public exec::Operator, public NvtxHelper {
  public:
   using hash_type = CudfHashJoinBridge::hash_type;
+  using sort_merge_join_type = CudfHashJoinBridge::sort_merge_join_type;
 
   CudfHashJoinProbe(
       int32_t operatorId,
@@ -159,6 +200,8 @@ class CudfHashJoinProbe : public exec::Operator, public NvtxHelper {
   std::shared_ptr<const core::HashJoinNode> joinNode_;
   /** @brief Hash tables and join objects received from build operator */
   std::optional<hash_type> hashObject_;
+  /** @brief Sort-merge join objects received from build operator */
+  std::optional<sort_merge_join_type> sortMergeJoinData_;
 
   // Filter related members
   /** @brief CUDF AST tree for join filter evaluation */
@@ -309,6 +352,28 @@ class CudfHashJoinProbe : public exec::Operator, public NvtxHelper {
       cudf::table_view rightTableView,
       cudf::column_view rightIndicesCol,
       cudf::join_kind joinKind,
+      rmm::cuda_stream_view stream);
+
+  /**
+   * @brief Performs sort-merge inner join between probe table and all build
+   * tables.
+   * @param leftTableView Probe-side table view to join
+   * @param stream CUDA stream for operations
+   * @return Vector of result tables (multiple if build data was batched)
+   */
+  std::vector<std::unique_ptr<cudf::table>> innerJoinSortMerge(
+      cudf::table_view leftTableView,
+      rmm::cuda_stream_view stream);
+
+  /**
+   * @brief Performs sort-merge left join between probe table and all build
+   * tables.
+   * @param leftTableView Probe-side table view to join
+   * @param stream CUDA stream for operations
+   * @return Vector of result tables (multiple if build data was batched)
+   */
+  std::vector<std::unique_ptr<cudf::table>> leftJoinSortMerge(
+      cudf::table_view leftTableView,
       rmm::cuda_stream_view stream);
 };
 

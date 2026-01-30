@@ -103,6 +103,50 @@ std::optional<rmm::cuda_stream_view> CudfHashJoinBridge::getBuildStream() {
   return buildStream_;
 }
 
+void CudfHashJoinBridge::setJoinData(
+    std::optional<CudfHashJoinBridge::join_type> joinData) {
+  if (CudfConfig::getInstance().debugEnabled) {
+    LOG(INFO) << "Calling CudfHashJoinBridge::setJoinData" << std::endl;
+  }
+  std::vector<ContinuePromise> promises;
+  {
+    std::lock_guard<std::mutex> l(mutex_);
+    VELOX_CHECK(
+        !joinData_.has_value(), "CudfHashJoinBridge already has join data");
+    joinData_ = std::move(joinData);
+    promises = std::move(promises_);
+  }
+  notify(std::move(promises));
+}
+
+std::optional<CudfHashJoinBridge::join_type>
+CudfHashJoinBridge::joinDataOrFuture(ContinueFuture* future) {
+  if (CudfConfig::getInstance().debugEnabled) {
+    LOG(INFO) << "Calling CudfHashJoinBridge::joinDataOrFuture" << std::endl;
+  }
+  std::lock_guard<std::mutex> l(mutex_);
+  if (joinData_.has_value()) {
+    return joinData_;
+  }
+  if (CudfConfig::getInstance().debugEnabled) {
+    LOG(INFO)
+        << "Calling CudfHashJoinBridge::joinDataOrFuture constructing promise"
+        << std::endl;
+  }
+  promises_.emplace_back("CudfHashJoinBridge::joinDataOrFuture");
+  if (CudfConfig::getInstance().debugEnabled) {
+    LOG(INFO) << "Calling CudfHashJoinBridge::joinDataOrFuture getSemiFuture"
+              << std::endl;
+  }
+  *future = promises_.back().getSemiFuture();
+  if (CudfConfig::getInstance().debugEnabled) {
+    LOG(INFO)
+        << "Calling CudfHashJoinBridge::joinDataOrFuture returning nullopt"
+        << std::endl;
+  }
+  return std::nullopt;
+}
+
 CudfHashJoinBuild::CudfHashJoinBuild(
     int32_t operatorId,
     exec::DriverCtx* driverCtx,
@@ -227,48 +271,155 @@ void CudfHashJoinBuild::noMoreInput() {
         buildType->getChildIdx(rightKeys[i]->name()));
   }
 
+  // Determine join strategy based on cardinality
+  auto strategy = determineJoinStrategy(tbls, buildKeyIndices, stream);
+
+  // Build the appropriate join objects
+  if (strategy == CudfHashJoinBridge::JoinStrategy::kSortMergeJoin) {
+    buildSortMergeJoin(std::move(tbls), buildKeyIndices, stream);
+  } else {
+    buildHashJoin(std::move(tbls), buildKeyIndices, stream);
+  }
+}
+
+CudfHashJoinBridge::JoinStrategy CudfHashJoinBuild::determineJoinStrategy(
+    const std::vector<std::unique_ptr<cudf::table>>& tbls,
+    const std::vector<cudf::size_type>& buildKeyIndices,
+    rmm::cuda_stream_view stream) {
+  // Sort-merge join only supports inner and left joins
+  if (!joinNode_->isInnerJoin() && !joinNode_->isLeftJoin()) {
+    return CudfHashJoinBridge::JoinStrategy::kHashJoin;
+  }
+
+  // Compute total rows across all batches
+  size_t totalRows = 0;
+  for (const auto& tbl : tbls) {
+    totalRows += static_cast<size_t>(tbl->num_rows());
+  }
+
+  if (totalRows == 0) {
+    return CudfHashJoinBridge::JoinStrategy::kHashJoin;
+  }
+
+  // Estimate distinct count across all batches
+  // For simplicity, use the first batch to estimate cardinality ratio
+  // A more accurate approach would combine estimates from all batches
+  size_t distinctCount =
+      estimateDistinctCount(tbls[0]->view(), buildKeyIndices, stream);
+
+  double cardinalityRatio =
+      static_cast<double>(distinctCount) / static_cast<double>(totalRows);
+
+  auto threshold = CudfConfig::getInstance().sortMergeJoinCardinalityThreshold;
+
+  if (CudfConfig::getInstance().debugEnabled) {
+    LOG(INFO) << "Join strategy selection: distinctCount=" << distinctCount
+              << ", totalRows=" << totalRows
+              << ", cardinalityRatio=" << cardinalityRatio
+              << ", threshold=" << threshold << std::endl;
+  }
+
+  if (cardinalityRatio < threshold) {
+    if (CudfConfig::getInstance().debugEnabled) {
+      LOG(INFO) << "Selecting sort-merge join (cardinalityRatio < threshold)"
+                << std::endl;
+    }
+    return CudfHashJoinBridge::JoinStrategy::kSortMergeJoin;
+  }
+
+  return CudfHashJoinBridge::JoinStrategy::kHashJoin;
+}
+
+void CudfHashJoinBuild::buildHashJoin(
+    std::vector<std::unique_ptr<cudf::table>>&& tbls,
+    const std::vector<cudf::size_type>& buildKeyIndices,
+    rmm::cuda_stream_view stream) {
+  if (CudfConfig::getInstance().debugEnabled) {
+    LOG(INFO) << "Building hash join objects" << std::endl;
+  }
+
   // Only need to construct hash_join object if it's an inner join, left join or
-  // right join.
-  // All other cases use a standalone function in cudf
-  bool buildHashJoin =
+  // right join. All other cases use a standalone function in cudf
+  bool needHashJoinObject =
       (joinNode_->isInnerJoin() || joinNode_->isLeftJoin() ||
        joinNode_->isRightJoin());
 
   std::vector<std::shared_ptr<cudf::hash_join>> hashObjects;
-  for (auto i = 0; i < tbls.size(); i++) {
+  for (size_t i = 0; i < tbls.size(); i++) {
     hashObjects.push_back(
-        (buildHashJoin) ? std::make_shared<cudf::hash_join>(
-                              tbls[i]->view().select(buildKeyIndices),
-                              cudf::null_equality::UNEQUAL,
-                              stream)
-                        : nullptr);
-    if (buildHashJoin) {
+        needHashJoinObject ? std::make_shared<cudf::hash_join>(
+                                 tbls[i]->view().select(buildKeyIndices),
+                                 cudf::null_equality::UNEQUAL,
+                                 stream)
+                           : nullptr);
+    if (needHashJoinObject) {
       VELOX_CHECK_NOT_NULL(hashObjects.back());
     }
     if (CudfConfig::getInstance().debugEnabled) {
       if (hashObjects.back() != nullptr) {
-        LOG(INFO) << "hashObject " << i << " is not nullptr "
-                  << hashObjects.back().get() << "\n";
+        LOG(INFO) << "hashObject " << i
+                  << " created: " << hashObjects.back().get() << std::endl;
       } else {
-        LOG(INFO) << "hashObject " << i << " is *** nullptr\n";
+        LOG(INFO) << "hashObject " << i << " is nullptr" << std::endl;
       }
     }
   }
 
-  std::vector<std::shared_ptr<cudf::table>> shared_tbls;
+  std::vector<std::shared_ptr<cudf::table>> sharedTbls;
   for (auto& tbl : tbls) {
-    shared_tbls.push_back(std::move(tbl));
+    sharedTbls.push_back(std::move(tbl));
   }
-  // set hash table to CudfHashJoinBridge
+
   auto joinBridge = operatorCtx_->task()->getCustomJoinBridge(
       operatorCtx_->driverCtx()->splitGroupId, planNodeId());
   auto cudfHashJoinBridge =
       std::dynamic_pointer_cast<CudfHashJoinBridge>(joinBridge);
 
   cudfHashJoinBridge->setBuildStream(stream);
-  cudfHashJoinBridge->setHashTable(
-      std::make_optional(
-          std::make_pair(std::move(shared_tbls), std::move(hashObjects))));
+  cudfHashJoinBridge->setJoinData(std::make_optional(
+      CudfHashJoinBridge::join_type{std::in_place_type<CudfHashJoinBridge::hash_type>,
+                                    std::move(sharedTbls),
+                                    std::move(hashObjects)}));
+}
+
+void CudfHashJoinBuild::buildSortMergeJoin(
+    std::vector<std::unique_ptr<cudf::table>>&& tbls,
+    const std::vector<cudf::size_type>& buildKeyIndices,
+    rmm::cuda_stream_view stream) {
+  if (CudfConfig::getInstance().debugEnabled) {
+    LOG(INFO) << "Building sort-merge join objects" << std::endl;
+  }
+
+  std::vector<std::shared_ptr<cudf::sort_merge_join>> smjObjects;
+  for (size_t i = 0; i < tbls.size(); i++) {
+    smjObjects.push_back(std::make_shared<cudf::sort_merge_join>(
+        tbls[i]->view().select(buildKeyIndices),
+        cudf::sorted::NO,
+        cudf::null_equality::UNEQUAL,
+        stream));
+    VELOX_CHECK_NOT_NULL(smjObjects.back());
+    if (CudfConfig::getInstance().debugEnabled) {
+      LOG(INFO) << "sortMergeJoinObject " << i
+                << " created: " << smjObjects.back().get() << std::endl;
+    }
+  }
+
+  std::vector<std::shared_ptr<cudf::table>> sharedTbls;
+  for (auto& tbl : tbls) {
+    sharedTbls.push_back(std::move(tbl));
+  }
+
+  auto joinBridge = operatorCtx_->task()->getCustomJoinBridge(
+      operatorCtx_->driverCtx()->splitGroupId, planNodeId());
+  auto cudfHashJoinBridge =
+      std::dynamic_pointer_cast<CudfHashJoinBridge>(joinBridge);
+
+  cudfHashJoinBridge->setBuildStream(stream);
+  cudfHashJoinBridge->setJoinData(
+      std::make_optional(CudfHashJoinBridge::join_type{
+          std::in_place_type<CudfHashJoinBridge::sort_merge_join_type>,
+          std::move(sharedTbls),
+          std::move(smjObjects)}));
 }
 
 exec::BlockingReason CudfHashJoinBuild::isBlocked(ContinueFuture* future) {
@@ -1083,13 +1234,114 @@ std::vector<std::unique_ptr<cudf::table>> CudfHashJoinProbe::antiJoin(
   return cudfOutputs;
 }
 
+std::vector<std::unique_ptr<cudf::table>> CudfHashJoinProbe::innerJoinSortMerge(
+    cudf::table_view leftTableView,
+    rmm::cuda_stream_view stream) {
+  std::vector<std::unique_ptr<cudf::table>> cudfOutputs;
+
+  auto& rightTables = sortMergeJoinData_.value().first;
+  auto& smjs = sortMergeJoinData_.value().second;
+  for (size_t i = 0; i < rightTables.size(); i++) {
+    auto rightTableView = rightTables[i]->view();
+    auto& smj = smjs[i];
+
+    VELOX_CHECK_NOT_NULL(smj);
+    if (buildStream_.has_value()) {
+      cudaEvent_->recordFrom(stream).waitOn(buildStream_.value());
+    }
+    auto [leftJoinIndices, rightJoinIndices] = smj->inner_join(
+        leftTableView.select(leftKeyIndices_),
+        cudf::sorted::NO,
+        buildStream_.has_value() ? buildStream_.value() : stream);
+    if (buildStream_.has_value()) {
+      cudaEvent_->recordFrom(buildStream_.value()).waitOn(stream);
+    }
+
+    auto leftIndicesSpan =
+        cudf::device_span<cudf::size_type const>{*leftJoinIndices};
+    auto rightIndicesSpan =
+        cudf::device_span<cudf::size_type const>{*rightJoinIndices};
+    auto leftIndicesCol = cudf::column_view{leftIndicesSpan};
+    auto rightIndicesCol = cudf::column_view{rightIndicesSpan};
+
+    if (joinNode_->filter()) {
+      cudfOutputs.push_back(filteredOutputIndices(
+          leftTableView,
+          leftIndicesCol,
+          rightTableView,
+          rightIndicesCol,
+          cudf::join_kind::INNER_JOIN,
+          stream));
+    } else {
+      cudfOutputs.push_back(unfilteredOutput(
+          leftTableView,
+          leftIndicesCol,
+          rightTableView,
+          rightIndicesCol,
+          stream));
+    }
+  }
+  return cudfOutputs;
+}
+
+std::vector<std::unique_ptr<cudf::table>> CudfHashJoinProbe::leftJoinSortMerge(
+    cudf::table_view leftTableView,
+    rmm::cuda_stream_view stream) {
+  std::vector<std::unique_ptr<cudf::table>> cudfOutputs;
+
+  auto& rightTables = sortMergeJoinData_.value().first;
+  auto& smjs = sortMergeJoinData_.value().second;
+  for (size_t i = 0; i < rightTables.size(); i++) {
+    auto rightTableView = rightTables[i]->view();
+    auto& smj = smjs[i];
+
+    VELOX_CHECK_NOT_NULL(smj);
+    if (buildStream_.has_value()) {
+      cudaEvent_->recordFrom(stream).waitOn(buildStream_.value());
+    }
+    auto [leftJoinIndices, rightJoinIndices] = smj->left_join(
+        leftTableView.select(leftKeyIndices_),
+        cudf::sorted::NO,
+        buildStream_.has_value() ? buildStream_.value() : stream);
+    if (buildStream_.has_value()) {
+      cudaEvent_->recordFrom(buildStream_.value()).waitOn(stream);
+    }
+
+    auto leftIndicesSpan =
+        cudf::device_span<cudf::size_type const>{*leftJoinIndices};
+    auto rightIndicesSpan =
+        cudf::device_span<cudf::size_type const>{*rightJoinIndices};
+    auto leftIndicesCol = cudf::column_view{leftIndicesSpan};
+    auto rightIndicesCol = cudf::column_view{rightIndicesSpan};
+
+    if (joinNode_->filter()) {
+      cudfOutputs.push_back(filteredOutputIndices(
+          leftTableView,
+          leftIndicesCol,
+          rightTableView,
+          rightIndicesCol,
+          cudf::join_kind::LEFT_JOIN,
+          stream));
+    } else {
+      cudfOutputs.push_back(unfilteredOutput(
+          leftTableView,
+          leftIndicesCol,
+          rightTableView,
+          rightIndicesCol,
+          stream));
+    }
+  }
+  return cudfOutputs;
+}
+
 RowVectorPtr CudfHashJoinProbe::getOutput() {
   if (CudfConfig::getInstance().debugEnabled) {
     LOG(INFO) << "Calling CudfHashJoinProbe::getOutput" << std::endl;
   }
   VELOX_NVTX_OPERATOR_FUNC_RANGE();
 
-  if (finished_ or !hashObject_.has_value()) {
+  bool hasJoinData = hashObject_.has_value() || sortMergeJoinData_.has_value();
+  if (finished_ || !hasJoinData) {
     return nullptr;
   }
   if (!input_) {
@@ -1173,44 +1425,75 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
               << std::endl;
   }
 
-  auto& rightTables = hashObject_.value().first;
-  auto& hbs = hashObject_.value().second;
-  for (auto i = 0; i < rightTables.size(); i++) {
-    auto& rightTable = rightTables[i];
-    auto& hb = hbs[i];
-    VELOX_CHECK_NOT_NULL(rightTable);
-    if (CudfConfig::getInstance().debugEnabled) {
-      if (rightTable != nullptr)
-        LOG(INFO) << "right_table is not nullptr " << rightTable.get()
-                  << " hasValue(" << hashObject_.has_value() << ")\n";
-      if (hb != nullptr)
-        LOG(INFO) << "hb is not nullptr " << hb.get() << " hasValue("
-                  << hashObject_.has_value() << ")\n";
+  // Validate build tables
+  if (hashObject_.has_value()) {
+    auto& rightTables = hashObject_.value().first;
+    auto& hbs = hashObject_.value().second;
+    for (size_t i = 0; i < rightTables.size(); i++) {
+      auto& rightTable = rightTables[i];
+      auto& hb = hbs[i];
+      VELOX_CHECK_NOT_NULL(rightTable);
+      if (CudfConfig::getInstance().debugEnabled) {
+        if (rightTable != nullptr)
+          LOG(INFO) << "right_table is not nullptr " << rightTable.get()
+                    << " hasValue(" << hashObject_.has_value() << ")\n";
+        if (hb != nullptr)
+          LOG(INFO) << "hb is not nullptr " << hb.get() << " hasValue("
+                    << hashObject_.has_value() << ")\n";
+      }
+    }
+  } else if (sortMergeJoinData_.has_value()) {
+    auto& rightTables = sortMergeJoinData_.value().first;
+    for (size_t i = 0; i < rightTables.size(); i++) {
+      VELOX_CHECK_NOT_NULL(rightTables[i]);
+      if (CudfConfig::getInstance().debugEnabled) {
+        LOG(INFO) << "sort_merge right_table " << i << " is not nullptr "
+                  << rightTables[i].get() << std::endl;
+      }
     }
   }
 
   std::vector<std::unique_ptr<cudf::table>> cudfOutputs;
-  switch (joinNode_->joinType()) {
-    case core::JoinType::kInner:
-      cudfOutputs = innerJoin(leftTableView, stream);
-      break;
-    case core::JoinType::kLeft:
-      cudfOutputs = leftJoin(leftTableView, stream);
-      break;
-    case core::JoinType::kRight:
-      cudfOutputs = rightJoin(leftTableView, stream);
-      break;
-    case core::JoinType::kLeftSemiFilter:
-      cudfOutputs = leftSemiFilterJoin(leftTableView, stream);
-      break;
-    case core::JoinType::kRightSemiFilter:
-      cudfOutputs = rightSemiFilterJoin(leftTableView, stream);
-      break;
-    case core::JoinType::kAnti:
-      cudfOutputs = antiJoin(leftTableView, stream);
-      break;
-    default:
-      VELOX_FAIL("Unsupported join type: ", joinNode_->joinType());
+
+  // Dispatch based on join strategy and join type
+  if (sortMergeJoinData_.has_value()) {
+    // Sort-merge join path (inner and left joins only)
+    switch (joinNode_->joinType()) {
+      case core::JoinType::kInner:
+        cudfOutputs = innerJoinSortMerge(leftTableView, stream);
+        break;
+      case core::JoinType::kLeft:
+        cudfOutputs = leftJoinSortMerge(leftTableView, stream);
+        break;
+      default:
+        VELOX_FAIL(
+            "Sort-merge join does not support join type: {}",
+            static_cast<int>(joinNode_->joinType()));
+    }
+  } else {
+    // Hash join path
+    switch (joinNode_->joinType()) {
+      case core::JoinType::kInner:
+        cudfOutputs = innerJoin(leftTableView, stream);
+        break;
+      case core::JoinType::kLeft:
+        cudfOutputs = leftJoin(leftTableView, stream);
+        break;
+      case core::JoinType::kRight:
+        cudfOutputs = rightJoin(leftTableView, stream);
+        break;
+      case core::JoinType::kLeftSemiFilter:
+        cudfOutputs = leftSemiFilterJoin(leftTableView, stream);
+        break;
+      case core::JoinType::kRightSemiFilter:
+        cudfOutputs = rightSemiFilterJoin(leftTableView, stream);
+        break;
+      case core::JoinType::kAnti:
+        cudfOutputs = antiJoin(leftTableView, stream);
+        break;
+      default:
+        VELOX_FAIL("Unsupported join type: ", joinNode_->joinType());
+    }
   }
 
   // Release input CudfVector to free GPU memory before creating output.
@@ -1242,8 +1525,11 @@ bool CudfHashJoinProbe::skipProbeOnEmptyBuild() const {
 }
 
 exec::BlockingReason CudfHashJoinProbe::isBlocked(ContinueFuture* future) {
+  // Check if we already have join data (hash or sort-merge)
+  bool hasJoinData = hashObject_.has_value() || sortMergeJoinData_.has_value();
+
   if ((joinNode_->isRightJoin() || joinNode_->isRightSemiFilterJoin()) &&
-      hashObject_.has_value()) {
+      hasJoinData) {
     if (!future_.valid()) {
       return exec::BlockingReason::kNotBlocked;
     }
@@ -1251,7 +1537,7 @@ exec::BlockingReason CudfHashJoinProbe::isBlocked(ContinueFuture* future) {
     return exec::BlockingReason::kWaitForJoinProbe;
   }
 
-  if (hashObject_.has_value()) {
+  if (hasJoinData) {
     return exec::BlockingReason::kNotBlocked;
   }
 
@@ -1261,20 +1547,33 @@ exec::BlockingReason CudfHashJoinProbe::isBlocked(ContinueFuture* future) {
       std::dynamic_pointer_cast<CudfHashJoinBridge>(joinBridge);
   VELOX_CHECK_NOT_NULL(cudfJoinBridge);
   VELOX_CHECK_NOT_NULL(future);
-  auto hashObject = cudfJoinBridge->hashOrFuture(future);
+  auto joinData = cudfJoinBridge->joinDataOrFuture(future);
 
-  if (!hashObject.has_value()) {
+  if (!joinData.has_value()) {
     if (CudfConfig::getInstance().debugEnabled) {
       LOG(INFO) << "CudfHashJoinProbe is blocked, waiting for join build"
                 << std::endl;
     }
     return exec::BlockingReason::kWaitForJoinBuild;
   }
-  hashObject_ = std::move(hashObject);
+
+  // Store join data based on variant type
+  if (std::holds_alternative<hash_type>(*joinData)) {
+    hashObject_ = std::get<hash_type>(*joinData);
+    if (CudfConfig::getInstance().debugEnabled) {
+      LOG(INFO) << "CudfHashJoinProbe received hash join data" << std::endl;
+    }
+  } else {
+    sortMergeJoinData_ = std::get<sort_merge_join_type>(*joinData);
+    if (CudfConfig::getInstance().debugEnabled) {
+      LOG(INFO) << "CudfHashJoinProbe received sort-merge join data"
+                << std::endl;
+    }
+  }
   buildStream_ = cudfJoinBridge->getBuildStream();
 
-  // Lazy initialize matched flags only when build side is done
-  if (joinNode_->isRightJoin()) {
+  // Lazy initialize matched flags only when build side is done (hash join only)
+  if (joinNode_->isRightJoin() && hashObject_.has_value()) {
     auto& rightTablesInit = hashObject_.value().first;
     rightMatchedFlags_.clear();
     rightMatchedFlags_.reserve(rightTablesInit.size());
@@ -1288,10 +1587,18 @@ exec::BlockingReason CudfHashJoinProbe::isBlocked(ContinueFuture* future) {
     }
     initStream.synchronize();
   }
-  auto& rightTables = hashObject_.value().first;
+
+  // Get right tables for empty build check
+  const std::vector<std::shared_ptr<cudf::table>>* rightTables = nullptr;
+  if (hashObject_.has_value()) {
+    rightTables = &hashObject_.value().first;
+  } else if (sortMergeJoinData_.has_value()) {
+    rightTables = &sortMergeJoinData_.value().first;
+  }
+
   // should be rightTable->numDistinct() but it needs compute,
   // so we use num_rows()
-  if (rightTables[0]->num_rows() == 0) {
+  if (rightTables && (*rightTables)[0]->num_rows() == 0) {
     if (skipProbeOnEmptyBuild()) {
       if (operatorCtx_->driverCtx()
               ->queryConfig()
@@ -1313,9 +1620,10 @@ exec::BlockingReason CudfHashJoinProbe::isBlocked(ContinueFuture* future) {
 bool CudfHashJoinProbe::isFinished() {
   auto const isFinished = finished_ || (noMoreInput_ && input_ == nullptr);
 
-  // Release hashObject_ if finished
+  // Release join data if finished
   if (isFinished) {
     hashObject_.reset();
+    sortMergeJoinData_.reset();
   }
   return isFinished;
 }
