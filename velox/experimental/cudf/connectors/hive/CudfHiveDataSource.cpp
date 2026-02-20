@@ -626,7 +626,7 @@ void CudfHiveDataSource::setupCudfDataSourceAndOptions() {
 
   // Set column projection if needed, using mapped physical column names
   if (readColumnNames_.size()) {
-    readerOptions_.set_columns(mapToPhysicalColumnNames(readColumnNames_));
+    readerOptions_.set_column_names(mapToPhysicalColumnNames(readColumnNames_));
   }
 }
 
