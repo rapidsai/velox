@@ -35,7 +35,6 @@
 #include <rmm/mr/device_memory_resource.hpp>
 #include <rmm/mr/pool_memory_resource.hpp>
 
-using namespace facebook::velox::exec;
 namespace facebook::velox::cudf_exchange {
 
 struct CudfExchangeMetrics {

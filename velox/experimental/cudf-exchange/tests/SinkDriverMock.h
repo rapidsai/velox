@@ -20,9 +20,9 @@
 #include "velox/experimental/cudf-exchange/tests/CudfTestData.h"
 #include "velox/experimental/cudf-exchange/tests/CudfTestHelpers.h"
 
-using namespace facebook::velox::exec;
-
 namespace facebook::velox::cudf_exchange {
+
+using exec::DriverCtx;
 
 /// @class SinkTaskMock
 /// @brief A mock class that receives data through an exchange from one or more
@@ -90,7 +90,7 @@ class SinkDriverMock {
 
   bool dataValidFlag_ = true;
   std::shared_ptr<facebook::velox::exec::Task> task_;
-  std::shared_ptr<ExchangeClientFacade> exchangeClient_;
+  std::shared_ptr<CudfExchangeClient> exchangeClient_;
 
   std::vector<std::shared_ptr<DriverCtx>> driverCtxs_;
   std::vector<std::unique_ptr<HybridExchange>> hybridExchanges_;

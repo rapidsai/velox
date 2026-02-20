@@ -23,6 +23,8 @@
 #include <cudf/table/table_view.hpp>
 #include <cudf/unary.hpp>
 
+using namespace facebook::velox::exec;
+
 namespace facebook::velox::cudf_exchange {
 
 constexpr int kPipelineId = 0;
@@ -37,13 +39,9 @@ SinkDriverMock::SinkDriverMock(
       numRows_{0},
       numBytes_{0},
       referenceData_(referenceData) {
-  // create a new exchange client facade. Since this test doesn't use
-  // HTTP exchange, the facade will only use a cudf exchange client.
-  // create new cudfExchangeClient
-  auto cudfClient = std::make_shared<CudfExchangeClient>(
+  // Create a CudfExchangeClient shared across all exchange operators.
+  exchangeClient_ = std::make_shared<CudfExchangeClient>(
       task_->taskId(), task_->destination(), numDrivers_);
-  exchangeClient_ = std::make_shared<ExchangeClientFacade>(
-      task_->taskId(), kPipelineId, std::move(cudfClient), nullptr); // no HTTP client.
   uint32_t operatorId = 0;
   auto planNode = task_->planFragment().planNode;
   // create the set of exchange operators.

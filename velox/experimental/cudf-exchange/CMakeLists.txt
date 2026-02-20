@@ -17,7 +17,6 @@ set(
   CudfOutputQueueManager.cpp
   CudfQueues.cpp
   HybridExchange.cpp
-  ExchangeClientFacade.cpp
   CudfExchangeProtocol.cpp
   CudfExchangeSource.cpp
   CudfExchangeServer.cpp
