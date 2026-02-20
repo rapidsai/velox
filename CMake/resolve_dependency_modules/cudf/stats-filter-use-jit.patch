@@ -1,0 +1,153 @@
+diff --git a/cpp/src/io/parquet/predicate_pushdown.cpp b/cpp/src/io/parquet/predicate_pushdown.cpp
+index 82a53eaadc..7af34c8335 100644
+--- a/cpp/src/io/parquet/predicate_pushdown.cpp
++++ b/cpp/src/io/parquet/predicate_pushdown.cpp
+@@ -17,12 +17,15 @@
+ #include <cudf/utilities/span.hpp>
+ #include <cudf/utilities/traits.hpp>
+ #include <cudf/utilities/type_dispatcher.hpp>
++#include <cudf/transform.hpp>
+ 
+ #include <rmm/mr/aligned_resource_adaptor.hpp>
+ 
+ #include <thrust/iterator/counting_iterator.h>
+ 
+ #include <algorithm>
++#include <cstdlib>
++#include <cstdio>
+ #include <numeric>
+ #include <optional>
+ #include <unordered_set>
+@@ -116,6 +119,27 @@ struct row_group_stats_caster : public stats_caster_base {
+ 
+ }  // namespace
+ 
++bool uses_fixed_point(table_view const& table, ast::expression const& expr)
++{
++  if (auto const* lit = dynamic_cast<ast::literal const*>(&expr)) {
++    return cudf::is_fixed_point(lit->get_data_type());
++  }
++  if (auto const* col = dynamic_cast<ast::column_reference const*>(&expr)) {
++    auto const col_index = col->get_column_index();
++    if (col_index >= 0 && col_index < table.num_columns()) {
++      return cudf::is_fixed_point(table.column(col_index).type());
++    }
++  }
++  if (auto const* op = dynamic_cast<ast::operation const*>(&expr)) {
++    for (auto const& operand : op->get_operands()) {
++      if (uses_fixed_point(table, operand.get())) {
++        return true;
++      }
++    }
++  }
++  return false;
++}
++
+ std::optional<std::vector<std::vector<size_type>>> aggregate_reader_metadata::apply_stats_filters(
+   host_span<std::vector<size_type> const> input_row_group_indices,
+   size_type total_row_groups,
+@@ -420,8 +444,22 @@ std::optional<std::vector<std::vector<size_type>>> collect_filtered_row_group_in
+   rmm::cuda_stream_view stream)
+ {
+   // Filter the input table using AST expression
+-  auto predicate_col = cudf::detail::compute_column(
+-    table, ast_expr.get(), stream, cudf::get_current_device_resource_ref());
++  std::unique_ptr<cudf::column> predicate_col;
++  bool const uses_fixed = uses_fixed_point(table, ast_expr.get());
++  if (std::getenv("VELOX_CUDF_DEBUG_DECIMAL_FILTER") != nullptr) {
++    std::fprintf(
++      stderr,
++      "parquet stats filter: uses_fixed_point=%d using_jit=%d\n",
++      uses_fixed ? 1 : 0,
++      uses_fixed ? 1 : 0);
++  }
++  if (uses_fixed) {
++    predicate_col = cudf::compute_column_jit(
++      table, ast_expr.get(), stream, cudf::get_current_device_resource_ref());
++  } else {
++    predicate_col = cudf::detail::compute_column(
++      table, ast_expr.get(), stream, cudf::get_current_device_resource_ref());
++  }
+   auto predicate = predicate_col->view();
+   CUDF_EXPECTS(predicate.type().id() == cudf::type_id::BOOL8,
+                "Filter expression must return a boolean column");
+diff --git a/cpp/src/io/parquet/stats_filter_helpers.hpp b/cpp/src/io/parquet/stats_filter_helpers.hpp
+index 2f986b71c2..286a71c563 100644
+--- a/cpp/src/io/parquet/stats_filter_helpers.hpp
++++ b/cpp/src/io/parquet/stats_filter_helpers.hpp
+@@ -20,6 +20,7 @@
+ #include <algorithm>
+ #include <numeric>
+ #include <string>
++#include <type_traits>
+ 
+ namespace cudf::io::parquet::detail {
+ 
+@@ -65,12 +66,34 @@ class stats_caster_base {
+     return stats_caster_base::targetType<T>(*reinterpret_cast<bool const*>(stats_val));
+   }
+ 
++  template <typename U, bool kIsChrono = cudf::is_chrono<U>()>
++  struct rep_type {
++    using type = U;
++  };
++
++  template <typename U>
++  struct rep_type<U, true> {
++    using type = typename U::rep;
++  };
++
++  template <typename U>
++  static constexpr auto make_unsigned_identity()
++  {
++    if constexpr (std::is_same_v<U, __int128_t> || std::is_same_v<U, __uint128_t>) {
++      return __uint128_t{};
++    } else {
++      return std::make_unsigned_t<U>{};
++    }
++  }
++
+   // integral but not boolean, and fixed_point, and chrono.
+   template <typename T,
+             CUDF_ENABLE_IF((cudf::is_integral<T>() and !cudf::is_boolean<T>()) or
+                            cudf::is_fixed_point<T>() or cudf::is_chrono<T>())>
+   static inline T convert(uint8_t const* stats_val, size_t stats_size, Type const type)
+   {
++    using rep_t = typename rep_type<T>::type;
++    using unsigned_rep_t = decltype(make_unsigned_identity<rep_t>());
+     switch (type) {
+       case Type::INT32:
+         return stats_caster_base::targetType<T>(*reinterpret_cast<int32_t const*>(stats_val));
+@@ -81,16 +104,24 @@ class stats_caster_base {
+           static_cast<__int128_t>(reinterpret_cast<int64_t const*>(stats_val)[0]) << 32 |
+           reinterpret_cast<int32_t const*>(stats_val)[2]);
+       case Type::BYTE_ARRAY: [[fallthrough]];
+-      case Type::FIXED_LEN_BYTE_ARRAY:
+-        if (stats_size == sizeof(T)) {
+-          // if type size == length of stats_val. then typecast and return.
+-          if constexpr (cudf::is_chrono<T>()) {
+-            return stats_caster_base::targetType<T>(
+-              *reinterpret_cast<typename T::rep const*>(stats_val));
+-          } else {
+-            return stats_caster_base::targetType<T>(*reinterpret_cast<T const*>(stats_val));
++      case Type::FIXED_LEN_BYTE_ARRAY: {
++        CUDF_EXPECTS(stats_size <= sizeof(rep_t), "Invalid stats size and type combination");
++        // Decimal values are stored big-endian.
++        unsigned_rep_t unscaled{0};
++        for (size_t i = 0; i < stats_size; ++i) {
++          unscaled = (unscaled << 8) | stats_val[i];
++        }
++        if (stats_size < sizeof(rep_t)) {
++          auto const bits_used = static_cast<int>(stats_size * 8);
++          unsigned_rep_t sign_bit = unsigned_rep_t{1} << (bits_used - 1);
++          if (unscaled & sign_bit) {
++            unsigned_rep_t const mask =
++              ~((unsigned_rep_t{1} << bits_used) - unsigned_rep_t{1});
++            unscaled |= mask;
+           }
+         }
++        return stats_caster_base::targetType<T>(static_cast<rep_t>(unscaled));
++      }
+         // unsupported type
+       default: CUDF_FAIL("Invalid type and stats combination");
+     }

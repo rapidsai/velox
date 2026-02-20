@@ -106,6 +106,82 @@ block(SCOPE_FOR VARIABLES)
 
   FetchContent_MakeAvailable(cudf)
 
+  # Apply cuDF patch for decimal stats filtering and verify it.
+  set(VELOX_CUDF_PATCH_FILE
+      "${CMAKE_CURRENT_LIST_DIR}/cudf/stats-filter-use-jit.patch")
+  set(_cudf_predicate_file
+      "${cudf_SOURCE_DIR}/cpp/src/io/parquet/predicate_pushdown.cpp")
+  set(_cudf_stats_file
+      "${cudf_SOURCE_DIR}/cpp/src/io/parquet/stats_filter_helpers.hpp")
+  set(_cudf_predicate_marker "parquet stats filter: uses_fixed_point")
+  set(_cudf_stats_marker "Decimal values are stored big-endian.")
+
+  if (NOT EXISTS "${VELOX_CUDF_PATCH_FILE}")
+    message(FATAL_ERROR "cuDF patch file not found: ${VELOX_CUDF_PATCH_FILE}")
+  endif()
+  if (NOT EXISTS "${_cudf_predicate_file}" OR NOT EXISTS "${_cudf_stats_file}")
+    message(FATAL_ERROR
+            "cuDF patch target files not found under ${cudf_SOURCE_DIR}")
+  endif()
+
+  file(READ "${_cudf_predicate_file}" _cudf_predicate_contents)
+  file(READ "${_cudf_stats_file}" _cudf_stats_contents)
+  string(FIND "${_cudf_predicate_contents}" "${_cudf_predicate_marker}"
+         _cudf_predicate_marker_pos)
+  string(FIND "${_cudf_stats_contents}" "${_cudf_stats_marker}"
+         _cudf_stats_marker_pos)
+  set(_cudf_patch_present TRUE)
+  if (_cudf_predicate_marker_pos EQUAL -1)
+    set(_cudf_patch_present FALSE)
+  endif()
+  if (_cudf_stats_marker_pos EQUAL -1)
+    set(_cudf_patch_present FALSE)
+  endif()
+
+  if (NOT _cudf_patch_present)
+    message(STATUS "Applying cuDF patch: ${VELOX_CUDF_PATCH_FILE}")
+    execute_process(
+      COMMAND patch -p1 --forward -i "${VELOX_CUDF_PATCH_FILE}"
+      WORKING_DIRECTORY "${cudf_SOURCE_DIR}"
+      RESULT_VARIABLE _cudf_patch_result
+      OUTPUT_VARIABLE _cudf_patch_stdout
+      ERROR_VARIABLE _cudf_patch_stderr)
+    if (NOT _cudf_patch_result EQUAL 0)
+      message(WARNING
+              "cuDF patch command returned ${_cudf_patch_result}: "
+              "${_cudf_patch_stderr}")
+    endif()
+  else()
+    message(STATUS "cuDF patch already present; skipping apply.")
+  endif()
+
+  file(READ "${_cudf_predicate_file}" _cudf_predicate_contents_after)
+  file(READ "${_cudf_stats_file}" _cudf_stats_contents_after)
+  string(FIND "${_cudf_predicate_contents_after}" "${_cudf_predicate_marker}"
+         _cudf_predicate_marker_pos_after)
+  string(FIND "${_cudf_stats_contents_after}" "${_cudf_stats_marker}"
+         _cudf_stats_marker_pos_after)
+  if (_cudf_predicate_marker_pos_after EQUAL -1 OR
+      _cudf_stats_marker_pos_after EQUAL -1)
+    message(FATAL_ERROR "cuDF patch verification failed. Ensure patch is applied.")
+  endif()
+  unset(_cudf_predicate_contents)
+  unset(_cudf_stats_contents)
+  unset(_cudf_predicate_contents_after)
+  unset(_cudf_stats_contents_after)
+  unset(_cudf_predicate_marker_pos)
+  unset(_cudf_stats_marker_pos)
+  unset(_cudf_predicate_marker_pos_after)
+  unset(_cudf_stats_marker_pos_after)
+  unset(_cudf_patch_present)
+  unset(_cudf_patch_result)
+  unset(_cudf_patch_stdout)
+  unset(_cudf_patch_stderr)
+  unset(_cudf_predicate_file)
+  unset(_cudf_stats_file)
+  unset(_cudf_predicate_marker)
+  unset(_cudf_stats_marker)
+
   # cudf sets all warnings as errors, and therefore fails to compile with velox
   # expanded set of warnings. We selectively disable problematic warnings just for
   # cudf
