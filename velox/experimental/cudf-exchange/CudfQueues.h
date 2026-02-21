@@ -157,6 +157,12 @@ class CudfOutputQueue : public std::enable_shared_from_this<CudfOutputQueue> {
     return kind_;
   }
 
+  /// Returns true if this queue has been initialized via initializeTask()
+  /// (not just a placeholder created by early getData() calls).
+  bool isInitialized() const {
+    return task_ != nullptr;
+  }
+
   /// @brief When we understand the final number of split groups (for grouped
   /// execution only), we need to update the number of producing drivers here.
   void updateNumDrivers(uint32_t newNumDrivers);
