@@ -15,6 +15,8 @@
  */
 #include "velox/experimental/cudf-exchange/CudfQueues.h"
 
+#include <atomic>
+
 namespace facebook::velox::cudf_exchange {
 
 void CudfDestinationQueue::Stats::recordEnqueue(
@@ -165,9 +167,14 @@ bool CudfOutputQueue::initialize(
     // already initialized!
     return false;
   }
-  task_ = task;
   kind_ = kind;
   numDrivers_ = numDrivers;
+  // Release fence: ensure kind_ and numDrivers_ are visible before task_
+  // is published. Concurrent lock-free readers (e.g. isBroadcast() via
+  // kind()) use task_ != nullptr as the "initialized" signal, so kind_
+  // must be committed to memory first.
+  std::atomic_thread_fence(std::memory_order_release);
+  task_ = task;
   maxSize_ = task_->queryCtx()->queryConfig().maxOutputBufferSize();
   continueSize_ = (maxSize_ * kContinuePct) / 100;
   // create additional queues if there are more destinations.

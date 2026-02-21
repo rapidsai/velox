@@ -66,13 +66,16 @@ void Acceptor::cStyleAMCallback(
       cudf_velox::CudfConfig::getInstance().intraNodeExchange &&
       (handshakePtr->workerId == communicator->getWorkerId());
 
-  // Disable intra-node for broadcast tasks: in broadcast mode all destination
-  // servers share the same packed_columns object. The intra-node source's
-  // destructive move in onIntraNodeData() would corrupt it for other servers.
+  // Disable intra-node when the task is not yet initialized (placeholder
+  // queue from sinks connecting before initializeTask) or when the task
+  // uses broadcast mode (all destination servers share the same
+  // packed_columns — the intra-node source's destructive move would
+  // corrupt it for other servers).
   if (isIntraNodeTransfer) {
-    if (CudfOutputQueueManager::getInstanceRef()->isBroadcast(key.taskId)) {
-      VLOG(2) << "[ACCEPTOR] Disabling intra-node for broadcast task "
-              << key.taskId;
+    if (!CudfOutputQueueManager::getInstanceRef()->canUseIntraNode(
+            key.taskId)) {
+      VLOG(2) << "[ACCEPTOR] Disabling intra-node for task " << key.taskId
+              << " (not initialized or broadcast)";
       isIntraNodeTransfer = false;
     }
   }
