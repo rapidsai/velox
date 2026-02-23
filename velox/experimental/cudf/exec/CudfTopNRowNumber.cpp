@@ -149,6 +149,7 @@ CudfTopNRowNumber::CudfTopNRowNumber(
 }
 
 void CudfTopNRowNumber::addInput(RowVectorPtr input) {
+  VELOX_NVTX_OPERATOR_FUNC_RANGE();
   if (input->size() == 0) {
     return;
   }
