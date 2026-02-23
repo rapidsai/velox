@@ -41,6 +41,7 @@
 #include <cudf/strings/split/split.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/transform.hpp>
+#include <cudf/strings/convert/convert_datetime.hpp>
 #include <cudf/unary.hpp>
 
 namespace facebook::velox::cudf_velox {
@@ -178,6 +179,11 @@ class SplitFunction : public CudfFunction {
 
 class CastFunction : public CudfFunction {
  public:
+  enum class CastMode {
+    kFixedWidth, // cudf::cast() for fixed-width <-> fixed-width
+    kDateToString, // cudf::strings::from_timestamps() with "%Y-%m-%d"
+  };
+
   CastFunction(const std::shared_ptr<velox::exec::Expr>& expr) {
     VELOX_CHECK_EQ(expr->inputs().size(), 1, "cast expects exactly 1 input");
 
@@ -185,11 +191,21 @@ class CastFunction : public CudfFunction {
         cudf::data_type(cudf_velox::veloxToCudfTypeId(expr->type()));
     auto sourceType = cudf::data_type(
         cudf_velox::veloxToCudfTypeId(expr->inputs()[0]->type()));
-    VELOX_CHECK(
-        cudf::is_supported_cast(sourceType, targetCudfType_),
-        "Cast from {} to {} is not supported",
-        expr->inputs()[0]->type()->toString(),
-        expr->type()->toString());
+
+    const auto& srcVeloxType = expr->inputs()[0]->type();
+    const auto& dstVeloxType = expr->type();
+
+    if (srcVeloxType->isDate() &&
+        dstVeloxType->kind() == TypeKind::VARCHAR) {
+      castMode_ = CastMode::kDateToString;
+    } else {
+      castMode_ = CastMode::kFixedWidth;
+      VELOX_CHECK(
+          cudf::is_supported_cast(sourceType, targetCudfType_),
+          "Cast from {} to {} is not supported",
+          expr->inputs()[0]->type()->toString(),
+          expr->type()->toString());
+    }
   }
 
   ColumnOrView eval(
@@ -197,11 +213,29 @@ class CastFunction : public CudfFunction {
       rmm::cuda_stream_view stream,
       rmm::device_async_resource_ref mr) const override {
     auto inputCol = asView(inputColumns[0]);
-    return cudf::cast(inputCol, targetCudfType_, stream, mr);
+    switch (castMode_) {
+      case CastMode::kDateToString:
+        // Presto DATE->VARCHAR produces ISO 8601: "YYYY-MM-DD"
+        // cuDF from_timestamps with "%Y-%m-%d" matches exactly.
+        return cudf::strings::from_timestamps(
+            inputCol,
+            "%Y-%m-%d",
+            cudf::strings_column_view(cudf::column_view{
+                cudf::data_type{cudf::type_id::STRING},
+                0,
+                nullptr,
+                nullptr,
+                0}),
+            stream,
+            mr);
+      default:
+        return cudf::cast(inputCol, targetCudfType_, stream, mr);
+    }
   }
 
  private:
   cudf::data_type targetCudfType_;
+  CastMode castMode_{CastMode::kFixedWidth};
 };
 
 // Spark date_add function implementation.
@@ -1126,7 +1160,16 @@ bool FunctionExpression::canEvaluate(std::shared_ptr<velox::exec::Expr> expr) {
     }
     auto src = cudf::data_type(cudf_velox::veloxToCudfTypeId(srcType));
     auto dst = cudf::data_type(cudf_velox::veloxToCudfTypeId(dstType));
-    return cudf::is_supported_cast(src, dst);
+    if (cudf::is_supported_cast(src, dst)) {
+      return true;
+    }
+    // DATE -> VARCHAR via cudf::strings::from_timestamps with "%Y-%m-%d".
+    // Both cast and try_cast are safe (from_timestamps always succeeds on
+    // valid timestamp data, and propagates NULLs).
+    if (srcType->isDate() && dstType->kind() == TypeKind::VARCHAR) {
+      return true;
+    }
+    return false;
   }
 
   auto& registry = getCudfFunctionRegistry();
