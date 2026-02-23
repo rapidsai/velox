@@ -22,6 +22,7 @@
 
 using namespace facebook::velox::exec;
 using namespace facebook::velox::core;
+using namespace facebook::velox::cudf_velox;
 
 namespace facebook::velox::cudf_exchange {
 
@@ -53,6 +54,10 @@ HybridExchange::HybridExchange(
           operatorId,
           planNode->id(),
           operatorType),
+      NvtxHelper(
+          nvtx3::rgb{0, 191, 255},
+          operatorId,
+          fmt::format("[{}]", planNode->id())),
       preferredOutputBatchBytes_{
           driverCtx->queryConfig().preferredOutputBatchBytes()},
       processSplits_{driverCtx->driverId == 0},
@@ -181,6 +186,7 @@ const PackedTableWithStreamPtr* HybridExchange::getResultPackedTable() {
 }
 
 BlockingReason HybridExchange::isBlocked(ContinueFuture* future) {
+  VELOX_NVTX_OPERATOR_FUNC_RANGE();
   if (!resultIsEmpty() || atEnd_) {
     return BlockingReason::kNotBlocked;
   }
@@ -383,6 +389,7 @@ RowVectorPtr HybridExchange::getOutputFromPackedTable(
 }
 
 RowVectorPtr HybridExchange::getOutput() {
+  VELOX_NVTX_OPERATOR_FUNC_RANGE();
   const PackedTableWithStreamPtr* data = getResultPackedTable();
   if (data) {
     return getOutputFromPackedTable(data);

@@ -204,6 +204,7 @@ exec::BlockingReason CudfPartitionedOutput::isBlocked(ContinueFuture* future) {
 }
 
 RowVectorPtr CudfPartitionedOutput::getOutput() {
+  VELOX_NVTX_OPERATOR_FUNC_RANGE();
   if (finished_) {
     return nullptr;
   }

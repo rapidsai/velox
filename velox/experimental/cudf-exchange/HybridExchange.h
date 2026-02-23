@@ -25,6 +25,7 @@
 #include "velox/experimental/cudf-exchange/CudfQueues.h"
 #include "velox/experimental/cudf-exchange/ExchangeClientFacade.h"
 #include "velox/experimental/cudf/exec/CudfConversion.h"
+#include "velox/experimental/cudf/exec/NvtxHelper.h"
 #include "velox/serializers/PrestoSerializer.h"
 #include "velox/serializers/RowSerializer.h"
 
@@ -50,7 +51,8 @@ namespace facebook::velox::cudf_exchange {
 /// The return type of the getOutput method is always a CudfVector.
 /// If data origins from the HTTP ExchangeClient, then this data is
 /// converted into a CudfVector using the CudfFromVelox operator.
-class HybridExchange : public SourceOperator {
+class HybridExchange : public SourceOperator,
+                       public cudf_velox::NvtxHelper {
  public:
   HybridExchange(
       int32_t operatorId,
