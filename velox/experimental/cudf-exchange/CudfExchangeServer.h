@@ -149,6 +149,14 @@ class CudfExchangeServer
   std::shared_ptr<ucxx::Request> metaRequest_{nullptr};
   std::shared_ptr<ucxx::Request> dataRequest_{nullptr};
 
+  // Completed UCXX requests are kept alive here to prevent use-after-free.
+  // UCP's ucp_wireup_replay_pending_requests can fire callbacks on already-
+  // completed requests; if the ucxx::Request has been freed, the callback
+  // lambda is in freed memory and crashes. Retaining them here ensures the
+  // Request (and its callback lambda) stays valid for the lifetime of this
+  // server.
+  std::vector<std::shared_ptr<ucxx::Request>> completedRequests_;
+
   std::chrono::time_point<std::chrono::high_resolution_clock> sendStart_;
   std::size_t bytes_;
 

@@ -179,6 +179,9 @@ void CudfExchangeServer::close() {
     dataRequest_->cancel();
   }
 
+  // Do NOT clear completedRequests_ here. They must stay alive until this
+  // CudfExchangeServer is destroyed, because UCP's wireup replay mechanism
+  // can fire callbacks on completed requests at any time.
   communicator_->unregister(getSelfPtr());
 }
 
@@ -281,6 +284,9 @@ void CudfExchangeServer::sendData() {
     // Use weak_ptr to prevent use-after-free if close() is called during
     // callback
     std::weak_ptr<CudfExchangeServer> weakMeta = weak_from_this();
+    if (metaRequest_) {
+      completedRequests_.push_back(std::move(metaRequest_));
+    }
     metaRequest_ = endpointRef_->endpoint_->tagSend(
         serializedMetadata.get(),
         serMetaSize,
@@ -331,6 +337,9 @@ void CudfExchangeServer::sendData() {
       // Use weak_ptr to prevent use-after-free if close() is called during
       // callback
       std::weak_ptr<CudfExchangeServer> weakData = weak_from_this();
+      if (dataRequest_) {
+        completedRequests_.push_back(std::move(dataRequest_));
+      }
       dataRequest_ = endpointRef_->endpoint_->tagSend(
           dataPtr_->gpu_data->data(),
           dataPtr_->gpu_data->size(),
@@ -340,7 +349,8 @@ void CudfExchangeServer::sendData() {
             if (auto self = weakData.lock()) {
               self->sendComplete(status, arg);
             }
-          });
+          },
+          dataPtr_);
     } else {
       // Data pointer is null, so no more data will be coming.
       VLOG(3) << "@" << partitionKey_.taskId
