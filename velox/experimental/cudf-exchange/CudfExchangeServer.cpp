@@ -24,6 +24,23 @@
 
 namespace facebook::velox::cudf_exchange {
 
+// Context wrappers for UCXX tagSend callbackData. These decouple the
+// ucxx::Request lifetime (which must survive for UCP wireup replay) from
+// the buffer lifetime (which should be freed promptly after DMA completes).
+//
+// The Request holds a shared_ptr to the context via callbackData. The
+// context holds a shared_ptr to the actual buffer. When the send completion
+// callback fires, it moves the buffer out of the context, releasing the GPU
+// (or CPU) memory. The context remains alive as an empty shell for the
+// lifetime of the Request, which is safe and costs negligible memory.
+struct MetaSendContext {
+  std::shared_ptr<uint8_t> metadata;
+};
+
+struct DataSendContext {
+  std::shared_ptr<cudf::packed_columns> data;
+};
+
 void CudfExchangeServer::setState(ServerState newState) {
   auto oldState = state_.exchange(newState, std::memory_order_seq_cst);
   VLOG(2) << (isIntraNodeTransfer_ ? "[INTRA]" : "[REMOTE]") << " [ExSrv "
@@ -300,13 +317,25 @@ void CudfExchangeServer::sendData() {
     if (metaRequest_) {
       completedRequests_.push_back(std::move(metaRequest_));
     }
+
+    // Wrap the serialized metadata in a context so the callback can release
+    // it after the send completes, while the Request (and context shell)
+    // stays alive for UCP wireup replay.
+    auto metaCtx = std::make_shared<MetaSendContext>();
+    metaCtx->metadata = serializedMetadata;
+
     metaRequest_ = endpointRef_->endpoint_->tagSend(
-        serializedMetadata.get(),
+        metaCtx->metadata.get(),
         serMetaSize,
         ucxx::Tag{metadataTag},
         false,
         [tid = partitionKey_.toString(), metadataTag, weakMeta](
             ucs_status_t status, std::shared_ptr<void> arg) {
+          // Release the metadata buffer from the context. The context
+          // shell stays alive with the Request; only the payload is freed.
+          auto ctx = std::static_pointer_cast<MetaSendContext>(arg);
+          auto metaHolder = std::move(ctx->metadata); // release CPU buffer
+
           auto self = weakMeta.lock();
           if (!self) {
             return; // Object was destroyed, safe to ignore
@@ -329,7 +358,7 @@ void CudfExchangeServer::sendData() {
             self->communicator_->addToWorkQueue(self);
           }
         },
-        serializedMetadata);
+        metaCtx);
 
     // send the data chunk (if any)
     if (dataPtr_) {
@@ -353,17 +382,32 @@ void CudfExchangeServer::sendData() {
       if (dataRequest_) {
         completedRequests_.push_back(std::move(dataRequest_));
       }
+
+      // Wrap the GPU data buffer in a context so the callback can release
+      // it after the DMA completes, while the Request (and context shell)
+      // stays alive for UCP wireup replay.
+      auto dataCtx = std::make_shared<DataSendContext>();
+      dataCtx->data = dataPtr_;
+
       dataRequest_ = endpointRef_->endpoint_->tagSend(
-          dataPtr_->gpu_data->data(),
-          dataPtr_->gpu_data->size(),
+          dataCtx->data->gpu_data->data(),
+          dataCtx->data->gpu_data->size(),
           ucxx::Tag{dataTag},
           false,
           [weakData](ucs_status_t status, std::shared_ptr<void> arg) {
+            // Release the GPU data buffer from the context. The DMA has
+            // completed by the time this callback fires, so the buffer is
+            // safe to free. The context shell stays alive with the Request.
+            auto ctx = std::static_pointer_cast<DataSendContext>(arg);
+            auto dataHolder = std::move(ctx->data);
+
             if (auto self = weakData.lock()) {
               self->sendComplete(status, arg);
             }
+            // dataHolder is destroyed here, releasing the GPU buffer if
+            // sendComplete() already reset the server's dataPtr_.
           },
-          dataPtr_);
+          dataCtx);
     } else {
       // Data pointer is null, so no more data will be coming.
       VLOG(3) << "@" << partitionKey_.taskId
