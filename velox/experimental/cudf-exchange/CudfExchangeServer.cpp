@@ -179,9 +179,22 @@ void CudfExchangeServer::close() {
     dataRequest_->cancel();
   }
 
-  // Do NOT clear completedRequests_ here. They must stay alive until this
-  // CudfExchangeServer is destroyed, because UCP's wireup replay mechanism
-  // can fire callbacks on completed requests at any time.
+  // Move all requests to the Communicator's deferred list so the GPU
+  // buffers they reference (via their arg shared_ptr) stay alive until
+  // UCX has fully processed any in-flight operations.
+  if (communicator_) {
+    if (metaRequest_) {
+      communicator_->deferRequestCleanup(std::move(metaRequest_));
+    }
+    if (dataRequest_) {
+      communicator_->deferRequestCleanup(std::move(dataRequest_));
+    }
+    for (auto& req : completedRequests_) {
+      communicator_->deferRequestCleanup(std::move(req));
+    }
+    completedRequests_.clear();
+  }
+
   communicator_->unregister(getSelfPtr());
 }
 

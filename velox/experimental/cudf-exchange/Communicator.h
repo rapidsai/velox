@@ -117,6 +117,12 @@ class Communicator {
   /// @param ep The endpoint to be cleaned up later.
   void deferEndpointCleanup(std::shared_ptr<EndpointRef> ep);
 
+  /// @brief Defers cleanup of a cancelled UCXX request to the main loop.
+  /// The request (and the GPU buffers it references via its arg) will be
+  /// held alive until UCX has fully processed the cancellation.
+  /// Must only be called from the Communicator thread.
+  void deferRequestCleanup(std::shared_ptr<ucxx::Request> request);
+
   // Returns the URL of the coordinator.
   const std::string& getCoordinatorUrl();
 
@@ -205,6 +211,12 @@ class Communicator {
   // UCX callbacks cannot call progress functions (like closeBlocking),
   // so they defer cleanup to the main loop via this queue.
   WorkQueue<EndpointRef> deferredEndpointCleanup_;
+
+  /// Cancelled UCXX requests whose GPU buffers may still be referenced by
+  /// UCX internals. Held alive here until isCompleted() returns true,
+  /// ensuring the GPU buffers (owned via the request's arg shared_ptr)
+  /// are not freed prematurely.
+  std::vector<std::shared_ptr<ucxx::Request>> deferredRequests_;
 
   // Heartbeat state for diagnostic logging.
   std::chrono::steady_clock::time_point lastHeartbeat_{

@@ -17,6 +17,7 @@
 #include <cuda_runtime.h>
 #include <ucxx/api.h>
 #include <ucxx/utils/ucx.h>
+#include <algorithm>
 #include <iostream>
 #include "velox/common/base/Exceptions.h"
 #include "velox/experimental/cudf-exchange/CommElement.h"
@@ -172,6 +173,7 @@ void Communicator::run() {
                 << ")"
                 << " endpoints=" << endpoints_.size()
                 << " deferredCleanup=" << deferredEndpointCleanup_.size()
+                << " deferredRequests=" << deferredRequests_.size()
                 << " workItemsProcessed=" << workItemsProcessed_
                 << " GPU=" << gpuUsedMB << "/" << gpuTotalMB << "MB"
                 << " (free=" << gpuFreeMB << "MB)";
@@ -202,6 +204,18 @@ void Communicator::run() {
         // Use non-blocking progress here to avoid blocking between
         // work items -- we want to drain the queue promptly.
         worker_->progress();
+      }
+
+      // Clean up deferred requests that UCX has fully processed.
+      // These are cancelled requests whose GPU buffers needed to stay
+      // alive until UCX finished any in-flight operations on them.
+      if (!deferredRequests_.empty()) {
+        deferredRequests_.erase(
+            std::remove_if(
+                deferredRequests_.begin(),
+                deferredRequests_.end(),
+                [](const auto& req) { return req->isCompleted(); }),
+            deferredRequests_.end());
       }
 
       // All queues are drained. Now wait for UCXX network events.
@@ -320,6 +334,12 @@ void Communicator::deferEndpointCleanup(std::shared_ptr<EndpointRef> ep) {
   VLOG(3) << "Deferring endpoint cleanup to main loop";
   deferredEndpointCleanup_.push(ep);
   signalWorker();
+}
+
+void Communicator::deferRequestCleanup(std::shared_ptr<ucxx::Request> request) {
+  if (request) {
+    deferredRequests_.push_back(std::move(request));
+  }
 }
 
 const std::string& Communicator::getCoordinatorUrl() {
