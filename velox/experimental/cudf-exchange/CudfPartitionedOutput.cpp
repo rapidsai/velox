@@ -68,7 +68,11 @@ CudfPartitionedOutput::CudfPartitionedOutput(
       numPartitions_(planNode->numPartitions()),
       pipelineId_(ctx->pipelineId),
       driverId_(ctx->driverId),
-      targetRowsPerChunk_(ctx->queryConfig().cudfPartitionedOutputBatchRows()) {
+      targetRowsPerChunk_(/* ctx->queryConfig().cudfPartitionedOutputBatchRows() */
+        // hardcoding this value until query configs are properly propagated
+         100'000'000
+        //  10'000
+        ) {
   this->initPartitionKeys(planNode);
   auto sources = planNode->sources();
   std::vector<std::string> inNames, outNames;
