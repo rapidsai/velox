@@ -401,6 +401,14 @@ void CudfConfig::initialize(
   if (config.find(kCudfMemoryPercent) != config.end()) {
     memoryPercent = folly::to<int32_t>(config[kCudfMemoryPercent]);
   }
+  if (config.find(kCudfBatchSizeMinThreshold) != config.end()) {
+    batchSizeMinThreshold =
+        folly::to<int32_t>(config[kCudfBatchSizeMinThreshold]);
+  }
+  if (config.find(kCudfBatchSizeMaxThreshold) != config.end()) {
+    batchSizeMaxThreshold =
+        folly::to<int32_t>(config[kCudfBatchSizeMaxThreshold]);
+  }
   if (config.find(kCudfFunctionNamePrefix) != config.end()) {
     functionNamePrefix = config[kCudfFunctionNamePrefix];
   }

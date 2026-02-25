@@ -20,6 +20,7 @@
 #include "velox/experimental/cudf/CudfConfig.h"
 #include "velox/experimental/cudf/connectors/hive/CudfHiveConnector.h"
 #include "velox/experimental/cudf/exec/CudfAssignUniqueId.h"
+#include "velox/experimental/cudf/exec/CudfBatchConcat.h"
 #include "velox/experimental/cudf/exec/CudfFilterProject.h"
 #include "velox/experimental/cudf/exec/CudfHashAggregation.h"
 #include "velox/experimental/cudf/exec/CudfHashJoin.h"
@@ -256,6 +257,8 @@ class AggregationAdapter : public OperatorAdapter {
         std::dynamic_pointer_cast<const core::AggregationNode>(planNode);
 
     std::vector<std::unique_ptr<exec::Operator>> result;
+    result.push_back(
+        std::make_unique<CudfBatchConcat>(operatorId, ctx, aggregationPlanNode));
     result.push_back(
         std::make_unique<CudfHashAggregation>(
             operatorId, ctx, aggregationPlanNode));

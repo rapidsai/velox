@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
 #include <unordered_map>
 
@@ -47,6 +48,10 @@ struct CudfConfig {
   static constexpr const char* kUcxxBlockingPolling{"ucxx.blocking_polling"};
   static constexpr const char* kCudfExchangeLogLevel{
       "cudf.exchange_log_level"};
+  static constexpr const char* kCudfBatchSizeMinThreshold{
+      "cudf.batch_size_min_threshold"};
+  static constexpr const char* kCudfBatchSizeMaxThreshold{
+      "cudf.batch_size_max_threshold"};
 
   /// Singleton CudfConfig instance.
   /// Clients must set the configs below before invoking registerCudf().
@@ -115,6 +120,14 @@ struct CudfConfig {
   /// VLOG level for cudf-exchange source files (0 = silent, 1-3 = increasing
   /// verbosity). Applied via google::SetVLOGLevel when Communicator starts.
   int32_t exchangeLogLevel{0};
+
+  /// Minimum rows to accumulate before GPU-side concatenation in
+  /// `CudfBatchConcat` (default 100m).
+  int32_t batchSizeMinThreshold{100'000'000};
+
+  /// Maximum rows allowed in a concatenated batch (user configurable).
+  /// When not set, cuDF's own `size_type::max()` is used.
+  std::optional<int32_t> batchSizeMaxThreshold;
 };
 
 } // namespace facebook::velox::cudf_velox
