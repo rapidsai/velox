@@ -1053,7 +1053,7 @@ void CudfHashAggregation::computePartialDistinctStreaming(CudfVectorPtr tbl) {
     auto distinctOutput = getDistinctKeys(
         concatenatedTable->view(),
         groupingKeyOutputChannels_,
-        inputTableStream);
+        partialOutputStream);
     bufferedResult_ = distinctOutput;
   } else {
     // First time processing, just store the result of the input batch's
