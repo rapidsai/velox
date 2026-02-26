@@ -257,8 +257,11 @@ class AggregationAdapter : public OperatorAdapter {
         std::dynamic_pointer_cast<const core::AggregationNode>(planNode);
 
     std::vector<std::unique_ptr<exec::Operator>> result;
-    result.push_back(
-        std::make_unique<CudfBatchConcat>(operatorId, ctx, aggregationPlanNode));
+    if (CudfConfig::getInstance().concatOptimizationEnabled) {
+      result.push_back(
+          std::make_unique<CudfBatchConcat>(
+              operatorId, ctx, aggregationPlanNode));
+    }
     result.push_back(
         std::make_unique<CudfHashAggregation>(
             operatorId, ctx, aggregationPlanNode));
