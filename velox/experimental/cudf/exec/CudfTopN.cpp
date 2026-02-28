@@ -20,8 +20,11 @@
 #include <cudf/detail/copy.hpp>
 #include <cudf/detail/utilities/stream_pool.hpp>
 #include <cudf/detail/gather.hpp>
+#include <cudf/detail/utilities/stream_pool.hpp>
 #include <cudf/merge.hpp>
 #include <cudf/sorting.hpp>
+
+#include <algorithm>
 
 namespace facebook::velox::cudf_velox {
 CudfTopN::CudfTopN(
@@ -87,6 +90,8 @@ CudfVectorPtr CudfTopN::mergeTopK(
   cudf::detail::join_streams(inputStreams, stream);
   auto mergedTable =
       cudf::merge(tableViews, sortKeys_, columnOrder_, nullOrder_, stream, mr);
+  // Ensure input-stream deallocations don't race with merge stream.
+  streamsWaitForStream(inputStreams, stream);
   // slice it
   auto topk =
       cudf::split(
