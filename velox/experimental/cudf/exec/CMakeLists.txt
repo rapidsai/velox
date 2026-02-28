@@ -23,7 +23,9 @@ add_library(
   CudfLimit.cpp
   CudfLocalPartition.cpp
   CudfOrderBy.cpp
+  CudfBatchConcat.cpp
   CudfTopN.cpp
+  CudfTopNRowNumber.cpp
   DebugUtil.cpp
   OperatorAdapters.cpp
   ToCudf.cpp
@@ -33,9 +35,12 @@ add_library(
 
 set_target_properties(velox_cudf_exec PROPERTIES CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON)
 
+find_package(ucx REQUIRED)
+
+
 target_link_libraries(
   velox_cudf_exec
-  PUBLIC cudf::cudf
+  PUBLIC cudf::cudf cuco::cuco velox_cudf_exchange
   PRIVATE
     arrow
     velox_arrow_bridge
