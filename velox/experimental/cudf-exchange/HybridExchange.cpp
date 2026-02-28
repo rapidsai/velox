@@ -114,7 +114,13 @@ void HybridExchange::getSplits(ContinueFuture* future) {
   for (;;) {
     exec::Split split;
     auto reason = operatorCtx_->task()->getSplitOrFuture(
-        operatorCtx_->driverCtx()->splitGroupId, planNodeId(), split, *future);
+        operatorCtx_->driverCtx()->driverId,
+        operatorCtx_->driverCtx()->splitGroupId,
+        planNodeId(),
+        /*maxPreloadSplits=*/0,
+        /*preload=*/nullptr,
+        split,
+        *future);
     if (reason != BlockingReason::kNotBlocked) {
       // we are blocked. Add the splits collected so far (if any) and return.
       addRemoteTaskIds(remoteTaskIds);
