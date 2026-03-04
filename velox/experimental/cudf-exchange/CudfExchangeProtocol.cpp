@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-#include "cuda.h"
-
 #include "velox/experimental/cudf-exchange/CudfExchangeProtocol.h"
 
 namespace facebook::velox::cudf_exchange {
@@ -27,15 +25,6 @@ uint32_t fnv1a_32(const std::string& s) {
     hash *= 0x01000193u; // FNV prime
   }
   return hash;
-}
-
-void cudaCheck(CUresult result) {
-  if (result != CUDA_SUCCESS) {
-    const char* err_msg;
-    cuGetErrorName(result, &err_msg);
-    std::cout << "Cuda error: " << err_msg << std::endl;
-    exit(-1);
-  }
 }
 
 } // namespace facebook::velox::cudf_exchange

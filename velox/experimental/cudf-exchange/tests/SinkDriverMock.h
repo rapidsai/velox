@@ -61,7 +61,7 @@ class SinkDriverMock {
   void addSplits(std::vector<facebook::velox::exec::Split>& splits);
 
   /// @brief Returns the number of rows read by "run".
-  uint32_t numRows() const {
+  uint64_t numRows() const {
     return numRows_;
   }
 
@@ -88,7 +88,7 @@ class SinkDriverMock {
   /// @param tab
   void updateDataValidity(const cudf::table_view& tab);
 
-  bool dataValidFlag_ = true;
+  std::atomic<bool> dataValidFlag_{true};
   std::shared_ptr<facebook::velox::exec::Task> task_;
   std::shared_ptr<CudfExchangeClient> exchangeClient_;
 

@@ -35,10 +35,12 @@ static const char alphanum[] =
 // ----- BaseTableGenerator static helper methods -----
 
 std::string BaseTableGenerator::genRandomStr(size_t len) {
+  thread_local std::mt19937 gen{std::random_device{}()};
+  std::uniform_int_distribution<size_t> dist(0, sizeof(alphanum) - 2);
   std::string rStr;
   rStr.reserve(len);
   for (size_t i = 0; i < len; ++i) {
-    rStr += alphanum[rand() % (sizeof(alphanum) - 1)];
+    rStr += alphanum[dist(gen)];
   }
   return rStr;
 }
@@ -67,7 +69,7 @@ std::unique_ptr<cudf::column> BaseTableGenerator::makeNumericColumn(
       numRows,
       std::move(data),
       rmm::device_buffer{}, // no null mask
-      0);                   // no nulls
+      0); // no nulls
 }
 
 // Explicit template instantiations
@@ -151,7 +153,7 @@ std::unique_ptr<cudf::column> BaseTableGenerator::makeStringsColumn(
       numRows,
       std::move(offsetsCol),
       std::move(charsBuffer),
-      0,                    // null_count
+      0, // null_count
       rmm::device_buffer{}); // null mask
 }
 
@@ -161,7 +163,7 @@ std::unique_ptr<cudf::column> BaseTableGenerator::makeStructColumn(
   return cudf::make_structs_column(
       numRows,
       std::move(children),
-      0,                    // null_count
+      0, // null_count
       rmm::device_buffer{}); // null_mask
 }
 
@@ -229,8 +231,7 @@ std::vector<std::string> BaseTableGenerator::getStringCol(
   maxRows = strColView.size() < maxRows ? strColView.size() : maxRows;
 
   auto offsetView = strColView.offsets();
-  const cudf::size_type* ptrOffsetsData =
-      offsetView.data<cudf::size_type>();
+  const cudf::size_type* ptrOffsetsData = offsetView.data<cudf::size_type>();
   auto const hOffsets = cudf::detail::make_host_vector_async(
       cudf::device_span<cudf::size_type const>(ptrOffsetsData, maxRows + 1),
       stream);
@@ -263,7 +264,7 @@ void CudfTestData::initialize(
   numRows_ = numRows;
   strings_ = std::make_shared<std::vector<std::string>>();
   integers_ = std::make_shared<std::vector<uint32_t>>();
-  doubles_ = std::make_shared<std::vector<float>>();
+  floats_ = std::make_shared<std::vector<float>>();
 
   std::random_device rd;
   std::mt19937 gen(rd());
@@ -277,13 +278,12 @@ void CudfTestData::initialize(
 
     strings_->push_back(str);
     integers_->push_back(strLength);
-    doubles_->push_back(hashValue);
+    floats_->push_back(hashValue);
   }
 
   for (size_t i = 0; i < numRows; i++) {
     VLOG(4) << "In dataTest Generated data String: " << strings_->at(i)
-            << " Integer: " << integers_->at(i)
-            << " Double: " << doubles_->at(i);
+            << " Integer: " << integers_->at(i) << " Float: " << floats_->at(i);
   }
 
   VLOG(3) << "- CudfTestData::initialize";
@@ -296,8 +296,8 @@ std::unique_ptr<cudf::table> CudfTestData::makeTable(
   // Column 0: INT32 (integers)
   columns.push_back(makeNumericColumn(*integers_, stream));
 
-  // Column 1: FLOAT64 (doubles stored as float)
-  columns.push_back(makeNumericColumn(*doubles_, stream));
+  // Column 1: FLOAT32
+  columns.push_back(makeNumericColumn(*floats_, stream));
 
   // Column 2: STRING
   columns.push_back(makeStringsColumn(*strings_));
@@ -334,9 +334,9 @@ bool CudfTestData::verifyTable(
       return false;
     }
 
-    if (receivedDoubles[i] != (*doubles_)[srcIdx]) {
-      VLOG(0) << "CudfTestData::verifyTable: double mismatch at row " << i
-              << ": expected " << (*doubles_)[srcIdx] << ", got "
+    if (receivedDoubles[i] != (*floats_)[srcIdx]) {
+      VLOG(0) << "CudfTestData::verifyTable: float mismatch at row " << i
+              << ": expected " << (*floats_)[srcIdx] << ", got "
               << receivedDoubles[i];
       return false;
     }
@@ -518,8 +518,8 @@ std::unique_ptr<cudf::table> WideComplexTestTable::makeTable(
   std::vector<std::unique_ptr<cudf::column>> structChildren;
   structChildren.push_back(makeNumericColumn(structField1Data_, stream));
   structChildren.push_back(makeNumericColumn(structField2Data_, stream));
-  columns.push_back(
-      makeStructColumn(std::move(structChildren), static_cast<cudf::size_type>(numRows_)));
+  columns.push_back(makeStructColumn(
+      std::move(structChildren), static_cast<cudf::size_type>(numRows_)));
 
   return std::make_unique<cudf::table>(std::move(columns));
 }
@@ -555,7 +555,9 @@ bool WideComplexTestTable::verifyTable(
     if (rxStrings[i] != stringData_[srcIdx] ||
         rxStructField1[i] != structField1Data_[srcIdx] ||
         rxStructField2[i] != structField2Data_[srcIdx]) {
-      VLOG(0) << "WideComplexTestTable::verifyTable: complex column mismatch at row " << i;
+      VLOG(0)
+          << "WideComplexTestTable::verifyTable: complex column mismatch at row "
+          << i;
       return false;
     }
   }

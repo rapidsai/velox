@@ -15,11 +15,9 @@
  */
 #pragma once
 
-#include <cuda.h>
 #include <cuda_runtime.h>
 #include <cinttypes>
 #include <cstring>
-#include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -28,8 +26,6 @@
 /// Definitions needed for the Cudf exchange protocol.
 
 namespace facebook::velox::cudf_exchange {
-
-void cudaCheck(CUresult result);
 
 // data and metadata tags are split into 3 parts:
 // - 4 bytes: A hash of the producing taskId. The taskId is unique within a

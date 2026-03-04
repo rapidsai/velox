@@ -72,7 +72,7 @@ class HybridExchange : public SourceOperator, public cudf_velox::NvtxHelper {
   // operator's stats.
   void recordExchangeClientStats();
 
-  void recordInputStats(uint64_t rawInputBytes, RowVectorPtr result = nullptr);
+  void recordInputStats(uint64_t rawInputBytes, const RowVectorPtr& result);
 
   std::shared_ptr<CudfExchangeClient> exchangeClient_;
 
@@ -97,6 +97,7 @@ class HybridExchange : public SourceOperator, public cudf_velox::NvtxHelper {
   RowVectorPtr result_;
 
   bool atEnd_{false};
+  bool closed_{false};
   std::default_random_engine rng_{std::random_device{}()};
 };
 

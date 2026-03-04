@@ -16,9 +16,11 @@
 #include "velox/experimental/cudf-exchange/HybridExchange.h"
 #include "velox/experimental/cudf/vector/CudfVector.h"
 
-using namespace facebook::velox::exec;
-using namespace facebook::velox::core;
-using namespace facebook::velox::cudf_velox;
+using facebook::velox::exec::Operator;
+using facebook::velox::exec::RemoteConnectorSplit;
+// Required by VELOX_NVTX_OPERATOR_FUNC_RANGE macro in NvtxHelper.h which
+// references extractClassAndFunction and VeloxDomain unqualified.
+using namespace facebook::velox::cudf_velox; // NOLINT
 
 namespace facebook::velox::cudf_exchange {
 
@@ -193,7 +195,7 @@ RowVectorPtr HybridExchange::getOutput() {
 
 void HybridExchange::recordInputStats(
     uint64_t rawInputBytes,
-    RowVectorPtr result) {
+    const RowVectorPtr& result) {
   auto lockedStats = stats_.wlock();
   lockedStats->rawInputBytes += rawInputBytes;
   lockedStats->rawInputPositions += result->size();
@@ -201,6 +203,10 @@ void HybridExchange::recordInputStats(
 }
 
 void HybridExchange::close() {
+  if (closed_) {
+    return;
+  }
+  closed_ = true;
   SourceOperator::close();
   currentData_.reset();
   if (exchangeClient_) {
