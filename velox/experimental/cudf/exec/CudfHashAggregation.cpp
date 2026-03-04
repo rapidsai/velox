@@ -1245,15 +1245,17 @@ RowVectorPtr CudfHashAggregation::getOutput() {
     }
 
     auto stream = cudfGlobalStreamPool().get_stream();
+    auto mr = get_output_mr();
     std::vector<std::unique_ptr<cudf::column>> resultColumns;
     resultColumns.reserve(numAggregates_);
     for (size_t i = 0; i < numAggregates_; ++i) {
-      auto resultScalar = cudf::numeric_scalar<int64_t>(countAllRows_);
-      auto col = cudf::make_column_from_scalar(resultScalar, 1, stream);
+      auto resultScalar =
+          cudf::numeric_scalar<int64_t>(countAllRows_, true, stream, mr);
+      auto col = cudf::make_column_from_scalar(resultScalar, 1, stream, mr);
       const auto cudfOutputType =
           cudf::data_type(veloxToCudfTypeId(outputType_->childAt(i)));
       if (col->type() != cudfOutputType) {
-        col = cudf::cast(*col, cudfOutputType, stream);
+        col = cudf::cast(*col, cudfOutputType, stream, mr);
       }
       resultColumns.push_back(std::move(col));
     }
