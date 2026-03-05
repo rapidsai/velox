@@ -33,6 +33,7 @@
 #include "velox/experimental/cudf/exec/Utilities.h"
 #include "velox/experimental/cudf/expression/ExpressionEvaluator.h"
 
+#include "velox/core/Expressions.h"
 #include "velox/exec/AssignUniqueId.h"
 #include "velox/exec/CallbackSink.h"
 #include "velox/exec/Exchange.h"
@@ -156,9 +157,10 @@ class FilterProjectAdapter : public OperatorAdapter {
     auto filterNode = filterProjectOp->filterNode();
 
     if (projectPlanNode) {
-      if (projectPlanNode->sources()[0]->outputType()->size() == 0 ||
-          projectPlanNode->outputType()->size() == 0) {
-        return false;
+      if (projectPlanNode->sources()[0]->outputType()->size() == 0) {
+        if (filterNode || !projectPlanNode->projections().empty()) {
+          return false;
+        }
       }
     }
 
@@ -231,9 +233,39 @@ class AggregationAdapter : public OperatorAdapter {
     }
 
     if (aggregationPlanNode->sources()[0]->outputType()->size() == 0) {
-      // We cannot handle RowVectors with a length but no data.
-      // This is the case with count(*) global (without groupby)
-      return false;
+      // Zero-column input is only supported for global
+      // count(*)/count(constant).
+      if (!aggregationPlanNode->groupingKeys().empty()) {
+        return false;
+      }
+      if (aggregationPlanNode->aggregates().empty()) {
+        return false;
+      }
+      auto const prefix =
+          cudf_velox::CudfConfig::getInstance().functionNamePrefix;
+      auto isCountAllAggregate =
+          [&](const core::AggregationNode::Aggregate& aggregate) {
+            auto name = aggregate.call->name();
+            if (!prefix.empty() && name.rfind(prefix, 0) == 0) {
+              name = name.substr(prefix.size());
+            }
+            if (!name.starts_with("count")) {
+              return false;
+            }
+            for (const auto& input : aggregate.call->inputs()) {
+              auto constant =
+                  dynamic_cast<const core::ConstantTypedExpr*>(input.get());
+              if (!constant || constant->isNull()) {
+                return false;
+              }
+            }
+            return true;
+          };
+      for (const auto& aggregate : aggregationPlanNode->aggregates()) {
+        if (!isCountAllAggregate(aggregate)) {
+          return false;
+        }
+      }
     }
 
     return canBeEvaluatedByCudf(
@@ -573,6 +605,43 @@ class LocalExchangeAdapter : public OperatorAdapter {
   }
 };
 
+/// LocalMergeAdapter - Keeps original operator
+class LocalMergeAdapter : public OperatorAdapter {
+ public:
+  LocalMergeAdapter() : OperatorAdapter("LocalMerge") {}
+
+  bool canHandle(const exec::Operator* op) const override {
+    return dynamic_cast<const exec::LocalMerge*>(op) != nullptr;
+  }
+
+  bool canRunOnGPU(
+      const exec::Operator* /*op*/,
+      const core::PlanNodePtr& /*planNode*/,
+      exec::DriverCtx* /*ctx*/) const override {
+    return false;
+  }
+
+  bool acceptsGpuInput() const override {
+    return false;
+  }
+
+  bool producesGpuOutput() const override {
+    return false;
+  }
+
+  std::vector<std::unique_ptr<exec::Operator>> createReplacements(
+      const exec::Operator* /*op*/,
+      const core::PlanNodePtr& /*planNode*/,
+      exec::DriverCtx* /*ctx*/,
+      int32_t /*operatorId*/) const override {
+    return {}; // Keep original operator
+  }
+
+  bool keepOperator() const override {
+    return true;
+  }
+};
+
 /// AssignUniqueIdAdapter - Replaces with CudfAssignUniqueId
 class AssignUniqueIdAdapter : public OperatorAdapter {
  public:
@@ -692,6 +761,7 @@ class CallbackSinkAdapter : public OperatorAdapter {
   }
 };
 
+<<<<<<< HEAD
 /// TopNRowNumberAdapter - Replaces with CudfTopNRowNumber
 class TopNRowNumberAdapter : public OperatorAdapter {
  public:
@@ -979,6 +1049,7 @@ void registerAllOperatorAdapters() {
   registry.registerAdapter(std::make_unique<LimitAdapter>());
   registry.registerAdapter(std::make_unique<LocalPartitionAdapter>());
   registry.registerAdapter(std::make_unique<LocalExchangeAdapter>());
+  registry.registerAdapter(std::make_unique<LocalMergeAdapter>());
   registry.registerAdapter(std::make_unique<AssignUniqueIdAdapter>());
   registry.registerAdapter(std::make_unique<ValuesAdapter>());
   registry.registerAdapter(std::make_unique<CallbackSinkAdapter>());

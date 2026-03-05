@@ -22,6 +22,7 @@
 #include "velox/exec/tests/utils/AssertQueryBuilder.h"
 #include "velox/exec/tests/utils/OperatorTestBase.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
+#include "velox/type/Timestamp.h"
 
 #include <cmath>
 
@@ -206,6 +207,49 @@ TEST_F(AggregationTest, global) {
       "SELECT sum(c1), sum(c2), sum(c4), sum(c5), "
       "min(c1), min(c2), min(c3), min(c4), min(c5), "
       "max(c1), max(c2), max(c3), max(c4), max(c5) FROM tmp");
+}
+
+TEST_F(AggregationTest, minMaxTimestampGlobal) {
+  std::vector<std::optional<Timestamp>> timestamps = {
+      Timestamp(1609459200, 0), // 2021-01-01 00:00:00
+      Timestamp(1609459200, 500000000), // 2021-01-01 00:00:00.500
+      Timestamp(1609545600, 0), // 2021-01-02 00:00:00
+      std::nullopt,
+      Timestamp(1609459199, 900000000) // 2020-12-31 23:59:59.900
+  };
+
+  auto data = makeRowVector(
+      {makeNullableFlatVector<Timestamp>(timestamps, TIMESTAMP())});
+  createDuckDbTable({data});
+
+  auto plan = PlanBuilder()
+                  .values({data})
+                  .singleAggregation({}, {"min(c0)", "max(c0)"})
+                  .planNode();
+
+  assertQuery(plan, "SELECT min(c0), max(c0) FROM tmp");
+}
+
+TEST_F(AggregationTest, minMaxTimestampGroupBy) {
+  std::vector<std::optional<Timestamp>> timestamps = {
+      Timestamp(1609459200, 0), // 2021-01-01 00:00:00
+      std::nullopt,
+      Timestamp(1609545600, 0), // 2021-01-02 00:00:00
+      Timestamp(1609459199, 0), // 2020-12-31 23:59:59
+      Timestamp(1609632000, 0) // 2021-01-03 00:00:00
+  };
+
+  auto data = makeRowVector(
+      {makeFlatVector<int32_t>({1, 1, 2, 2, 2}),
+       makeNullableFlatVector<Timestamp>(timestamps, TIMESTAMP())});
+  createDuckDbTable({data});
+
+  auto plan = PlanBuilder()
+                  .values({data})
+                  .singleAggregation({"c0"}, {"min(c1)", "max(c1)"})
+                  .planNode();
+
+  assertQuery(plan, "SELECT c0, min(c1), max(c1) FROM tmp GROUP BY c0");
 }
 
 TEST_F(AggregationTest, singleBigintKey) {
@@ -445,6 +489,156 @@ TEST_F(AggregationTest, DISABLED_countStarGlobal) {
   assertQuery(op, "SELECT count(*) FROM tmp WHERE c0 > 10");
 }
 
+TEST_F(AggregationTest, countStarGlobalNonZeroRowsColumns) {
+  auto data = makeRowVector({
+      makeFlatVector<int64_t>({1, 2, 3, 4}),
+  });
+  createDuckDbTable({data});
+
+  auto op = PlanBuilder()
+                .values({data})
+                .partialAggregation({}, {"count(*)"})
+                .finalAggregation()
+                .planNode();
+
+  assertQuery(op, "SELECT count(*) FROM tmp");
+}
+
+TEST_F(AggregationTest, countStarGlobalZeroRows) {
+  auto data = makeRowVector({
+      makeFlatVector<int64_t>({1, 2, 3, 4}),
+  });
+  createDuckDbTable({data});
+
+  auto op = PlanBuilder()
+                .values({data})
+                .filter("c0 > 10")
+                .partialAggregation({}, {"count(*)"})
+                .finalAggregation()
+                .planNode();
+
+  assertQuery(op, "SELECT count(*) FROM tmp WHERE c0 > 10");
+}
+
+TEST_F(AggregationTest, countStarGlobalZeroColumns) {
+  auto data = makeRowVector({
+      makeFlatVector<int64_t>({1, 2, 3, 4}),
+  });
+  createDuckDbTable({data});
+
+  auto op = PlanBuilder()
+                .values({data})
+                .filter("c0 > 0")
+                .project({})
+                .partialAggregation({}, {"count(*)"})
+                .finalAggregation()
+                .planNode();
+
+  assertQuery(op, "SELECT count(*) FROM tmp WHERE c0 > 0");
+}
+
+TEST_F(AggregationTest, countStarGlobalSingleZeroColumns) {
+  auto data = makeRowVector({
+      makeFlatVector<int64_t>({1, 2, 3, 4}),
+  });
+  createDuckDbTable({data});
+
+  auto op = PlanBuilder()
+                .values({data})
+                .filter("c0 > 0")
+                .project({})
+                .singleAggregation({}, {"count(*)"})
+                .planNode();
+
+  assertQuery(op, "SELECT count(*) FROM tmp WHERE c0 > 0");
+}
+
+TEST_F(AggregationTest, countStarGlobalPartialIntermediateFinalZeroColumns) {
+  auto data = makeRowVector({
+      makeFlatVector<int64_t>({1, 2, 3, 4}),
+  });
+  createDuckDbTable({data});
+
+  auto op = PlanBuilder()
+                .values({data})
+                .filter("c0 > 0")
+                .project({})
+                .partialAggregation({}, {"count(*)"})
+                .intermediateAggregation()
+                .finalAggregation()
+                .planNode();
+
+  assertQuery(op, "SELECT count(*) FROM tmp WHERE c0 > 0");
+}
+
+TEST_F(AggregationTest, countStarGlobalPartialFinalZeroColumnsLocalPartition) {
+  auto data = makeRowVector({
+      makeFlatVector<int64_t>({1, 2, 3, 4}),
+  });
+  createDuckDbTable({data});
+
+  auto plan = PlanBuilder()
+                  .values({data})
+                  .filter("c0 > 0")
+                  .project({})
+                  .partialAggregation({}, {"count(*)"})
+                  .localPartitionRoundRobin()
+                  .finalAggregation()
+                  .planNode();
+
+  AssertQueryBuilder(duckDbQueryRunner_)
+      .config(core::QueryConfig::kMaxLocalExchangePartitionCount, "2")
+      .plan(plan)
+      .assertResults("SELECT count(*) FROM tmp WHERE c0 > 0");
+}
+
+TEST_F(AggregationTest, countStarVsCountColumnSingleGlobalNulls) {
+  auto data = makeRowVector({
+      makeNullableFlatVector<int64_t>({1, std::nullopt, 2, std::nullopt}),
+  });
+  createDuckDbTable({data});
+
+  auto op = PlanBuilder()
+                .values({data})
+                .singleAggregation({}, {"count(*)", "count(c0)"})
+                .planNode();
+
+  assertQuery(op, "SELECT count(*), count(c0) FROM tmp");
+}
+
+TEST_F(AggregationTest, countStarVsCountColumnPartialFinalGlobalNulls) {
+  auto data = makeRowVector({
+      makeNullableFlatVector<int64_t>({1, std::nullopt, 2, std::nullopt}),
+  });
+  createDuckDbTable({data});
+
+  auto op = PlanBuilder()
+                .values({data})
+                .partialAggregation({}, {"count(*)", "count(c0)"})
+                .finalAggregation()
+                .planNode();
+
+  assertQuery(op, "SELECT count(*), count(c0) FROM tmp");
+}
+
+TEST_F(
+    AggregationTest,
+    countStarVsCountColumnPartialIntermediateFinalGlobalNulls) {
+  auto data = makeRowVector({
+      makeNullableFlatVector<int64_t>({1, std::nullopt, 2, std::nullopt}),
+  });
+  createDuckDbTable({data});
+
+  auto op = PlanBuilder()
+                .values({data})
+                .partialAggregation({}, {"count(*)", "count(c0)"})
+                .intermediateAggregation()
+                .finalAggregation()
+                .planNode();
+
+  assertQuery(op, "SELECT count(*), count(c0) FROM tmp");
+}
+
 TEST_F(AggregationTest, countSingleGroupBy) {
   auto vectors = makeVectors(rowType_, 10, 100);
   createDuckDbTable(vectors);
@@ -476,6 +670,23 @@ TEST_F(AggregationTest, countPartialFinalGroupBy) {
       op, "SELECT " + keyName + ", count(*) FROM tmp GROUP BY " + keyName);
 }
 
+TEST_F(AggregationTest, countPartialIntermediateFinalGroupBy) {
+  auto vectors = makeVectors(rowType_, 10, 100);
+  createDuckDbTable(vectors);
+
+  std::string keyName = "c0";
+  std::vector<std::string> aggregates = {"count(0)"};
+  auto op = PlanBuilder()
+                .values(vectors)
+                .partialAggregation({keyName}, aggregates)
+                .intermediateAggregation()
+                .finalAggregation()
+                .planNode();
+
+  assertQuery(
+      op, "SELECT " + keyName + ", count(*) FROM tmp GROUP BY " + keyName);
+}
+
 TEST_F(AggregationTest, countSingleGlobal) {
   auto vectors = makeVectors(rowType_, 10, 100);
   createDuckDbTable(vectors);
@@ -497,6 +708,21 @@ TEST_F(AggregationTest, countPartialFinalGlobal) {
   auto op = PlanBuilder()
                 .values(vectors)
                 .partialAggregation({}, aggregates)
+                .finalAggregation()
+                .planNode();
+
+  assertQuery(op, "SELECT count(*) FROM tmp");
+}
+
+TEST_F(AggregationTest, countPartialIntermediateFinalGlobal) {
+  auto vectors = makeVectors(rowType_, 10, 100);
+  createDuckDbTable(vectors);
+
+  std::vector<std::string> aggregates = {"count(0)"};
+  auto op = PlanBuilder()
+                .values(vectors)
+                .partialAggregation({}, aggregates)
+                .intermediateAggregation()
                 .finalAggregation()
                 .planNode();
 

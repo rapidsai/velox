@@ -433,8 +433,6 @@ void CudfConfig::initialize(
   if (config.find(kCudfExchangeLogLevel) != config.end()) {
     exchangeLogLevel = folly::to<int32_t>(config[kCudfExchangeLogLevel]);
   }
-
->>>>>>> devavret/ibm-2026-02-21+streamingaggs+cudfbatchconcat
 }
 
 } // namespace facebook::velox::cudf_velox
