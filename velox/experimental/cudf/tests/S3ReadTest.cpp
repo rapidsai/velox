@@ -84,7 +84,9 @@ TEST_F(S3ReadTest, s3ReadTest) {
       std::make_shared<facebook::velox::connector::hive::HiveTableHandle>(
           kCudfHiveConnectorId,
           "int_table",
+          false,
           common::SubfieldFilters{},
+          nullptr,
           nullptr);
   auto plan = PlanBuilder(pool())
                   .startTableScan()

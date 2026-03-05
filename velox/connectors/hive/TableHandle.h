@@ -165,6 +165,7 @@ class HiveTableHandle : public ConnectorTableHandle {
   HiveTableHandle(
       std::string connectorId,
       const std::string& tableName,
+      bool filterPushdownEnabled,
       common::SubfieldFilters subfieldFilters,
       const core::TypedExprPtr& remainingFilter,
       const RowTypePtr& dataColumns = nullptr,
@@ -178,36 +179,13 @@ class HiveTableHandle : public ConnectorTableHandle {
   HiveTableHandle(
       std::string connectorId,
       const std::string& tableName,
+      bool filterPushdownEnabled,
       common::SubfieldFilters subfieldFilters,
       const core::TypedExprPtr& remainingFilter,
       const RowTypePtr& dataColumns,
       const std::unordered_map<std::string, std::string>& tableParameters,
       std::vector<HiveColumnHandlePtr> filterColumnHandles,
       double sampleRate = 1.0);
-
-#ifdef VELOX_ENABLE_BACKWARD_COMPATIBILITY
-  /// Backward-compatible constructors that accept and ignore the deprecated
-  /// 'filterPushdownEnabled' param.
-  HiveTableHandle(
-      std::string connectorId,
-      const std::string& tableName,
-      bool /*filterPushdownEnabled*/,
-      common::SubfieldFilters subfieldFilters,
-      const core::TypedExprPtr& remainingFilter,
-      const RowTypePtr& dataColumns = nullptr,
-      const std::unordered_map<std::string, std::string>& tableParameters = {},
-      std::vector<HiveColumnHandlePtr> filterColumnHandles = {},
-      double sampleRate = 1.0)
-      : HiveTableHandle(
-            std::move(connectorId),
-            tableName,
-            std::move(subfieldFilters),
-            remainingFilter,
-            dataColumns,
-            tableParameters,
-            std::move(filterColumnHandles),
-            sampleRate) {}
-#endif
 
   const std::string& tableName() const {
     return tableName_;
@@ -223,6 +201,10 @@ class HiveTableHandle : public ConnectorTableHandle {
 
   bool needsIndexSplit() const override {
     return true;
+  }
+
+  [[deprecated]] bool isFilterPushdownEnabled() const {
+    return filterPushdownEnabled_;
   }
 
   /// Single field filters that can be applied efficiently during file reading.
@@ -285,6 +267,7 @@ class HiveTableHandle : public ConnectorTableHandle {
 
  private:
   const std::string tableName_;
+  const bool filterPushdownEnabled_;
   const common::SubfieldFilters subfieldFilters_;
   const core::TypedExprPtr remainingFilter_;
   const double sampleRate_;
