@@ -761,7 +761,6 @@ class CallbackSinkAdapter : public OperatorAdapter {
   }
 };
 
-<<<<<<< HEAD
 /// TopNRowNumberAdapter - Replaces with CudfTopNRowNumber
 class TopNRowNumberAdapter : public OperatorAdapter {
  public:
