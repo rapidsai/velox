@@ -841,7 +841,14 @@ AggregationInputChannels buildAggregationInputChannels(
     VELOX_CHECK(aggInputs.size() <= 1);
     if (aggInputs.empty()) {
       if (isCountFunctionName(aggregate.call->name())) {
-        aggInputs.push_back(kConstantChannel);
+        // Use fallbackChannel instead of kConstantChannel so that
+        // table_view::select() gets a valid column index in the streaming
+        // aggregation path. Set a non-null constant so that
+        // CountAggregator::isCountAll() correctly identifies this as count(*)
+        // and uses INCLUDE null policy.
+        result.constants[i] = BaseVector::createConstant(
+            BIGINT(), variant(static_cast<int64_t>(1)), 1, operatorCtx.pool());
+        aggInputs.push_back(fallbackChannel);
       } else {
         aggInputs.push_back(fallbackChannel);
       }
