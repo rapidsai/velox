@@ -114,11 +114,13 @@ class CudfHiveConnectorTestBase
   makeTableHandle(
       const std::string& tableName = "parquet_table",
       const RowTypePtr& dataColumns = nullptr,
+      bool filterPushdownEnabled = false,
       common::SubfieldFilters subfieldFilters = {},
       const core::TypedExprPtr& remainingFilterExpr = nullptr) {
     return std::make_shared<facebook::velox::connector::hive::HiveTableHandle>(
         kCudfHiveConnectorId,
         tableName,
+        filterPushdownEnabled,
         std::move(subfieldFilters),
         remainingFilterExpr,
         dataColumns);

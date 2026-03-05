@@ -62,6 +62,7 @@ TEST(TableHandleTest, hiveTableHandleIndexSupport) {
       std::make_shared<connector::hive::HiveTableHandle>(
           "test-connector",
           "test_table",
+          /*filterPushdownEnabled=*/true,
           common::SubfieldFilters{},
           /*remainingFilter=*/nullptr,
           /*dataColumns=*/nullptr,
@@ -76,6 +77,7 @@ TEST(TableHandleTest, hiveTableHandleIndexSupport) {
       std::make_shared<connector::hive::HiveTableHandle>(
           "test-connector",
           "test_table",
+          /*filterPushdownEnabled=*/true,
           common::SubfieldFilters{},
           /*remainingFilter=*/nullptr,
           /*dataColumns=*/nullptr,

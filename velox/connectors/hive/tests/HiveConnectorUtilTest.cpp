@@ -103,6 +103,7 @@ TEST_F(HiveConnectorUtilTest, configureReaderOptions) {
     return std::make_shared<hive::HiveTableHandle>(
         "testConnectorId",
         "testTable",
+        false,
         common::SubfieldFilters{},
         nullptr,
         nullptr,
@@ -381,6 +382,7 @@ TEST_F(HiveConnectorUtilTest, cacheRetention) {
     auto tableHandle = std::make_shared<hive::HiveTableHandle>(
         "testConnectorId",
         "testTable",
+        false,
         common::SubfieldFilters{},
         nullptr,
         nullptr,
