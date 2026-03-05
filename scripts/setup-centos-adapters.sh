@@ -96,7 +96,36 @@ function install_cuda {
     libcufile-devel-"$dashed" \
     libnvjitlink-devel-"$dashed" \
     cuda-nvml-devel-"$dashed" \
-    numactl-devel
+    libnvjitlink-devel-"$dashed"
+  dnf_install numactl-devel
+}
+
+function install_cuda_runtime {
+  # Installs only CUDA runtime libraries (no -devel packages)
+  # For use in runtime containers that don't need headers/static libs
+  local arch
+  arch="$(uname -m)"
+  local repo_url
+  version="${1:-$VELOX_CUDA_VERSION}"
+
+  if [[ $arch == "x86_64" ]]; then
+    repo_url="https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo"
+  elif [[ $arch == "aarch64" ]]; then
+    repo_url="https://developer.download.nvidia.com/compute/cuda/repos/rhel9/sbsa/cuda-rhel9.repo"
+  else
+    echo "Unsupported architecture: $arch" >&2
+    return 1
+  fi
+
+  dnf config-manager --add-repo "$repo_url"
+  local dashed
+  dashed="$(echo "$version" | tr '.' '-')"
+  dnf install -y \
+    cuda-cudart-"$dashed" \
+    cuda-compat-"$dashed" \
+    libcufile-"$dashed" \
+    cuda-nvrtc-"$dashed" \
+    libnvjitlink-"$dashed"
 }
 
 function install_adapters_deps_from_dnf {

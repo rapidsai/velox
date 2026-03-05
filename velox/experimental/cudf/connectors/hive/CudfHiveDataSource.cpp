@@ -41,6 +41,7 @@
 #include <cudf/io/datasource.hpp>
 #include <cudf/io/experimental/hybrid_scan.hpp>
 #include <cudf/io/parquet.hpp>
+#include <cudf/io/parquet_metadata.hpp>
 #include <cudf/io/text/byte_range_info.hpp>
 #include <cudf/io/types.hpp>
 #include <cudf/stream_compaction.hpp>
@@ -515,7 +516,7 @@ void CudfHiveDataSource::setupCudfDataSourceAndOptions() {
     readerOptions_.set_filter(*subfieldFilterExpr_);
   }
 
-  // Set column projection if needed
+  // Set column projection if needed, using mapped physical column names
   if (readColumnNames_.size()) {
     readerOptions_.set_column_names(readColumnNames_);
   }

@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
 #include <unordered_map>
 
@@ -40,6 +41,20 @@ struct CudfConfig {
   static constexpr const char* kCudfOutputMr{"cudf.output_mr"};
   static constexpr const char* kCudfAllowCpuFallback{"cudf.allow_cpu_fallback"};
   static constexpr const char* kCudfLogFallback{"cudf.log_fallback"};
+  static constexpr const char* kCudfForceReplace{"cudf.force_replace"};
+  static constexpr const char* kCudfExchange{"cudf.exchange"};
+  static constexpr const char* kUcxxErrorHandling{"ucxx.error_handling"};
+  static constexpr const char* kCudfIntraNodeExchange{
+      "cudf.intra_node_exchange"};
+  static constexpr const char* kUcxxBlockingPolling{"ucxx.blocking_polling"};
+  static constexpr const char* kCudfExchangeLogLevel{
+      "cudf.exchange_log_level"};
+  static constexpr const char* kCudfBatchSizeMinThreshold{
+      "cudf.batch_size_min_threshold"};
+  static constexpr const char* kCudfBatchSizeMaxThreshold{
+      "cudf.batch_size_max_threshold"};
+  static constexpr const char* kCudfConcatOptimizationEnabled{
+      "cudf.concat_optimization_enabled"};
 
   /// Query session configs for the cuDF Operators.
   static constexpr const char* kCudfTopNBatchSize{"cudf.topk_batch_size"};
@@ -53,7 +68,7 @@ struct CudfConfig {
 
   /// Enable cudf by default.
   /// Clients can disable here and enable it via the QueryConfig as well.
-  bool enabled{true};
+  bool enabled{false};
 
   /// Enable debug printing.
   bool debugEnabled{false};
@@ -100,6 +115,43 @@ struct CudfConfig {
 
   // Query config key for the TopN batch size in the cuDF TopN operator.
   int32_t topNBatchSize{5};
+
+  /// Force replacement of operators. Throws an error if a replacement fails.
+  bool forceReplace{false};
+
+  /// Whether cudf exchange is enabled.
+  bool exchange{false};
+
+  /// Whether to enable error handling in UCXX endpoints.
+  bool ucxxErrorHandling{true};
+
+  /// Whether intra-node exchange optimization is enabled.
+  /// When disabled, all transfers use UCXX even within the same node.
+  bool intraNodeExchange{false};
+
+  /// Whether to use blocking polling in UCXX.
+  bool ucxxBlockingPolling{true};
+
+  /// VLOG level for cudf-exchange source files (0 = silent, 1-3 = increasing
+  /// verbosity). Applied via google::SetVLOGLevel when Communicator starts.
+  int32_t exchangeLogLevel{0};
+
+  /// Whether to insert CudfBatchConcat operators before supported Cudf
+  /// operators.
+  /// This can improve performance by reducing the number of cuda kernel
+  /// launches on addInput of certain operators by collecting a minimum number
+  /// of rows before concatenating and passing on to the next operator.
+  /// This batch size is determined by batchSizeMinThreshold and
+  /// batchSizeMaxThreshold
+  bool concatOptimizationEnabled{false};
+
+  /// Minimum rows to accumulate before GPU-side concatenation in
+  /// `CudfBatchConcat` (default 100m).
+  int32_t batchSizeMinThreshold{100'000'000};
+
+  /// Maximum rows allowed in a concatenated batch (user configurable).
+  /// When not set, cuDF's own `size_type::max()` is used.
+  std::optional<int32_t> batchSizeMaxThreshold;
 };
 
 } // namespace facebook::velox::cudf_velox

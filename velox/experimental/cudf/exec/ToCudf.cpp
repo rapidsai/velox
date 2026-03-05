@@ -14,16 +14,10 @@
  * limitations under the License.
  */
 
-#include "velox/experimental/cudf/CudfConfig.h"
-#include "velox/experimental/cudf/connectors/hive/CudfHiveConnector.h"
-#include "velox/experimental/cudf/connectors/hive/CudfHiveDataSource.h"
-#include "velox/experimental/cudf/exec/CudfAssignUniqueId.h"
+ #include "velox/experimental/cudf/CudfConfig.h"
 #include "velox/experimental/cudf/exec/CudfConversion.h"
-#include "velox/experimental/cudf/exec/CudfFilterProject.h"
 #include "velox/experimental/cudf/exec/CudfHashAggregation.h"
 #include "velox/experimental/cudf/exec/CudfHashJoin.h"
-#include "velox/experimental/cudf/exec/CudfLimit.h"
-#include "velox/experimental/cudf/exec/CudfLocalPartition.h"
 #include "velox/experimental/cudf/exec/CudfOperator.h"
 #include "velox/experimental/cudf/exec/CudfOrderBy.h"
 #include "velox/experimental/cudf/exec/CudfTopN.h"
@@ -35,20 +29,8 @@
 #include "velox/experimental/cudf/expression/JitExpression.h"
 
 #include "folly/Conv.h"
-#include "velox/exec/AssignUniqueId.h"
-#include "velox/exec/CallbackSink.h"
 #include "velox/exec/Driver.h"
-#include "velox/exec/FilterProject.h"
-#include "velox/exec/HashAggregation.h"
-#include "velox/exec/HashBuild.h"
-#include "velox/exec/HashProbe.h"
-#include "velox/exec/Limit.h"
 #include "velox/exec/Operator.h"
-#include "velox/exec/OrderBy.h"
-#include "velox/exec/StreamingAggregation.h"
-#include "velox/exec/TableScan.h"
-#include "velox/exec/Task.h"
-#include "velox/exec/TopN.h"
 #include "velox/exec/Values.h"
 
 #include <cudf/detail/nvtx/ranges.hpp>
@@ -58,6 +40,12 @@
 #include <iostream>
 
 static const std::string kCudfAdapterName = "cuDF";
+DEFINE_bool(velox_cudf_enabled, true, "Enable cuDF-Velox acceleration");
+DEFINE_string(velox_cudf_memory_resource, "async", "Memory resource for cuDF");
+DEFINE_bool(velox_cudf_debug, false, "Enable debug printing");
+DEFINE_bool(velox_cudf_exchange, true, "Enable cuDF exchange");
+
+using namespace facebook::velox::cudf_exchange;
 
 namespace facebook::velox::cudf_velox {
 
@@ -284,6 +272,7 @@ bool CompileState::compile(bool allowCpuFallback) {
     }
   }
 
+  VLOG(3) << "- CompileState::compile";
   return replacementsMade;
 }
 
@@ -396,6 +385,17 @@ void CudfConfig::initialize(
   if (config.find(kCudfOutputMr) != config.end()) {
     outputMemoryResource = config[kCudfOutputMr];
   }
+  if (config.find(kCudfBatchSizeMinThreshold) != config.end()) {
+    batchSizeMinThreshold =
+        folly::to<int32_t>(config[kCudfBatchSizeMinThreshold]);
+  }
+  if (config.find(kCudfBatchSizeMaxThreshold) != config.end()) {
+    batchSizeMaxThreshold =
+        folly::to<int32_t>(config[kCudfBatchSizeMaxThreshold]);
+  }
+  if (config.find(kCudfConcatOptimizationEnabled) != config.end()) {
+    concatOptimizationEnabled = folly::to<bool>(config[kCudfConcatOptimizationEnabled]);
+  }
   if (config.find(kCudfFunctionNamePrefix) != config.end()) {
     functionNamePrefix = config[kCudfFunctionNamePrefix];
   }
@@ -418,6 +418,23 @@ void CudfConfig::initialize(
   if (config.find(kCudfTopNBatchSize) != config.end()) {
     topNBatchSize = folly::to<int32_t>(config[kCudfTopNBatchSize]);
   }
+  if (config.find(kCudfExchange) != config.end()) {
+    exchange = folly::to<bool>(config[kCudfExchange]);
+  }
+  if (config.find(kCudfIntraNodeExchange) != config.end()) {
+    intraNodeExchange = folly::to<bool>(config[kCudfIntraNodeExchange]);
+  }
+  if (config.find(kUcxxErrorHandling) != config.end()) {
+    ucxxErrorHandling = folly::to<bool>(config[kUcxxErrorHandling]);
+  }
+  if (config.find(kUcxxBlockingPolling) != config.end()) {
+    ucxxBlockingPolling = folly::to<bool>(config[kUcxxBlockingPolling]);
+  }
+  if (config.find(kCudfExchangeLogLevel) != config.end()) {
+    exchangeLogLevel = folly::to<int32_t>(config[kCudfExchangeLogLevel]);
+  }
+
+>>>>>>> devavret/ibm-2026-02-21+streamingaggs+cudfbatchconcat
 }
 
 } // namespace facebook::velox::cudf_velox

@@ -1,3 +1,4 @@
+#!/bin/bash
 # Copyright (c) Facebook, Inc. and its affiliates.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,19 +13,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: Enhancement
-description: Raise a potential enhancement.
-labels: [enhancement]
-body:
-  - type: markdown
-    attributes:
-      value: |
-        Please add as much relevant information regarding your enhancement to the form below as you can.
-        The enhancement can be a feature or additional documentation. Thank you!
-  - type: textarea
-    id: description
-    attributes:
-      label: Description
-      description: Please describe the potential enhancement and its use cases.
-    validations:
-      required: true
+docker build --no-cache -t velox-dev-ucx-test-1.19.0.img:latest .
