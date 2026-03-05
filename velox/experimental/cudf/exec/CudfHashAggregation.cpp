@@ -1169,7 +1169,7 @@ void CudfHashAggregation::computeFinalGroupbyStreaming(CudfVectorPtr tbl) {
   cudf::detail::join_streams(
       std::vector<rmm::cuda_stream_view>{inputTableStream}, finalStream);
 
-  auto concatenatedTable = cudf::concatenate(tablesToConcat, finalStream);
+  auto concatenatedTable = cudf::concatenate(tablesToConcat, finalStream, get_output_mr());
   auto compactedOutput = doGroupByAggregation(
       concatenatedTable->view(),
       groupingKeyOutputChannels_,
@@ -1201,7 +1201,7 @@ void CudfHashAggregation::computeSingleGroupbyStreaming(CudfVectorPtr tbl) {
         partialOutputStream);
 
     auto concatenatedTable =
-        cudf::concatenate(tablesToConcat, partialOutputStream);
+        cudf::concatenate(tablesToConcat, partialOutputStream, get_output_mr());
 
     auto compactedOutput = doGroupByAggregation(
         concatenatedTable->view(),
