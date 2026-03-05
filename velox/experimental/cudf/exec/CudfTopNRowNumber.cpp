@@ -185,7 +185,7 @@ RowVectorPtr CudfTopNRowNumber::getOutput() {
   // Concatenate all input batches
   // Use inputType_ (not outputType_) because inputs don't have row_number
   // column
-  auto concatenated = getConcatenatedTable(inputs_, inputType_, stream);
+  auto concatenated = getConcatenatedTable(inputs_, inputType_, stream, get_output_mr());
   inputs_.clear();
 
   // Compute deduplication
