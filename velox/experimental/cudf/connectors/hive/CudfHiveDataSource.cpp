@@ -149,27 +149,38 @@ CudfHiveDataSource::CudfHiveDataSource(
 
   // Build a combined AST for all subfield filters once. This is query-constant
   // and doesn't depend on split-specific state.
+  // Skip if only unsupported filter types (e.g., kTimestampRange) are present.
   if (!subfieldFilters_.empty()) {
-    const RowTypePtr readerFilterType = [&] {
-      if (tableHandle_->dataColumns()) {
-        std::vector<std::string> newNames;
-        std::vector<TypePtr> newTypes;
-
-        for (const auto& name : readColumnNames_) {
-          // Ensure all columns being read are available to the filter.
-          auto parsedType = tableHandle_->dataColumns()->findChild(name);
-          newNames.emplace_back(std::move(name));
-          newTypes.push_back(parsedType);
-        }
-
-        return ROW(std::move(newNames), std::move(newTypes));
-      } else {
-        return outputType_;
+    bool hasPushableFilter = false;
+    for (const auto& [_, filterPtr] : subfieldFilters_) {
+      if (filterPtr &&
+          filterPtr->kind() != common::FilterKind::kTimestampRange) {
+        hasPushableFilter = true;
+        break;
       }
-    }();
+    }
 
-    subfieldFilterExpr_ = &createAstFromSubfieldFilters(
-        subfieldFilters_, subfieldTree_, subfieldScalars_, readerFilterType);
+    if (hasPushableFilter) {
+      const RowTypePtr readerFilterType = [&] {
+        if (tableHandle_->dataColumns()) {
+          std::vector<std::string> newNames;
+          std::vector<TypePtr> newTypes;
+
+          for (const auto& name : readColumnNames_) {
+            auto parsedType = tableHandle_->dataColumns()->findChild(name);
+            newNames.emplace_back(std::move(name));
+            newTypes.push_back(parsedType);
+          }
+
+          return ROW(std::move(newNames), std::move(newTypes));
+        } else {
+          return outputType_;
+        }
+      }();
+
+      subfieldFilterExpr_ = &createAstFromSubfieldFilters(
+          subfieldFilters_, subfieldTree_, subfieldScalars_, readerFilterType);
+    }
   }
 
   VELOX_CHECK_NOT_NULL(fileHandleFactory_, "No FileHandleFactory present");
