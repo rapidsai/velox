@@ -509,9 +509,14 @@ cudf::ast::expression const& createAstFromSubfieldFilters(
 
   std::vector<const cudf::ast::expression*> exprRefs;
 
-  // Build individual filter expressions.
+  // Build individual filter expressions, skipping unsupported types.
   for (const auto& [subfield, filterPtr] : subfieldFilters) {
     if (!filterPtr) {
+      continue;
+    }
+    // Skip filter types that can't be pushed into the parquet reader.
+    // These will be handled by the remaining filter on GPU post-scan.
+    if (filterPtr->kind() == common::FilterKind::kTimestampRange) {
       continue;
     }
     auto const& expr = createAstFromSubfieldFilter(
@@ -519,7 +524,13 @@ cudf::ast::expression const& createAstFromSubfieldFilters(
     exprRefs.push_back(&expr);
   }
 
-  VELOX_CHECK_GT(exprRefs.size(), 0, "No subfield filters provided");
+  if (exprRefs.empty()) {
+    // All filters were unsupported — no subfield filter to push down.
+    // Return a pass-through (always true).
+    using ColumnRef = cudf::ast::column_reference;
+    auto const& col0 = tree.push(ColumnRef{0});
+    return tree.push(Operation{Op::EQUAL, col0, col0});
+  }
 
   if (exprRefs.size() == 1) {
     return *exprRefs[0];
