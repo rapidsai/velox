@@ -496,23 +496,37 @@ cudf::ast::expression const& createAstFromSubfieldFilter(
       auto tsType = timestampType.value_or(
           cudf::data_type{cudf::type_id::TIMESTAMP_MILLISECONDS});
 
-      auto makeTimestampScalar =
-          [&](const Timestamp& ts) -> std::unique_ptr<cudf::scalar> {
+      // Helper to create a timestamp scalar and its AST literal, pushing
+      // the scalar into 'scalars' for lifetime management.
+      auto addTimestampLiteral = [&](const Timestamp& ts)
+          -> const cudf::ast::expression& {
         switch (tsType.id()) {
           case cudf::type_id::TIMESTAMP_MILLISECONDS: {
             using T = cudf::timestamp_ms;
-            return std::make_unique<cudf::timestamp_scalar<T>>(
-                T{cudf::duration_ms{ts.toMillis()}}, true, stream, mr);
+            using S = cudf::timestamp_scalar<T>;
+            scalars.emplace_back(std::make_unique<S>(
+                T{cudf::duration_ms{ts.toMillis()}}, true, stream, mr));
+            stream.synchronize();
+            return tree.push(
+                cudf::ast::literal{*static_cast<S*>(scalars.back().get())});
           }
           case cudf::type_id::TIMESTAMP_MICROSECONDS: {
             using T = cudf::timestamp_us;
-            return std::make_unique<cudf::timestamp_scalar<T>>(
-                T{cudf::duration_us{ts.toMicros()}}, true, stream, mr);
+            using S = cudf::timestamp_scalar<T>;
+            scalars.emplace_back(std::make_unique<S>(
+                T{cudf::duration_us{ts.toMicros()}}, true, stream, mr));
+            stream.synchronize();
+            return tree.push(
+                cudf::ast::literal{*static_cast<S*>(scalars.back().get())});
           }
           case cudf::type_id::TIMESTAMP_NANOSECONDS: {
             using T = cudf::timestamp_ns;
-            return std::make_unique<cudf::timestamp_scalar<T>>(
-                T{cudf::duration_ns{ts.toNanos()}}, true, stream, mr);
+            using S = cudf::timestamp_scalar<T>;
+            scalars.emplace_back(std::make_unique<S>(
+                T{cudf::duration_ns{ts.toNanos()}}, true, stream, mr));
+            stream.synchronize();
+            return tree.push(
+                cudf::ast::literal{*static_cast<S*>(scalars.back().get())});
           }
           default:
             VELOX_FAIL(
@@ -521,15 +535,8 @@ cudf::ast::expression const& createAstFromSubfieldFilter(
         }
       };
 
-      scalars.push_back(makeTimestampScalar(range->lower()));
-      stream.synchronize();
-      auto const& lowerLit =
-          tree.push(cudf::ast::literal{*scalars.back()});
-
-      scalars.push_back(makeTimestampScalar(range->upper()));
-      stream.synchronize();
-      auto const& upperLit =
-          tree.push(cudf::ast::literal{*scalars.back()});
+      auto const& lowerLit = addTimestampLiteral(range->lower());
+      auto const& upperLit = addTimestampLiteral(range->upper());
 
       // TimestampRange is always inclusive on both ends: lower <= col <= upper
       auto const& geExpr =
