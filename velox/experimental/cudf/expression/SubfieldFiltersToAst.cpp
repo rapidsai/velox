@@ -482,10 +482,18 @@ cudf::ast::expression const& createAstFromSubfieldFilter(
       return *result;
     }
 
-    default:
-      VELOX_NYI(
-          "Filter type {} not yet supported for subfield filter conversion",
-          static_cast<int>(filter.kind()));
+    // TimestampRange filter pushdown is not yet supported because the
+    // cuDF parquet reader applies subfield filters to raw (unconverted)
+    // timestamp data, causing a unit mismatch between the filter scalar
+    // and the column values. Fall through to return a pass-through so
+    // the remaining filter handles timestamps on GPU post-scan.
+    case common::FilterKind::kTimestampRange:
+    default: {
+      using Op = cudf::ast::ast_operator;
+      using Operation = cudf::ast::operation;
+      // col == col is always true (pass-through)
+      return tree.push(Operation{Op::EQUAL, columnRef, columnRef});
+    }
   }
 }
 
@@ -501,9 +509,14 @@ cudf::ast::expression const& createAstFromSubfieldFilters(
 
   std::vector<const cudf::ast::expression*> exprRefs;
 
-  // Build individual filter expressions.
+  // Build individual filter expressions, skipping unsupported types.
   for (const auto& [subfield, filterPtr] : subfieldFilters) {
     if (!filterPtr) {
+      continue;
+    }
+    // Skip filter types that can't be pushed into the parquet reader.
+    // These will be handled by the remaining filter on GPU post-scan.
+    if (filterPtr->kind() == common::FilterKind::kTimestampRange) {
       continue;
     }
     auto const& expr = createAstFromSubfieldFilter(
@@ -511,7 +524,13 @@ cudf::ast::expression const& createAstFromSubfieldFilters(
     exprRefs.push_back(&expr);
   }
 
-  VELOX_CHECK_GT(exprRefs.size(), 0, "No subfield filters provided");
+  if (exprRefs.empty()) {
+    // All filters were unsupported — no subfield filter to push down.
+    // Return a pass-through (always true).
+    using ColumnRef = cudf::ast::column_reference;
+    auto const& col0 = tree.push(ColumnRef{0});
+    return tree.push(Operation{Op::EQUAL, col0, col0});
+  }
 
   if (exprRefs.size() == 1) {
     return *exprRefs[0];

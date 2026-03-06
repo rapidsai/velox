@@ -147,6 +147,11 @@ class SubfieldFilterAstTest : public OperatorTestBase {
             veloxExpected = filter.testBytes(sv.data(), sv.size());
             break;
           }
+          case TypeKind::TIMESTAMP: {
+            auto v = fieldVec->asFlatVector<Timestamp>()->valueAt(i);
+            veloxExpected = filter.testTimestamp(v);
+            break;
+          }
           default:
             veloxExpected = true;
         }
@@ -916,6 +921,28 @@ TEST_F(SubfieldFilterAstTest, MultiRangeMixedFilters) {
 
   auto vec = makeTestVector(rowType, 100);
   testFilterExecution(rowType, columnName, *filter, vec, expr);
+}
+
+// TimestampRange pushdown is disabled (returns pass-through) because the
+// parquet reader applies filters to raw unconverted data. Verify it produces
+// a valid pass-through expression that doesn't crash.
+TEST_F(SubfieldFilterAstTest, TimestampRangePassthrough) {
+  const std::string columnName = "c0";
+  auto rowType = ROW({{columnName, TIMESTAMP()}});
+
+  auto lower = Timestamp(788918400, 0);
+  auto upper = Timestamp(820454400, 0);
+  auto filter =
+      std::make_unique<common::TimestampRange>(lower, upper, /*nullAllowed*/ false);
+
+  common::Subfield subfield(columnName);
+  cudf::ast::tree tree;
+  std::vector<std::unique_ptr<cudf::scalar>> scalars;
+  const auto& expr =
+      createAstFromSubfieldFilter(subfield, *filter, tree, scalars, rowType);
+  // Should produce a pass-through (col == col), no scalars needed
+  ASSERT_GT(tree.size(), 0UL);
+  EXPECT_EQ(scalars.size(), 0UL) << "Pass-through should not create scalars";
 }
 
 } // namespace
