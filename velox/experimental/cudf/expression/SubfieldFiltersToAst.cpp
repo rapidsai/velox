@@ -535,15 +535,38 @@ cudf::ast::expression const& createAstFromSubfieldFilter(
         }
       };
 
-      auto const& lowerLit = addTimestampLiteral(range->lower());
-      auto const& upperLit = addTimestampLiteral(range->upper());
+      // Check for min/max sentinel values that indicate unbounded range.
+      // Timestamp::max() and Timestamp::min() overflow when converted to
+      // milliseconds, so treat them as unbounded.
+      const bool lowerBounded =
+          range->lower() > Timestamp::minMillis();
+      const bool upperBounded =
+          range->upper() < Timestamp::maxMillis();
 
-      // TimestampRange is always inclusive on both ends: lower <= col <= upper
-      auto const& geExpr =
-          tree.push(Operation{Op::GREATER_EQUAL, columnRef, lowerLit});
-      auto const& leExpr =
-          tree.push(Operation{Op::LESS_EQUAL, columnRef, upperLit});
-      return tree.push(Operation{Op::NULL_LOGICAL_AND, geExpr, leExpr});
+      const cudf::ast::expression* lowerExpr = nullptr;
+      const cudf::ast::expression* upperExpr = nullptr;
+
+      if (lowerBounded) {
+        auto const& lowerLit = addTimestampLiteral(range->lower());
+        lowerExpr =
+            &tree.push(Operation{Op::GREATER_EQUAL, columnRef, lowerLit});
+      }
+      if (upperBounded) {
+        auto const& upperLit = addTimestampLiteral(range->upper());
+        upperExpr =
+            &tree.push(Operation{Op::LESS_EQUAL, columnRef, upperLit});
+      }
+
+      if (lowerExpr && upperExpr) {
+        return tree.push(
+            Operation{Op::NULL_LOGICAL_AND, *lowerExpr, *upperExpr});
+      } else if (lowerExpr) {
+        return *lowerExpr;
+      } else if (upperExpr) {
+        return *upperExpr;
+      }
+      // Both unbounded — pass-through (always true)
+      return tree.push(Operation{Op::EQUAL, columnRef, columnRef});
     }
 
     default:
