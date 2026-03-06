@@ -923,64 +923,26 @@ TEST_F(SubfieldFilterAstTest, MultiRangeMixedFilters) {
   testFilterExecution(rowType, columnName, *filter, vec, expr);
 }
 
-TEST_F(SubfieldFilterAstTest, TimestampRange) {
+// TimestampRange pushdown is disabled (returns pass-through) because the
+// parquet reader applies filters to raw unconverted data. Verify it produces
+// a valid pass-through expression that doesn't crash.
+TEST_F(SubfieldFilterAstTest, TimestampRangePassthrough) {
   const std::string columnName = "c0";
   auto rowType = ROW({{columnName, TIMESTAMP()}});
 
-  // Create a vector with known timestamp values
-  auto timestamps = makeFlatVector<Timestamp>(
-      100,
-      [](auto row) {
-        // Spread across 1992-01-01 to 1998-12-31
-        return Timestamp(row * 86400 + 694224000, 0); // seconds since epoch
-      });
-  auto vec = makeRowVector({columnName}, {timestamps});
-
-  // Filter: 1995-01-01 <= ts <= 1995-12-31
-  auto lower = Timestamp(788918400, 0); // 1995-01-01 00:00:00
-  auto upper = Timestamp(820454400, 0); // 1995-12-31 00:00:00
+  auto lower = Timestamp(788918400, 0);
+  auto upper = Timestamp(820454400, 0);
   auto filter =
       std::make_unique<common::TimestampRange>(lower, upper, /*nullAllowed*/ false);
 
-  // AST validation
   common::Subfield subfield(columnName);
   cudf::ast::tree tree;
   std::vector<std::unique_ptr<cudf::scalar>> scalars;
   const auto& expr =
       createAstFromSubfieldFilter(subfield, *filter, tree, scalars, rowType);
-  ASSERT_GT(tree.size(), 0UL) << "No expressions created for timestamp range";
-  EXPECT_EQ(scalars.size(), 2UL) << "Expected 2 scalars for timestamp range";
-
-  // Execution validation
-  testFilterExecution(rowType, columnName, *filter, vec, expr);
-}
-
-TEST_F(SubfieldFilterAstTest, TimestampRangeSingleValue) {
-  const std::string columnName = "c0";
-  auto rowType = ROW({{columnName, TIMESTAMP()}});
-
-  // Create a vector with a few known values
-  auto timestamps = makeFlatVector<Timestamp>(
-      10,
-      [](auto row) {
-        return Timestamp(788918400 + row * 3600, 0); // hourly from 1995-01-01
-      });
-  auto vec = makeRowVector({columnName}, {timestamps});
-
-  // Single-value range: exactly 1995-01-01 05:00:00
-  auto ts = Timestamp(788918400 + 5 * 3600, 0);
-  auto filter =
-      std::make_unique<common::TimestampRange>(ts, ts, /*nullAllowed*/ false);
-
-  common::Subfield subfield(columnName);
-  cudf::ast::tree tree;
-  std::vector<std::unique_ptr<cudf::scalar>> scalars;
-  const auto& expr =
-      createAstFromSubfieldFilter(subfield, *filter, tree, scalars, rowType);
+  // Should produce a pass-through (col == col), no scalars needed
   ASSERT_GT(tree.size(), 0UL);
-  EXPECT_EQ(scalars.size(), 2UL);
-
-  testFilterExecution(rowType, columnName, *filter, vec, expr);
+  EXPECT_EQ(scalars.size(), 0UL) << "Pass-through should not create scalars";
 }
 
 } // namespace
