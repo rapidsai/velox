@@ -482,6 +482,40 @@ cudf::ast::expression const& createAstFromSubfieldFilter(
       return *result;
     }
 
+    case common::FilterKind::kTimestampRange: {
+      using Op = cudf::ast::ast_operator;
+      using Operation = cudf::ast::operation;
+      using CudfTs = cudf::timestamp_ns;
+      using CudfTsScalar = cudf::timestamp_scalar<CudfTs>;
+
+      auto const* range =
+          dynamic_cast<const common::TimestampRange*>(&filter);
+      VELOX_CHECK_NOT_NULL(range, "Filter is not a TimestampRange");
+
+      // Convert Velox Timestamp to cudf timestamp_ns scalar
+      auto lowerNanos = range->lower().toNanos();
+      auto upperNanos = range->upper().toNanos();
+
+      scalars.emplace_back(std::make_unique<CudfTsScalar>(
+          CudfTs{cudf::duration_ns{lowerNanos}}, true, stream, mr));
+      stream.synchronize();
+      auto const& lowerLit = tree.push(
+          cudf::ast::literal{*static_cast<CudfTsScalar*>(scalars.back().get())});
+
+      scalars.emplace_back(std::make_unique<CudfTsScalar>(
+          CudfTs{cudf::duration_ns{upperNanos}}, true, stream, mr));
+      stream.synchronize();
+      auto const& upperLit = tree.push(
+          cudf::ast::literal{*static_cast<CudfTsScalar*>(scalars.back().get())});
+
+      // TimestampRange is always inclusive on both ends: lower <= col <= upper
+      auto const& geExpr =
+          tree.push(Operation{Op::GREATER_EQUAL, columnRef, lowerLit});
+      auto const& leExpr =
+          tree.push(Operation{Op::LESS_EQUAL, columnRef, upperLit});
+      return tree.push(Operation{Op::NULL_LOGICAL_AND, geExpr, leExpr});
+    }
+
     default:
       VELOX_NYI(
           "Filter type {} not yet supported for subfield filter conversion",
