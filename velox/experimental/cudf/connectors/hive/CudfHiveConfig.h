@@ -74,6 +74,12 @@ class CudfHiveConfig {
   static constexpr const char* kTimestampTypeSession =
       "parquet.reader.timestamp_type";
 
+  // Expected timestamp unit in parquet files for filter pushdown.
+  static constexpr const char* kTimestampPushdownType =
+      "cudf.hive.timestamp-pushdown-type";
+  static constexpr const char* kTimestampPushdownTypeSession =
+      "cudf.hive.timestamp_pushdown_type";
+
   // Whether to use the BufferedInput source for CudfHiveDataSource. The
   // buffered source takes advantage of the `AsyncDataCache` if available. The
   // `AsyncDataCache` is controlled (default: enabled) using the
@@ -151,6 +157,10 @@ class CudfHiveConfig {
 
   cudf::data_type timestampType() const;
   cudf::data_type timestampTypeSession(const config::ConfigBase* session) const;
+
+  std::optional<cudf::data_type> timestampPushdownType() const;
+  std::optional<cudf::data_type> timestampPushdownTypeSession(
+      const config::ConfigBase* session) const;
 
   bool useBufferedInput() const;
   bool useBufferedInputSession(const config::ConfigBase* session) const;
