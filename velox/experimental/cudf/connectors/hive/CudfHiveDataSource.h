@@ -164,6 +164,10 @@ class CudfHiveDataSource : public DataSource, public NvtxHelper {
   common::SubfieldFilters subfieldFilters_;
   // Cached combined subfield filter expression owned by 'subfieldTree_'.
   cudf::ast::expression const* subfieldFilterExpr_{nullptr};
+  // Row type for subfield filter construction.
+  RowTypePtr subfieldFilterType_;
+  // Whether any timestamp range filters are present (requires per-split AST).
+  bool hasTimestampFilter_{false};
 
   dwio::common::RuntimeStatistics runtimeStats_;
   std::atomic<uint64_t> totalRemainingFilterTime_{0};
