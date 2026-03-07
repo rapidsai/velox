@@ -60,6 +60,7 @@ std::pair<Timestamp, Timestamp> timestampBoundsForType(cudf::type_id typeId) {
   }
 }
 
+
 template <
     typename RangeT,
     typename ScalarT,
@@ -525,8 +526,7 @@ cudf::ast::expression const& createAstFromSubfieldFilter(
           dynamic_cast<const common::TimestampRange*>(&filter);
       VELOX_CHECK_NOT_NULL(range, "Filter is not a TimestampRange");
 
-      auto tsType = it->second;
-      const auto typeId = tsType.id();
+      const auto typeId = it->second.id();
       if (typeId != cudf::type_id::TIMESTAMP_MILLISECONDS &&
           typeId != cudf::type_id::TIMESTAMP_MICROSECONDS &&
           typeId != cudf::type_id::TIMESTAMP_NANOSECONDS) {
@@ -636,12 +636,7 @@ cudf::ast::expression const& createAstFromSubfieldFilters(
       }
     }
     auto const& expr = createAstFromSubfieldFilter(
-        subfield,
-        *filterPtr,
-        tree,
-        scalars,
-        inputRowSchema,
-        timestampTypes);
+        subfield, *filterPtr, tree, scalars, inputRowSchema, timestampTypes);
     exprRefs.push_back(&expr);
   }
 

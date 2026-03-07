@@ -21,9 +21,37 @@
 
 #include <cudf/types.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <optional>
 
 namespace facebook::velox::cudf_velox::connector::hive {
+namespace {
+
+std::optional<cudf::data_type> parseTimestampPushdownType(
+    std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  if (value.empty() || value == "none" || value == "off" || value == "false") {
+    return std::nullopt;
+  }
+  if (value == "ms" || value == "millis" || value == "milliseconds") {
+    return cudf::data_type{cudf::type_id::TIMESTAMP_MILLISECONDS};
+  }
+  if (value == "us" || value == "micros" || value == "microseconds") {
+    return cudf::data_type{cudf::type_id::TIMESTAMP_MICROSECONDS};
+  }
+  if (value == "ns" || value == "nanos" || value == "nanoseconds") {
+    return cudf::data_type{cudf::type_id::TIMESTAMP_NANOSECONDS};
+  }
+  VELOX_USER_FAIL(
+      "Invalid cudf.hive.timestamp-pushdown-type '{}'. "
+      "Use ms|us|ns (or none).",
+      value);
+}
+
+} // namespace
 
 std::size_t CudfHiveConfig::maxChunkReadLimit() const {
   // chunk read limit = 0 means no limit
@@ -120,6 +148,19 @@ cudf::data_type CudfHiveConfig::timestampTypeSession(
           unit == cudf::type_id::TIMESTAMP_NANOSECONDS /*nano*/,
       "Invalid timestamp unit.");
   return cudf::data_type(cudf::type_id{unit});
+}
+
+std::optional<cudf::data_type> CudfHiveConfig::timestampPushdownType() const {
+  auto value = config_->get<std::string>(kTimestampPushdownType, "");
+  return parseTimestampPushdownType(value);
+}
+
+std::optional<cudf::data_type> CudfHiveConfig::timestampPushdownTypeSession(
+    const config::ConfigBase* session) const {
+  auto value = session->get<std::string>(
+      kTimestampPushdownTypeSession,
+      config_->get<std::string>(kTimestampPushdownType, ""));
+  return parseTimestampPushdownType(value);
 }
 
 bool CudfHiveConfig::useBufferedInput() const {

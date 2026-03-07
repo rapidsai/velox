@@ -61,89 +61,6 @@ namespace facebook::velox::cudf_velox::connector::hive {
 using namespace facebook::velox::connector;
 using namespace facebook::velox::connector::hive;
 
-namespace {
-
-std::optional<cudf::data_type> timestampTypeFromSchemaElement(
-    const cudf::io::parquet::SchemaElement& element) {
-  using cudf::io::parquet::ConvertedType;
-  using cudf::io::parquet::LogicalType;
-  using cudf::io::parquet::TimeUnit;
-  using cudf::io::parquet::Type;
-
-  if (element.logical_type.has_value() &&
-      element.logical_type->type == LogicalType::TIMESTAMP &&
-      element.logical_type->timestamp_type.has_value()) {
-    switch (element.logical_type->timestamp_type->unit.type) {
-      case TimeUnit::MILLIS:
-        return cudf::data_type{cudf::type_id::TIMESTAMP_MILLISECONDS};
-      case TimeUnit::MICROS:
-        return cudf::data_type{cudf::type_id::TIMESTAMP_MICROSECONDS};
-      case TimeUnit::NANOS:
-        return cudf::data_type{cudf::type_id::TIMESTAMP_NANOSECONDS};
-      default:
-        break;
-    }
-  }
-
-  if (element.converted_type.has_value()) {
-    switch (*element.converted_type) {
-      case ConvertedType::TIMESTAMP_MILLIS:
-        return cudf::data_type{cudf::type_id::TIMESTAMP_MILLISECONDS};
-      case ConvertedType::TIMESTAMP_MICROS:
-        return cudf::data_type{cudf::type_id::TIMESTAMP_MICROSECONDS};
-      default:
-        break;
-    }
-  }
-
-  if (element.type == Type::INT96) {
-    // INT96 does not encode a well-defined unit; skip pushdown to avoid
-    // mismatched timestamp comparisons.
-    return std::nullopt;
-  }
-
-  return std::nullopt;
-}
-
-int skipSchemaSubtree(
-    const std::vector<cudf::io::parquet::SchemaElement>& schema,
-    int idx) {
-  int next = idx + 1;
-  for (int child = 0; child < schema[idx].num_children; ++child) {
-    next = skipSchemaSubtree(schema, next);
-  }
-  return next;
-}
-
-TimestampTypeMap detectTimestampTypes(
-    const cudf::io::parquet::FileMetaData& metadata,
-    const std::unordered_set<std::string>& columns) {
-  TimestampTypeMap result;
-  if (columns.empty() || metadata.schema.empty()) {
-    return result;
-  }
-
-  const auto& schema = metadata.schema;
-  int idx = 0;
-  const auto& root = schema[idx];
-  int childIdx = idx + 1;
-  for (int child = 0;
-       child < root.num_children && childIdx < static_cast<int>(schema.size());
-       ++child) {
-    const auto& element = schema[childIdx];
-    if (columns.count(element.name) > 0) {
-      if (auto type = timestampTypeFromSchemaElement(element)) {
-        result.emplace(element.name, *type);
-      }
-    }
-    childIdx = skipSchemaSubtree(schema, childIdx);
-  }
-
-  return result;
-}
-
-} // namespace
-
 CudfHiveDataSource::CudfHiveDataSource(
     const RowTypePtr& outputType,
     const ConnectorTableHandlePtr& tableHandle,
@@ -230,50 +147,65 @@ CudfHiveDataSource::CudfHiveDataSource(
     // readColumnNames_
   }
 
-  // Build subfield filter AST. If timestamp filters exist, we need the
-  // parquet file's native timestamp types per split, so defer AST creation.
-  // Non-timestamp filters can be built once here.
+  // Build a combined AST for all subfield filters once. This is query-constant
+  // and doesn't depend on split-specific state.
+  // Skip if only unsupported filter types (e.g., kTimestampRange) are present,
+  // because the parquet reader's AST evaluator requires 'column op literal'
+  // patterns and crashes on pass-through expressions like 'col == col'.
   if (!subfieldFilters_.empty()) {
-    subfieldFilterType_ = [&] {
-      if (tableHandle_->dataColumns()) {
-        std::vector<std::string> newNames;
-        std::vector<TypePtr> newTypes;
-
-        for (const auto& name : readColumnNames_) {
-          auto parsedType = tableHandle_->dataColumns()->findChild(name);
-          newNames.emplace_back(std::move(name));
-          newTypes.push_back(parsedType);
-        }
-
-        return ROW(std::move(newNames), std::move(newTypes));
-      } else {
-        return outputType_;
-      }
-    }();
+    bool hasPushableFilter = false;
+    TimestampTypeMap timestampTypes;
+    const auto timestampPushdownType =
+        cudfHiveConfig_->timestampPushdownTypeSession(
+            connectorQueryCtx_->sessionProperties());
 
     for (const auto& [subfield, filterPtr] : subfieldFilters_) {
       if (!filterPtr) {
         continue;
       }
       if (filterPtr->kind() == common::FilterKind::kTimestampRange) {
-        hasTimestampFilter_ = true;
-        if (subfield.path().empty() ||
-            subfield.path()[0]->kind() != common::SubfieldKind::kNestedField) {
-          VELOX_FAIL(
-              "Only simple field references are supported in subfield filters");
+        if (timestampPushdownType.has_value()) {
+          if (subfield.path().size() != 1 ||
+              subfield.path()[0]->kind() !=
+                  common::SubfieldKind::kNestedField) {
+            VELOX_FAIL(
+                "Only simple field references are supported in subfield filters");
+          }
+          auto* nestedField =
+              static_cast<const common::Subfield::NestedField*>(
+                  subfield.path()[0].get());
+          timestampTypes.emplace(nestedField->name(), *timestampPushdownType);
+          hasPushableFilter = true;
         }
-        auto* nestedField =
-            static_cast<const common::Subfield::NestedField*>(
-                subfield.path()[0].get());
-        timestampFilterColumns_.insert(nestedField->name());
       } else {
-        hasNonTimestampFilter_ = true;
+        hasPushableFilter = true;
       }
     }
 
-    if (!hasTimestampFilter_ && hasNonTimestampFilter_) {
+    if (hasPushableFilter) {
+      const RowTypePtr readerFilterType = [&] {
+        if (tableHandle_->dataColumns()) {
+          std::vector<std::string> newNames;
+          std::vector<TypePtr> newTypes;
+
+          for (const auto& name : readColumnNames_) {
+            auto parsedType = tableHandle_->dataColumns()->findChild(name);
+            newNames.emplace_back(std::move(name));
+            newTypes.push_back(parsedType);
+          }
+
+          return ROW(std::move(newNames), std::move(newTypes));
+        } else {
+          return outputType_;
+        }
+      }();
+
       subfieldFilterExpr_ = &createAstFromSubfieldFilters(
-          subfieldFilters_, subfieldTree_, subfieldScalars_, subfieldFilterType_);
+          subfieldFilters_,
+          subfieldTree_,
+          subfieldScalars_,
+          readerFilterType,
+          timestampTypes.empty() ? nullptr : &timestampTypes);
     }
   }
 
@@ -617,42 +549,11 @@ void CudfHiveDataSource::setupCudfDataSourceAndOptions() {
     readerOptions_.set_num_bytes(split_->size());
   }
 
-  if (hasTimestampFilter_ && subfieldFilterType_) {
-    TimestampTypeMap timestampTypes;
-    try {
-      auto sources =
-          cudf::io::make_datasources(cudf::io::source_info{split_->filePath});
-      auto footers = cudf::io::read_parquet_footers(sources);
-      if (!footers.empty()) {
-        timestampTypes =
-            detectTimestampTypes(footers.front(), timestampFilterColumns_);
-      }
-    } catch (const std::exception& e) {
-      LOG(WARNING) << "Failed to read parquet metadata for timestamp filters on "
-                   << split_->filePath << ": " << e.what();
-    }
-
-    const bool hasPushableFilter =
-        hasNonTimestampFilter_ || !timestampTypes.empty();
-
-    subfieldFilterExpr_ = nullptr;
-    if (hasPushableFilter) {
-      subfieldTree_ = cudf::ast::tree{};
-      subfieldScalars_.clear();
-      subfieldFilterExpr_ = &createAstFromSubfieldFilters(
-          subfieldFilters_,
-          subfieldTree_,
-          subfieldScalars_,
-          subfieldFilterType_,
-          &timestampTypes);
-    }
-  }
-
   if (subfieldFilterExpr_ != nullptr) {
     readerOptions_.set_filter(*subfieldFilterExpr_);
   }
 
-  // Set column projection if needed, using mapped physical column names
+  // Set column projection if needed
   if (readColumnNames_.size()) {
     readerOptions_.set_column_names(readColumnNames_);
   }
