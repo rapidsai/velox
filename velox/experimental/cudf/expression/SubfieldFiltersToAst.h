@@ -21,8 +21,10 @@
 
 #include <cudf/ast/expressions.hpp>
 #include <cudf/scalar/scalar.hpp>
+#include <cudf/types.hpp>
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace cudf {
@@ -33,13 +35,17 @@ class tree;
 
 namespace facebook::velox::cudf_velox {
 
-// Convert subfield filters to cudf AST
+// Convert subfield filters to cudf AST.
+// timestampType: cuDF data_type for timestamp filter scalars. Must match the
+// parquet file's native timestamp type (not the reader's output type) since
+// the parquet reader applies filters to raw unconverted data.
 cudf::ast::expression const& createAstFromSubfieldFilter(
     const common::Subfield& subfield,
     const common::Filter& filter,
     cudf::ast::tree& tree,
     std::vector<std::unique_ptr<cudf::scalar>>& scalars,
-    const RowTypePtr& inputRowSchema);
+    const RowTypePtr& inputRowSchema,
+    std::optional<cudf::data_type> timestampType = std::nullopt);
 
 // Build a single AST expression representing logical AND of all filters in
 // 'subfieldFilters'. The resulting expression reference is owned by the passed
@@ -48,6 +54,7 @@ cudf::ast::expression const& createAstFromSubfieldFilters(
     const common::SubfieldFilters& subfieldFilters,
     cudf::ast::tree& tree,
     std::vector<std::unique_ptr<cudf::scalar>>& scalars,
-    const RowTypePtr& inputRowSchema);
+    const RowTypePtr& inputRowSchema,
+    std::optional<cudf::data_type> timestampType = std::nullopt);
 
 } // namespace facebook::velox::cudf_velox
