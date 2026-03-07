@@ -168,6 +168,10 @@ class CudfHiveDataSource : public DataSource, public NvtxHelper {
   RowTypePtr subfieldFilterType_;
   // Whether any timestamp range filters are present (requires per-split AST).
   bool hasTimestampFilter_{false};
+  // Whether any non-timestamp subfield filters are present.
+  bool hasNonTimestampFilter_{false};
+  // Column names with timestamp range filters.
+  std::unordered_set<std::string> timestampFilterColumns_;
 
   dwio::common::RuntimeStatistics runtimeStats_;
   std::atomic<uint64_t> totalRemainingFilterTime_{0};

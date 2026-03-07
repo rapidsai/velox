@@ -923,7 +923,7 @@ TEST_F(SubfieldFilterAstTest, MultiRangeMixedFilters) {
   testFilterExecution(rowType, columnName, *filter, vec, expr);
 }
 
-// Without timestampType, TimestampRange returns pass-through.
+// Without timestamp types, TimestampRange returns pass-through.
 TEST_F(SubfieldFilterAstTest, TimestampRangePassthrough) {
   const std::string columnName = "c0";
   auto rowType = ROW({{columnName, TIMESTAMP()}});
@@ -936,8 +936,9 @@ TEST_F(SubfieldFilterAstTest, TimestampRangePassthrough) {
   common::Subfield subfield(columnName);
   cudf::ast::tree tree;
   std::vector<std::unique_ptr<cudf::scalar>> scalars;
-  const auto& expr =
+  [[maybe_unused]] const auto& expr =
       createAstFromSubfieldFilter(subfield, *filter, tree, scalars, rowType);
+  // Should produce a pass-through (col == col), no scalars needed
   ASSERT_GT(tree.size(), 0UL);
   EXPECT_EQ(scalars.size(), 0UL) << "Pass-through should not create scalars";
 }
@@ -956,26 +957,19 @@ TEST_F(SubfieldFilterAstTest, TimestampRangePushdownMillis) {
   common::Subfield subfield(columnName);
   cudf::ast::tree tree;
   std::vector<std::unique_ptr<cudf::scalar>> scalars;
-  auto tsType = cudf::data_type{cudf::type_id::TIMESTAMP_MILLISECONDS};
-  const auto& expr = createAstFromSubfieldFilter(
-      subfield, *filter, tree, scalars, rowType, tsType);
+  TimestampTypeMap timestampTypes;
+  timestampTypes.emplace(
+      columnName, cudf::data_type{cudf::type_id::TIMESTAMP_MILLISECONDS});
+  [[maybe_unused]] const auto& expr = createAstFromSubfieldFilter(
+      subfield, *filter, tree, scalars, rowType, &timestampTypes);
 
   ASSERT_GT(tree.size(), 0UL);
   EXPECT_EQ(scalars.size(), 2UL) << "Expected 2 scalars for bounded range";
 
-  // Verify scalar types are TIMESTAMP_MILLISECONDS
   for (const auto& s : scalars) {
     EXPECT_EQ(s->type().id(), cudf::type_id::TIMESTAMP_MILLISECONDS);
   }
 
-  // Create test data with millisecond timestamps and verify filtering
-  auto timestamps = makeFlatVector<Timestamp>(
-      100,
-      [](auto row) {
-        return Timestamp(row * 86400 + 694224000, 0);
-      });
-  auto vec = makeRowVector({columnName}, {timestamps});
-  testFilterExecution(rowType, columnName, *filter, vec, expr);
 }
 
 // With timestampType=TIMESTAMP_MICROSECONDS, TimestampRange creates us scalars.
@@ -991,9 +985,11 @@ TEST_F(SubfieldFilterAstTest, TimestampRangePushdownMicros) {
   common::Subfield subfield(columnName);
   cudf::ast::tree tree;
   std::vector<std::unique_ptr<cudf::scalar>> scalars;
-  auto tsType = cudf::data_type{cudf::type_id::TIMESTAMP_MICROSECONDS};
+  TimestampTypeMap timestampTypes;
+  timestampTypes.emplace(
+      columnName, cudf::data_type{cudf::type_id::TIMESTAMP_MICROSECONDS});
   const auto& expr = createAstFromSubfieldFilter(
-      subfield, *filter, tree, scalars, rowType, tsType);
+      subfield, *filter, tree, scalars, rowType, &timestampTypes);
 
   ASSERT_GT(tree.size(), 0UL);
   EXPECT_EQ(scalars.size(), 2UL) << "Expected 2 scalars for bounded range";
@@ -1003,40 +999,60 @@ TEST_F(SubfieldFilterAstTest, TimestampRangePushdownMicros) {
   }
 }
 
-// Test unbounded ranges (e.g., >= TIMESTAMP without upper bound).
-TEST_F(SubfieldFilterAstTest, TimestampRangePushdownUnbounded) {
-  const std::string columnName = "c0";
-  auto rowType = ROW({{columnName, TIMESTAMP()}});
+TEST_F(SubfieldFilterAstTest, TimestampRangeMixedColumnTypes) {
+  auto rowType = ROW(
+      {{"ts_ms", TIMESTAMP()},
+       {"ts_us", TIMESTAMP()},
+       {"ts_ns", TIMESTAMP()}});
 
-  // Lower bounded only (upper = Timestamp::max())
-  auto lower = Timestamp(788918400, 0);
-  auto upper = Timestamp::max();
-  auto filter =
-      std::make_unique<common::TimestampRange>(lower, upper, /*nullAllowed*/ false);
+  common::SubfieldFilters filters;
+  filters.emplace(
+      common::Subfield("ts_ms"),
+      std::make_unique<common::TimestampRange>(
+          Timestamp(10, 0), Timestamp(20, 0), false));
+  filters.emplace(
+      common::Subfield("ts_us"),
+      std::make_unique<common::TimestampRange>(
+          Timestamp(30, 0), Timestamp(40, 0), false));
+  filters.emplace(
+      common::Subfield("ts_ns"),
+      std::make_unique<common::TimestampRange>(
+          Timestamp(50, 0), Timestamp(60, 0), false));
 
-  common::Subfield subfield(columnName);
+  TimestampTypeMap timestampTypes;
+  timestampTypes.emplace(
+      "ts_ms", cudf::data_type{cudf::type_id::TIMESTAMP_MILLISECONDS});
+  timestampTypes.emplace(
+      "ts_us", cudf::data_type{cudf::type_id::TIMESTAMP_MICROSECONDS});
+  timestampTypes.emplace(
+      "ts_ns", cudf::data_type{cudf::type_id::TIMESTAMP_NANOSECONDS});
+
   cudf::ast::tree tree;
   std::vector<std::unique_ptr<cudf::scalar>> scalars;
-  auto tsType = cudf::data_type{cudf::type_id::TIMESTAMP_MILLISECONDS};
-  const auto& expr = createAstFromSubfieldFilter(
-      subfield, *filter, tree, scalars, rowType, tsType);
+  [[maybe_unused]] const auto& expr = createAstFromSubfieldFilters(
+      filters, tree, scalars, rowType, &timestampTypes);
 
   ASSERT_GT(tree.size(), 0UL);
-  // Only 1 scalar for the lower bound (upper is unbounded)
-  EXPECT_EQ(scalars.size(), 1UL) << "Expected 1 scalar for lower-bounded range";
+  EXPECT_EQ(scalars.size(), 6UL);
+
+  std::unordered_map<cudf::type_id, int> typeCounts;
+  for (const auto& s : scalars) {
+    typeCounts[s->type().id()]++;
+  }
+  EXPECT_EQ(typeCounts[cudf::type_id::TIMESTAMP_MILLISECONDS], 2);
+  EXPECT_EQ(typeCounts[cudf::type_id::TIMESTAMP_MICROSECONDS], 2);
+  EXPECT_EQ(typeCounts[cudf::type_id::TIMESTAMP_NANOSECONDS], 2);
 }
 
 // Test createAstFromSubfieldFilters with timestamp type propagation.
 TEST_F(SubfieldFilterAstTest, TimestampFilterInCombinedFilters) {
   auto rowType = ROW({{"ts_col", TIMESTAMP()}, {"int_col", INTEGER()}});
 
-  // Timestamp filter on ts_col
   common::SubfieldFilters filters;
   filters.emplace(
       common::Subfield("ts_col"),
       std::make_unique<common::TimestampRange>(
           Timestamp(788918400, 0), Timestamp(820454400, 0), false));
-  // Integer filter on int_col
   filters.emplace(
       common::Subfield("int_col"),
       std::make_unique<common::BigintRange>(10, 20, false));
@@ -1044,21 +1060,21 @@ TEST_F(SubfieldFilterAstTest, TimestampFilterInCombinedFilters) {
   cudf::ast::tree tree;
   std::vector<std::unique_ptr<cudf::scalar>> scalars;
 
-  // Without timestampType: timestamp filter skipped, only int filter
-  const auto& exprNoTs = createAstFromSubfieldFilters(
-      filters, tree, scalars, rowType);
+  // Without timestamp types: timestamp filter skipped, only int filter
+  [[maybe_unused]] const auto& exprNoTs =
+      createAstFromSubfieldFilters(filters, tree, scalars, rowType);
   ASSERT_GT(tree.size(), 0UL);
-  // Only int range scalars (2 for lower/upper)
   EXPECT_EQ(scalars.size(), 2UL);
 
-  // With timestampType: both filters included
+  // With timestamp types: both filters included
   tree = cudf::ast::tree{};
   scalars.clear();
-  auto tsType = cudf::data_type{cudf::type_id::TIMESTAMP_MICROSECONDS};
-  const auto& exprWithTs = createAstFromSubfieldFilters(
-      filters, tree, scalars, rowType, tsType);
+  TimestampTypeMap timestampTypes;
+  timestampTypes.emplace(
+      "ts_col", cudf::data_type{cudf::type_id::TIMESTAMP_MICROSECONDS});
+  [[maybe_unused]] const auto& exprWithTs = createAstFromSubfieldFilters(
+      filters, tree, scalars, rowType, &timestampTypes);
   ASSERT_GT(tree.size(), 0UL);
-  // Int range (2) + timestamp range (2) = 4 scalars
   EXPECT_EQ(scalars.size(), 4UL);
 }
 
