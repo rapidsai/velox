@@ -97,7 +97,9 @@ std::optional<cudf::data_type> timestampTypeFromSchemaElement(
   }
 
   if (element.type == Type::INT96) {
-    return cudf::data_type{cudf::type_id::TIMESTAMP_NANOSECONDS};
+    // INT96 does not encode a well-defined unit; skip pushdown to avoid
+    // mismatched timestamp comparisons.
+    return std::nullopt;
   }
 
   return std::nullopt;
