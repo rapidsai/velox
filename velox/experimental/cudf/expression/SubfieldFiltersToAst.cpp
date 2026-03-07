@@ -17,6 +17,7 @@
 #include "velox/experimental/cudf/expression/SubfieldFiltersToAst.h"
 
 #include "velox/common/base/Exceptions.h"
+#include "velox/type/Timestamp.h"
 
 #include <cudf/ast/detail/expression_parser.hpp>
 #include <cudf/ast/expressions.hpp>
@@ -24,9 +25,40 @@
 #include <cudf/types.hpp>
 
 #include <limits>
+#include <utility>
 
 namespace facebook::velox::cudf_velox {
 namespace {
+
+const std::string& getSimpleFieldName(const common::Subfield& subfield) {
+  if (subfield.path().size() != 1 ||
+      subfield.path()[0]->kind() != common::SubfieldKind::kNestedField) {
+    VELOX_FAIL(
+        "Only simple field references are supported in subfield filters");
+  }
+  auto* nestedField = static_cast<const common::Subfield::NestedField*>(
+      subfield.path()[0].get());
+  return nestedField->name();
+}
+
+std::pair<Timestamp, Timestamp> timestampBoundsForType(cudf::type_id typeId) {
+  const auto minVal = std::numeric_limits<int64_t>::min();
+  const auto maxVal = std::numeric_limits<int64_t>::max();
+  switch (typeId) {
+    case cudf::type_id::TIMESTAMP_MILLISECONDS:
+      return {
+          Timestamp::fromMillisNoError(minVal),
+          Timestamp::fromMillisNoError(maxVal)};
+    case cudf::type_id::TIMESTAMP_MICROSECONDS:
+      return {
+          Timestamp::fromMicrosNoError(minVal),
+          Timestamp::fromMicrosNoError(maxVal)};
+    case cudf::type_id::TIMESTAMP_NANOSECONDS:
+      return {Timestamp::fromNanos(minVal), Timestamp::fromNanos(maxVal)};
+    default:
+      VELOX_FAIL("Unsupported timestamp type id {}", (int)typeId);
+  }
+}
 
 template <
     typename RangeT,
@@ -313,18 +345,10 @@ cudf::ast::expression const& createAstFromSubfieldFilter(
     cudf::ast::tree& tree,
     std::vector<std::unique_ptr<cudf::scalar>>& scalars,
     const RowTypePtr& inputRowSchema,
-    std::optional<cudf::data_type> timestampType) {
+    const TimestampTypeMap* timestampTypes) {
   // First, create column reference from subfield
   // For now, only support simple field references
-  if (subfield.path().empty() ||
-      subfield.path()[0]->kind() != common::SubfieldKind::kNestedField) {
-    VELOX_FAIL(
-        "Only simple field references are supported in subfield filters");
-  }
-
-  auto nestedField = static_cast<const common::Subfield::NestedField*>(
-      subfield.path()[0].get());
-  const std::string& fieldName = nestedField->name();
+  const std::string& fieldName = getSimpleFieldName(subfield);
 
   if (!inputRowSchema->containsChild(fieldName)) {
     VELOX_FAIL("Field '{}' not found in input schema", fieldName);
@@ -470,7 +494,12 @@ cudf::ast::expression const& createAstFromSubfieldFilter(
       for (const auto& subFilter : filters) {
         // Recursively convert each sub-filter
         auto const& subExpr = createAstFromSubfieldFilter(
-            subfield, *subFilter, tree, scalars, inputRowSchema, timestampType);
+            subfield,
+            *subFilter,
+            tree,
+            scalars,
+            inputRowSchema,
+            timestampTypes);
         exprRefs.push_back(&subExpr);
       }
 
@@ -484,12 +513,11 @@ cudf::ast::expression const& createAstFromSubfieldFilter(
     }
 
     case common::FilterKind::kTimestampRange: {
-      using Op = cudf::ast::ast_operator;
-      using Operation = cudf::ast::operation;
-
-      if (!timestampType.has_value()) {
-        // No native timestamp type available — can't push down.
-        // Return pass-through; remaining filter handles it post-scan.
+      if (!timestampTypes) {
+        return tree.push(Operation{Op::EQUAL, columnRef, columnRef});
+      }
+      auto it = timestampTypes->find(fieldName);
+      if (it == timestampTypes->end()) {
         return tree.push(Operation{Op::EQUAL, columnRef, columnRef});
       }
 
@@ -497,13 +525,17 @@ cudf::ast::expression const& createAstFromSubfieldFilter(
           dynamic_cast<const common::TimestampRange*>(&filter);
       VELOX_CHECK_NOT_NULL(range, "Filter is not a TimestampRange");
 
-      auto tsType = timestampType.value();
+      auto tsType = it->second;
+      const auto typeId = tsType.id();
+      if (typeId != cudf::type_id::TIMESTAMP_MILLISECONDS &&
+          typeId != cudf::type_id::TIMESTAMP_MICROSECONDS &&
+          typeId != cudf::type_id::TIMESTAMP_NANOSECONDS) {
+        return tree.push(Operation{Op::EQUAL, columnRef, columnRef});
+      }
 
-      // Create timestamp scalar in the parquet file's native type so it
-      // matches the raw data the parquet reader filters against.
       auto addTimestampLiteral = [&](const Timestamp& ts)
           -> const cudf::ast::expression& {
-        switch (tsType.id()) {
+        switch (typeId) {
           case cudf::type_id::TIMESTAMP_MILLISECONDS: {
             using T = cudf::timestamp_ms;
             using S = cudf::timestamp_scalar<T>;
@@ -532,17 +564,16 @@ cudf::ast::expression const& createAstFromSubfieldFilter(
                 cudf::ast::literal{*static_cast<S*>(scalars.back().get())});
           }
           default:
-            VELOX_FAIL(
-                "Unsupported timestamp type: {}",
-                static_cast<int>(tsType.id()));
+            VELOX_UNREACHABLE();
         }
       };
 
-      // Handle unbounded ranges (Timestamp::max/min overflow on conversion)
-      const bool lowerBounded =
-          range->lower() > Timestamp::minMillis();
-      const bool upperBounded =
-          range->upper() < Timestamp::maxMillis();
+      const auto [minTs, maxTs] = timestampBoundsForType(typeId);
+      if (range->lower() > maxTs || range->upper() < minTs) {
+        return tree.push(Operation{Op::NOT_EQUAL, columnRef, columnRef});
+      }
+      const bool lowerBounded = range->lower() > minTs;
+      const bool upperBounded = range->upper() < maxTs;
 
       const cudf::ast::expression* lowerExpr = nullptr;
       const cudf::ast::expression* upperExpr = nullptr;
@@ -563,13 +594,13 @@ cudf::ast::expression const& createAstFromSubfieldFilter(
       } else if (upperExpr) {
         return *upperExpr;
       }
-      // Both unbounded — pass-through
+
       return tree.push(Operation{Op::EQUAL, columnRef, columnRef});
     }
-
     default: {
       using Op = cudf::ast::ast_operator;
       using Operation = cudf::ast::operation;
+      // col == col is always true (pass-through)
       return tree.push(Operation{Op::EQUAL, columnRef, columnRef});
     }
   }
@@ -582,31 +613,41 @@ cudf::ast::expression const& createAstFromSubfieldFilters(
     cudf::ast::tree& tree,
     std::vector<std::unique_ptr<cudf::scalar>>& scalars,
     const RowTypePtr& inputRowSchema,
-    std::optional<cudf::data_type> timestampType) {
+    const TimestampTypeMap* timestampTypes) {
   using Op = cudf::ast::ast_operator;
   using Operation = cudf::ast::operation;
 
   std::vector<const cudf::ast::expression*> exprRefs;
 
-  // Build individual filter expressions.
-  // Timestamp filters are included only if timestampType is provided
-  // (meaning we know the parquet file's native timestamp type).
+  // Build individual filter expressions, skipping unsupported types.
   for (const auto& [subfield, filterPtr] : subfieldFilters) {
     if (!filterPtr) {
       continue;
     }
-    // Skip timestamp filters if we don't know the native type
-    if (filterPtr->kind() == common::FilterKind::kTimestampRange &&
-        !timestampType.has_value()) {
-      continue;
+    // Skip filter types that can't be pushed into the parquet reader.
+    // These will be handled by the remaining filter on GPU post-scan.
+    if (filterPtr->kind() == common::FilterKind::kTimestampRange) {
+      if (!timestampTypes) {
+        continue;
+      }
+      const auto& fieldName = getSimpleFieldName(subfield);
+      if (timestampTypes->find(fieldName) == timestampTypes->end()) {
+        continue;
+      }
     }
     auto const& expr = createAstFromSubfieldFilter(
-        subfield, *filterPtr, tree, scalars, inputRowSchema, timestampType);
+        subfield,
+        *filterPtr,
+        tree,
+        scalars,
+        inputRowSchema,
+        timestampTypes);
     exprRefs.push_back(&expr);
   }
 
   if (exprRefs.empty()) {
-    // All filters were skipped — no subfield filter to push down.
+    // All filters were unsupported — no subfield filter to push down.
+    // Return a pass-through (always true).
     using ColumnRef = cudf::ast::column_reference;
     auto const& col0 = tree.push(ColumnRef{0});
     return tree.push(Operation{Op::EQUAL, col0, col0});
