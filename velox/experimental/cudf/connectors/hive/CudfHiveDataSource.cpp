@@ -524,22 +524,34 @@ void CudfHiveDataSource::setupCudfDataSourceAndOptions() {
     readerOptions_.set_num_bytes(split_->size());
   }
 
-  // Build timestamp filter AST per-split using the file's native timestamp type
+  // Build timestamp filter AST per-split using the file's native timestamp type.
+  // The parquet reader applies filters to raw (unconverted) data, so the filter
+  // scalar must match the file's native timestamp resolution.
   if (hasTimestampFilter_ && subfieldFilterType_) {
-    // Read parquet metadata to get native timestamp type
-    auto metadata = cudf::io::read_parquet_metadata(
-        cudf::io::source_info{split_->filePath});
-    auto const& schema = metadata.schema().root();
+    // Read parquet metadata and detect native timestamp type from schema.
+    // Parquet stores timestamps as INT64 with logical type annotation:
+    //   TIMESTAMP(isAdjustedToUTC=..., unit=MILLIS) -> TIMESTAMP_MILLISECONDS
+    //   TIMESTAMP(isAdjustedToUTC=..., unit=MICROS) -> TIMESTAMP_MICROSECONDS
+    //   TIMESTAMP(isAdjustedToUTC=..., unit=NANOS)  -> TIMESTAMP_NANOSECONDS
+    //   INT96 (legacy) -> TIMESTAMP_NANOSECONDS
+    // We detect this by reading the file with a 0-row limit and checking
+    // the resulting column types.
+    auto detectOpts =
+        cudf::io::parquet_reader_options::builder(
+            cudf::io::source_info{split_->filePath})
+            .build();
+    // Read only metadata (0 rows) to get column types
+    detectOpts.set_num_rows(0);
+    auto detectResult = cudf::io::read_parquet(detectOpts);
+    auto const& detectTable = detectResult.tbl;
 
-    // Find the first timestamp column's type
     std::optional<cudf::data_type> nativeTimestampType;
-    for (int i = 0; i < schema.num_children(); ++i) {
-      auto const& col = schema.child(i);
-      auto tid = col.type().id();
+    for (cudf::size_type i = 0; i < detectTable->num_columns(); ++i) {
+      auto tid = detectTable->view().column(i).type().id();
       if (tid == cudf::type_id::TIMESTAMP_MILLISECONDS ||
           tid == cudf::type_id::TIMESTAMP_MICROSECONDS ||
           tid == cudf::type_id::TIMESTAMP_NANOSECONDS) {
-        nativeTimestampType = col.type();
+        nativeTimestampType = detectTable->view().column(i).type();
         break;
       }
     }
