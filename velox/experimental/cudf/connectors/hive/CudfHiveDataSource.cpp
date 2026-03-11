@@ -564,9 +564,6 @@ void CudfHiveDataSource::setupCudfDataSourceAndOptions() {
           .timestamp_type(cudfHiveConfig_->timestampType())
           .build();
 
-  // skip_bytes / num_bytes are set later in createSplitReader() so they
-  // can be omitted when row-group pruning replaces the byte range.
-
   if (subfieldFilterExpr_ != nullptr) {
     readerOptions_.set_filter(*subfieldFilterExpr_);
     LOG(INFO) << "CudfHiveDataSource [" << connectorQueryCtx_->scanId()
@@ -583,72 +580,17 @@ CudfParquetReaderPtr CudfHiveDataSource::createSplitReader() {
   setupCudfDataSourceAndOptions();
   stream_ = cudfGlobalStreamPool().get_stream();
 
-  const bool hasByteRange =
-      split_->start != 0 ||
-      split_->size() != std::numeric_limits<uint64_t>::max();
-  bool rowGroupPruningApplied = false;
-
-  // Use hybrid scan reader metadata to prune row groups via statistics,
-  // then pass the surviving row group indices to the regular chunked reader.
-  // cuDF disallows row_groups together with skip_bytes/num_bytes, so when
-  // pruning succeeds we use row_groups exclusively (the byte-range is already
-  // accounted for by filter_row_groups_with_byte_range).
-  if (readerOptions_.get_filter().has_value()) {
-    try {
-      auto const footerBuffer = fetchFooterBytes(dataSource_);
-      CudfHybridScanReader metadataReader(*footerBuffer, readerOptions_);
-
-      auto rowGroupIndices = metadataReader.all_row_groups(readerOptions_);
-      auto const totalRowGroups = rowGroupIndices.size();
-
-      if (hasByteRange) {
-        // Build a temporary options object with byte-range set so the
-        // metadata reader can filter by it.  We avoid setting these on
-        // readerOptions_ directly because cuDF forbids row_groups +
-        // skip_bytes/num_bytes on the same options instance.
-        auto byteRangeOpts = cudf::io::parquet_reader_options::builder(
-            cudf::io::source_info{split_->filePath}).build();
-        if (split_->start != 0) {
-          byteRangeOpts.set_skip_bytes(split_->start);
-        }
-        if (split_->size() != std::numeric_limits<uint64_t>::max()) {
-          byteRangeOpts.set_num_bytes(split_->size());
-        }
-        rowGroupIndices =
-            metadataReader.filter_row_groups_with_byte_range(
-                rowGroupIndices, byteRangeOpts);
-      }
-
-      rowGroupIndices = metadataReader.filter_row_groups_with_stats(
-          rowGroupIndices, readerOptions_, stream_);
-
-      auto const keptRowGroups = rowGroupIndices.size();
-      if (keptRowGroups < totalRowGroups) {
-        std::vector<cudf::size_type> indices(
-            rowGroupIndices.begin(), rowGroupIndices.end());
-        readerOptions_.set_row_groups({std::move(indices)});
-        rowGroupPruningApplied = true;
-        LOG(INFO) << "CudfHiveDataSource [" << connectorQueryCtx_->scanId()
-                  << "] row-group pruning (regular reader): " << totalRowGroups
-                  << " total, " << keptRowGroups << " kept ("
-                  << (totalRowGroups - keptRowGroups) * 100 / totalRowGroups
-                  << "% pruned) file=" << split_->filePath;
-      }
-    } catch (const std::exception& e) {
-      LOG(WARNING) << "CudfHiveDataSource [" << connectorQueryCtx_->scanId()
-                   << "] row-group stats pruning failed, reading all: "
-                   << e.what();
-    }
-  }
-
-  // When row-group pruning was applied, the selected indices already account
-  // for the byte range; setting skip_bytes/num_bytes would conflict.
-  if (!rowGroupPruningApplied && hasByteRange) {
+  // Set byte-range from the split so the reader only reads this portion.
+  if (split_->start != 0) {
     readerOptions_.set_skip_bytes(split_->start);
-    if (split_->size() != std::numeric_limits<uint64_t>::max()) {
-      readerOptions_.set_num_bytes(split_->size());
-    }
   }
+  if (split_->size() != std::numeric_limits<uint64_t>::max()) {
+    readerOptions_.set_num_bytes(split_->size());
+  }
+
+  // NOTE: When set_filter() is active, the cuDF chunked_parquet_reader
+  // already performs internal row-group pruning via column-chunk statistics
+  // (and bloom filters). No external pre-pruning is needed.
 
   return std::make_unique<cudf::io::chunked_parquet_reader>(
       cudfHiveConfig_->maxChunkReadLimit(),
