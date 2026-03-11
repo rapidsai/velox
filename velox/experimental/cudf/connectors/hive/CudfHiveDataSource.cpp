@@ -250,42 +250,43 @@ std::unique_ptr<cudf::column> makePartitionColumn(
     const std::string& valueStr,
     const TypePtr& type,
     cudf::size_type nRows,
-    rmm::cuda_stream_view stream) {
+    rmm::cuda_stream_view stream,
+    rmm::device_async_resource_ref mr) {
   switch (type->kind()) {
     case TypeKind::TINYINT: {
       cudf::numeric_scalar<int8_t> s(
-          static_cast<int8_t>(std::stoi(valueStr)), true, stream);
-      return cudf::make_column_from_scalar(s, nRows, stream);
+          static_cast<int8_t>(std::stoi(valueStr)), true, stream, mr);
+      return cudf::make_column_from_scalar(s, nRows, stream, mr);
     }
     case TypeKind::SMALLINT: {
       cudf::numeric_scalar<int16_t> s(
-          static_cast<int16_t>(std::stoi(valueStr)), true, stream);
-      return cudf::make_column_from_scalar(s, nRows, stream);
+          static_cast<int16_t>(std::stoi(valueStr)), true, stream, mr);
+      return cudf::make_column_from_scalar(s, nRows, stream, mr);
     }
     case TypeKind::INTEGER: {
-      cudf::numeric_scalar<int32_t> s(std::stoi(valueStr), true, stream);
-      return cudf::make_column_from_scalar(s, nRows, stream);
+      cudf::numeric_scalar<int32_t> s(std::stoi(valueStr), true, stream, mr);
+      return cudf::make_column_from_scalar(s, nRows, stream, mr);
     }
     case TypeKind::BIGINT: {
-      cudf::numeric_scalar<int64_t> s(std::stoll(valueStr), true, stream);
-      return cudf::make_column_from_scalar(s, nRows, stream);
+      cudf::numeric_scalar<int64_t> s(std::stoll(valueStr), true, stream, mr);
+      return cudf::make_column_from_scalar(s, nRows, stream, mr);
     }
     case TypeKind::REAL: {
-      cudf::numeric_scalar<float> s(std::stof(valueStr), true, stream);
-      return cudf::make_column_from_scalar(s, nRows, stream);
+      cudf::numeric_scalar<float> s(std::stof(valueStr), true, stream, mr);
+      return cudf::make_column_from_scalar(s, nRows, stream, mr);
     }
     case TypeKind::DOUBLE: {
-      cudf::numeric_scalar<double> s(std::stod(valueStr), true, stream);
-      return cudf::make_column_from_scalar(s, nRows, stream);
+      cudf::numeric_scalar<double> s(std::stod(valueStr), true, stream, mr);
+      return cudf::make_column_from_scalar(s, nRows, stream, mr);
     }
     case TypeKind::BOOLEAN: {
       cudf::numeric_scalar<bool> s(
-          valueStr == "true" || valueStr == "1", true, stream);
-      return cudf::make_column_from_scalar(s, nRows, stream);
+          valueStr == "true" || valueStr == "1", true, stream, mr);
+      return cudf::make_column_from_scalar(s, nRows, stream, mr);
     }
     case TypeKind::VARCHAR: {
-      cudf::string_scalar s(valueStr, true, stream);
-      return cudf::make_column_from_scalar(s, nRows, stream);
+      cudf::string_scalar s(valueStr, true, stream, mr);
+      return cudf::make_column_from_scalar(s, nRows, stream, mr);
     }
     default:
       VELOX_FAIL(
@@ -296,11 +297,12 @@ std::unique_ptr<cudf::column> makePartitionColumn(
 std::unique_ptr<cudf::column> makeNullPartitionColumn(
     const TypePtr& type,
     cudf::size_type nRows,
-    rmm::cuda_stream_view stream) {
+    rmm::cuda_stream_view stream,
+    rmm::device_async_resource_ref mr) {
   auto cudfType = cudf::data_type{veloxToCudfTypeId(type)};
-  auto scalar = cudf::make_default_constructed_scalar(cudfType, stream);
+  auto scalar = cudf::make_default_constructed_scalar(cudfType, stream, mr);
   scalar->set_valid_async(false, stream);
-  return cudf::make_column_from_scalar(*scalar, nRows, stream);
+  return cudf::make_column_from_scalar(*scalar, nRows, stream, mr);
 }
 
 } // namespace
@@ -469,10 +471,11 @@ std::optional<RowVectorPtr> CudfHiveDataSource::next(
               pkIt->second.value(),
               outputType_->childAt(i),
               nRows,
-              stream_));
+              stream_,
+              get_output_mr()));
         } else {
           allColumns.push_back(makeNullPartitionColumn(
-              outputType_->childAt(i), nRows, stream_));
+              outputType_->childAt(i), nRows, stream_, get_output_mr()));
         }
       } else {
         VELOX_CHECK_LT(
