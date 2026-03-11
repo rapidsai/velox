@@ -101,7 +101,11 @@ CudfHiveDataSource::CudfHiveDataSource(
       tableHandle_, "TableHandle must be an instance of HiveTableHandle");
 
   // Copy subfield filters
+  LOG(INFO) << "CudfHiveDataSource: subfieldFilters count="
+            << tableHandle_->subfieldFilters().size();
   for (const auto& [k, v] : tableHandle_->subfieldFilters()) {
+    LOG(INFO) << "CudfHiveDataSource: filter field=" << k.toString()
+              << " kind=" << static_cast<int>(v->kind());
     subfieldFilters_.emplace(k.clone(), v->clone());
     // Add fields in the filter to the columns to read if not there
     for (const auto& [field, _] : subfieldFilters_) {
