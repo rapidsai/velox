@@ -564,13 +564,8 @@ void CudfHiveDataSource::setupCudfDataSourceAndOptions() {
           .timestamp_type(cudfHiveConfig_->timestampType())
           .build();
 
-  // Set skip_bytes and num_bytes if available
-  if (split_->start != 0) {
-    readerOptions_.set_skip_bytes(split_->start);
-  }
-  if (split_->size() != std::numeric_limits<uint64_t>::max()) {
-    readerOptions_.set_num_bytes(split_->size());
-  }
+  // skip_bytes / num_bytes are set later in createSplitReader() so they
+  // can be omitted when row-group pruning replaces the byte range.
 
   if (subfieldFilterExpr_ != nullptr) {
     readerOptions_.set_filter(*subfieldFilterExpr_);
@@ -588,8 +583,16 @@ CudfParquetReaderPtr CudfHiveDataSource::createSplitReader() {
   setupCudfDataSourceAndOptions();
   stream_ = cudfGlobalStreamPool().get_stream();
 
+  const bool hasByteRange =
+      split_->start != 0 ||
+      split_->size() != std::numeric_limits<uint64_t>::max();
+  bool rowGroupPruningApplied = false;
+
   // Use hybrid scan reader metadata to prune row groups via statistics,
   // then pass the surviving row group indices to the regular chunked reader.
+  // cuDF disallows row_groups together with skip_bytes/num_bytes, so when
+  // pruning succeeds we use row_groups exclusively (the byte-range is already
+  // accounted for by filter_row_groups_with_byte_range).
   if (readerOptions_.get_filter().has_value()) {
     try {
       auto const footerBuffer = fetchFooterBytes(dataSource_);
@@ -598,11 +601,22 @@ CudfParquetReaderPtr CudfHiveDataSource::createSplitReader() {
       auto rowGroupIndices = metadataReader.all_row_groups(readerOptions_);
       auto const totalRowGroups = rowGroupIndices.size();
 
-      if (readerOptions_.get_skip_bytes() > 0 or
-          readerOptions_.get_num_bytes().has_value()) {
+      if (hasByteRange) {
+        // Build a temporary options object with byte-range set so the
+        // metadata reader can filter by it.  We avoid setting these on
+        // readerOptions_ directly because cuDF forbids row_groups +
+        // skip_bytes/num_bytes on the same options instance.
+        auto byteRangeOpts = cudf::io::parquet_reader_options::builder(
+            cudf::io::source_info{split_->filePath}).build();
+        if (split_->start != 0) {
+          byteRangeOpts.set_skip_bytes(split_->start);
+        }
+        if (split_->size() != std::numeric_limits<uint64_t>::max()) {
+          byteRangeOpts.set_num_bytes(split_->size());
+        }
         rowGroupIndices =
             metadataReader.filter_row_groups_with_byte_range(
-                rowGroupIndices, readerOptions_);
+                rowGroupIndices, byteRangeOpts);
       }
 
       rowGroupIndices = metadataReader.filter_row_groups_with_stats(
@@ -613,6 +627,7 @@ CudfParquetReaderPtr CudfHiveDataSource::createSplitReader() {
         std::vector<cudf::size_type> indices(
             rowGroupIndices.begin(), rowGroupIndices.end());
         readerOptions_.set_row_groups({std::move(indices)});
+        rowGroupPruningApplied = true;
         LOG(INFO) << "CudfHiveDataSource [" << connectorQueryCtx_->scanId()
                   << "] row-group pruning (regular reader): " << totalRowGroups
                   << " total, " << keptRowGroups << " kept ("
@@ -623,6 +638,15 @@ CudfParquetReaderPtr CudfHiveDataSource::createSplitReader() {
       LOG(WARNING) << "CudfHiveDataSource [" << connectorQueryCtx_->scanId()
                    << "] row-group stats pruning failed, reading all: "
                    << e.what();
+    }
+  }
+
+  // When row-group pruning was applied, the selected indices already account
+  // for the byte range; setting skip_bytes/num_bytes would conflict.
+  if (!rowGroupPruningApplied && hasByteRange) {
+    readerOptions_.set_skip_bytes(split_->start);
+    if (split_->size() != std::numeric_limits<uint64_t>::max()) {
+      readerOptions_.set_num_bytes(split_->size());
     }
   }
 
@@ -637,6 +661,15 @@ CudfParquetReaderPtr CudfHiveDataSource::createSplitReader() {
 CudfHybridScanReaderPtr CudfHiveDataSource::createExperimentalSplitReader() {
   setupCudfDataSourceAndOptions();
   stream_ = cudfGlobalStreamPool().get_stream();
+
+  // Set byte-range for the experimental reader (it handles row-group
+  // pruning internally so the conflict with set_row_groups doesn't apply).
+  if (split_->start != 0) {
+    readerOptions_.set_skip_bytes(split_->start);
+  }
+  if (split_->size() != std::numeric_limits<uint64_t>::max()) {
+    readerOptions_.set_num_bytes(split_->size());
+  }
 
   // Create a hybrid scan reader
   nvtxRangePush("hybridScanReader");
