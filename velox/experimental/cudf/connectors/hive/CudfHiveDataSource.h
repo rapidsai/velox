@@ -117,6 +117,11 @@ class CudfHiveDataSource : public DataSource, public NvtxHelper {
   std::shared_ptr<const ::facebook::velox::connector::hive::HiveTableHandle>
       tableHandle_;
 
+  // Partition key values for the current split, extracted from
+  // HiveConnectorSplit::partitionKeys during addSplit().
+  std::unordered_map<std::string, std::optional<std::string>>
+      splitPartitionValues_;
+
   const std::shared_ptr<CudfHiveConfig> cudfHiveConfig_;
   facebook::velox::FileHandleFactory* const fileHandleFactory_;
   folly::Executor* const executor_;
@@ -138,9 +143,17 @@ class CudfHiveDataSource : public DataSource, public NvtxHelper {
   // remaining filter.
   RowTypePtr readerOutputType_;
 
-  // Columns to read.
+  // Columns to read from the Parquet file (excludes partition keys).
   std::unordered_set<std::string> readColumnSet_;
   std::vector<std::string> readColumnNames_;
+
+  // Partition key columns: name → column handle.
+  // These are not read from the file; their values come from the split's
+  // directory-encoded partition keys and are injected as constant columns.
+  std::unordered_map<
+      std::string,
+      std::shared_ptr<const ::facebook::velox::connector::hive::HiveColumnHandle>>
+      partitionKeys_;
 
   std::shared_ptr<io::IoStatistics> ioStatistics_;
   std::shared_ptr<velox::IoStats> ioStats_;

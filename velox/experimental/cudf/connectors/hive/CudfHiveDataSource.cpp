@@ -38,6 +38,7 @@
 #include "velox/expression/FieldReference.h"
 
 #include <cudf/column/column_factories.hpp>
+#include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/io/datasource.hpp>
 #include <cudf/io/experimental/hybrid_scan.hpp>
 #include <cudf/io/parquet.hpp>
@@ -81,8 +82,7 @@ CudfHiveDataSource::CudfHiveDataSource(
       baseReaderOpts_(pool_),
       outputType_(outputType),
       expressionEvaluator_(connectorQueryCtx->expressionEvaluator()) {
-  // Set up column projection if needed
-  auto readColumnTypes = outputType_->children();
+  // Separate file-read columns from partition key columns.
   for (const auto& outputName : outputType_->names()) {
     auto it = columnHandles.find(outputName);
     VELOX_CHECK(
@@ -90,9 +90,27 @@ CudfHiveDataSource::CudfHiveDataSource(
         "ColumnHandle is missing for output column: {}",
         outputName);
 
-    auto* handle = static_cast<const hive::HiveColumnHandle*>(it->second.get());
-    readColumnSet_.emplace(handle->name());
-    readColumnNames_.emplace_back(handle->name());
+    auto handle = std::dynamic_pointer_cast<const hive::HiveColumnHandle>(
+        it->second);
+    VELOX_CHECK_NOT_NULL(handle);
+
+    if (handle->columnType() ==
+        hive::HiveColumnHandle::ColumnType::kPartitionKey) {
+      partitionKeys_.emplace(handle->name(), handle);
+    } else {
+      readColumnSet_.emplace(handle->name());
+      readColumnNames_.emplace_back(handle->name());
+    }
+  }
+
+  if (!partitionKeys_.empty()) {
+    std::string pkNames;
+    for (const auto& [name, _] : partitionKeys_) {
+      if (!pkNames.empty()) pkNames += ", ";
+      pkNames += name;
+    }
+    LOG(INFO) << "CudfHiveDataSource: " << partitionKeys_.size()
+              << " partition key(s): [" << pkNames << "]";
   }
 
   tableHandle_ =
@@ -107,11 +125,12 @@ CudfHiveDataSource::CudfHiveDataSource(
     LOG(INFO) << "CudfHiveDataSource: filter field=" << k.toString()
               << " kind=" << static_cast<int>(v->kind());
     subfieldFilters_.emplace(k.clone(), v->clone());
-    // Add fields in the filter to the columns to read if not there
     for (const auto& [field, _] : subfieldFilters_) {
-      if (readColumnSet_.count(field.toString()) == 0) {
-        readColumnSet_.emplace(field.toString());
-        readColumnNames_.emplace_back(field.toString());
+      auto fieldName = field.toString();
+      if (readColumnSet_.count(fieldName) == 0 &&
+          partitionKeys_.count(fieldName) == 0) {
+        readColumnSet_.emplace(fieldName);
+        readColumnNames_.emplace_back(fieldName);
       }
     }
   }
@@ -121,8 +140,8 @@ CudfHiveDataSource::CudfHiveDataSource(
   if (remainingFilter) {
     remainingFilterExprSet_ = expressionEvaluator_->compile(remainingFilter);
     for (const auto& field : remainingFilterExprSet_->distinctFields()) {
-      // Add fields in the filter to the columns to read if not there
-      if (readColumnSet_.count(field->name()) == 0) {
+      if (readColumnSet_.count(field->name()) == 0 &&
+          partitionKeys_.count(field->name()) == 0) {
         readColumnSet_.emplace(field->name());
         readColumnNames_.emplace_back(field->name());
       }
@@ -224,6 +243,67 @@ CudfHiveDataSource::CudfHiveDataSource(
       cudfHiveConfig_->useExperimentalCudfReaderSession(
           connectorQueryCtx_->sessionProperties());
 }
+
+namespace {
+
+std::unique_ptr<cudf::column> makePartitionColumn(
+    const std::string& valueStr,
+    const TypePtr& type,
+    cudf::size_type nRows,
+    rmm::cuda_stream_view stream) {
+  switch (type->kind()) {
+    case TypeKind::TINYINT: {
+      cudf::numeric_scalar<int8_t> s(
+          static_cast<int8_t>(std::stoi(valueStr)), true, stream);
+      return cudf::make_column_from_scalar(s, nRows, stream);
+    }
+    case TypeKind::SMALLINT: {
+      cudf::numeric_scalar<int16_t> s(
+          static_cast<int16_t>(std::stoi(valueStr)), true, stream);
+      return cudf::make_column_from_scalar(s, nRows, stream);
+    }
+    case TypeKind::INTEGER: {
+      cudf::numeric_scalar<int32_t> s(std::stoi(valueStr), true, stream);
+      return cudf::make_column_from_scalar(s, nRows, stream);
+    }
+    case TypeKind::BIGINT: {
+      cudf::numeric_scalar<int64_t> s(std::stoll(valueStr), true, stream);
+      return cudf::make_column_from_scalar(s, nRows, stream);
+    }
+    case TypeKind::REAL: {
+      cudf::numeric_scalar<float> s(std::stof(valueStr), true, stream);
+      return cudf::make_column_from_scalar(s, nRows, stream);
+    }
+    case TypeKind::DOUBLE: {
+      cudf::numeric_scalar<double> s(std::stod(valueStr), true, stream);
+      return cudf::make_column_from_scalar(s, nRows, stream);
+    }
+    case TypeKind::BOOLEAN: {
+      cudf::numeric_scalar<bool> s(
+          valueStr == "true" || valueStr == "1", true, stream);
+      return cudf::make_column_from_scalar(s, nRows, stream);
+    }
+    case TypeKind::VARCHAR: {
+      cudf::string_scalar s(valueStr, true, stream);
+      return cudf::make_column_from_scalar(s, nRows, stream);
+    }
+    default:
+      VELOX_FAIL(
+          "Unsupported partition key type: {}", type->toString());
+  }
+}
+
+std::unique_ptr<cudf::column> makeNullPartitionColumn(
+    const TypePtr& type,
+    cudf::size_type nRows,
+    rmm::cuda_stream_view stream) {
+  auto cudfType = cudf::data_type{veloxToCudfTypeId(type)};
+  auto scalar = cudf::make_default_constructed_scalar(cudfType, stream);
+  scalar->set_valid_async(false, stream);
+  return cudf::make_column_from_scalar(*scalar, nRows, stream);
+}
+
+} // namespace
 
 std::optional<RowVectorPtr> CudfHiveDataSource::next(
     uint64_t /*size*/,
@@ -368,8 +448,43 @@ std::optional<RowVectorPtr> CudfHiveDataSource::next(
   // Output RowVectorPtr
   const auto nRows = cudfTable->num_rows();
 
-  // keep only outputType_.size() columns in cudfTable_
-  if (outputType_->size() < cudfTable->num_columns()) {
+  // Inject constant columns for Hive partition keys. The reader only returns
+  // non-partition columns; we reconstruct the full outputType_ layout here.
+  if (!partitionKeys_.empty()) {
+    auto readerColumns = cudfTable->release();
+    std::vector<std::unique_ptr<cudf::column>> allColumns;
+    allColumns.reserve(outputType_->size());
+
+    size_t readerIdx = 0;
+    for (size_t i = 0; i < outputType_->size(); ++i) {
+      const auto& colName = outputType_->nameOf(i);
+      if (partitionKeys_.count(colName)) {
+        auto pkIt = splitPartitionValues_.find(colName);
+        VELOX_CHECK(
+            pkIt != splitPartitionValues_.end(),
+            "Missing partition value for column: {}",
+            colName);
+        if (pkIt->second.has_value()) {
+          allColumns.push_back(makePartitionColumn(
+              pkIt->second.value(),
+              outputType_->childAt(i),
+              nRows,
+              stream_));
+        } else {
+          allColumns.push_back(makeNullPartitionColumn(
+              outputType_->childAt(i), nRows, stream_));
+        }
+      } else {
+        VELOX_CHECK_LT(
+            readerIdx,
+            readerColumns.size(),
+            "Reader returned fewer columns than expected");
+        allColumns.push_back(std::move(readerColumns[readerIdx++]));
+      }
+    }
+    cudfTable = std::make_unique<cudf::table>(std::move(allColumns));
+  } else if (outputType_->size() < cudfTable->num_columns()) {
+    // No partition keys: trim extra filter-only columns.
     auto cudfTableColumns = cudfTable->release();
     std::vector<std::unique_ptr<cudf::column>> originalColumns;
     originalColumns.reserve(outputType_->size());
@@ -435,6 +550,7 @@ void CudfHiveDataSource::addSplit(std::shared_ptr<ConnectorSplit> split) {
           hiveSplit->fileFormat,
           dwio::common::FileFormat::PARQUET,
           "Unsupported file format for conversion from HiveConnectorSplit to CudfHiveConnectorSplit");
+      splitPartitionValues_ = hiveSplit->partitionKeys;
       // Remove "file:" prefix from the file path if present
       std::string cleanedPath = hiveSplit->filePath;
       constexpr std::string_view kFilePrefix = "file:";
