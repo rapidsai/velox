@@ -241,10 +241,10 @@ std::optional<RowVectorPtr> CudfHiveDataSource::next(
     VELOX_CHECK_NOT_NULL(splitReader_, "cudf parquet reader not present");
 
     if (not splitReader_->has_next()) {
-      VLOG(1) << "CudfHiveDataSource [" << connectorQueryCtx_->scanId()
-              << "] split complete: " << completedRows_ << " rows read"
-              << (subfieldFilterExpr_ ? " (filter active)" : "")
-              << " file=" << split_->filePath;
+      LOG(INFO) << "CudfHiveDataSource [" << connectorQueryCtx_->scanId()
+                << "] split complete: " << completedRows_ << " rows read"
+                << (subfieldFilterExpr_ ? " (filter active)" : "")
+                << " file=" << split_->filePath;
       return nullptr;
     }
 
@@ -273,15 +273,15 @@ std::optional<RowVectorPtr> CudfHiveDataSource::next(
       if (readerOptions_.get_filter().has_value()) {
         rowGroupIndices = exptSplitReader_->filter_row_groups_with_stats(
             rowGroupIndices, readerOptions_, stream_);
-        VLOG(1) << "CudfHiveDataSource [" << connectorQueryCtx_->scanId()
-                << "] row-group pruning: " << totalRowGroups << " total, "
-                << afterByteRangeFilter << " after byte-range, "
-                << rowGroupIndices.size() << " after stats filter ("
-                << (totalRowGroups > 0
-                        ? (totalRowGroups - rowGroupIndices.size()) * 100 /
-                            totalRowGroups
-                        : 0)
-                << "% pruned) file=" << split_->filePath;
+        LOG(INFO) << "CudfHiveDataSource [" << connectorQueryCtx_->scanId()
+                  << "] row-group pruning: " << totalRowGroups << " total, "
+                  << afterByteRangeFilter << " after byte-range, "
+                  << rowGroupIndices.size() << " after stats filter ("
+                  << (totalRowGroups > 0
+                          ? (totalRowGroups - rowGroupIndices.size()) * 100 /
+                              totalRowGroups
+                          : 0)
+                  << "% pruned) file=" << split_->filePath;
       }
 
       // Get column chunk byte ranges to fetch
@@ -318,10 +318,10 @@ std::optional<RowVectorPtr> CudfHiveDataSource::next(
     });
 
     if (not exptSplitReader_->has_next_table_chunk()) {
-      VLOG(1) << "CudfHiveDataSource [" << connectorQueryCtx_->scanId()
-              << "] split complete (hybrid): " << completedRows_ << " rows read"
-              << (subfieldFilterExpr_ ? " (filter active)" : "")
-              << " file=" << split_->filePath;
+      LOG(INFO) << "CudfHiveDataSource [" << connectorQueryCtx_->scanId()
+                << "] split complete (hybrid): " << completedRows_ << " rows read"
+                << (subfieldFilterExpr_ ? " (filter active)" : "")
+                << " file=" << split_->filePath;
       return nullptr;
     }
 
@@ -570,8 +570,8 @@ void CudfHiveDataSource::setupCudfDataSourceAndOptions() {
 
   if (subfieldFilterExpr_ != nullptr) {
     readerOptions_.set_filter(*subfieldFilterExpr_);
-    VLOG(1) << "CudfHiveDataSource [" << connectorQueryCtx_->scanId()
-            << "] filter pushdown active for " << split_->filePath;
+    LOG(INFO) << "CudfHiveDataSource [" << connectorQueryCtx_->scanId()
+              << "] filter pushdown active for " << split_->filePath;
   }
 
   // Set column projection if needed
@@ -609,11 +609,11 @@ CudfParquetReaderPtr CudfHiveDataSource::createSplitReader() {
         std::vector<cudf::size_type> indices(
             rowGroupIndices.begin(), rowGroupIndices.end());
         readerOptions_.set_row_groups({std::move(indices)});
-        VLOG(1) << "CudfHiveDataSource [" << connectorQueryCtx_->scanId()
-                << "] row-group pruning: " << totalRowGroups << " total, "
-                << keptRowGroups << " kept ("
-                << (totalRowGroups - keptRowGroups) * 100 / totalRowGroups
-                << "% pruned) file=" << split_->filePath;
+        LOG(INFO) << "CudfHiveDataSource [" << connectorQueryCtx_->scanId()
+                  << "] row-group pruning (regular reader): " << totalRowGroups
+                  << " total, " << keptRowGroups << " kept ("
+                  << (totalRowGroups - keptRowGroups) * 100 / totalRowGroups
+                  << "% pruned) file=" << split_->filePath;
       }
     } catch (const std::exception& e) {
       LOG(WARNING) << "CudfHiveDataSource [" << connectorQueryCtx_->scanId()
