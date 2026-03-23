@@ -20,13 +20,19 @@
 
 #include "velox/exec/Operator.h"
 
+#include <cudf/table/table.hpp>
+
 namespace facebook::velox::cudf_velox {
 
 /// GPU-accelerated Window operator using cuDF's grouped_rolling_window API.
-/// Buffers all input, sorts by partition + order keys, then evaluates each
-/// window function via cuDF and appends the result columns.
 ///
-/// Currently supports: LAG, LEAD, ROW_NUMBER, RANK, DENSE_RANK,
+/// Each incoming batch is immediately concatenated into an accumulated cudf
+/// table on the GPU in addInput(), avoiding the need to hold separate batch
+/// pointers and perform a bulk concatenation in getOutput(). Once all input
+/// has arrived, getOutput() sorts (if needed), evaluates the window functions,
+/// and returns the result.
+///
+/// Currently supports: LAG, LEAD, ROW_NUMBER, FIRST_VALUE, LAST_VALUE,
 /// and aggregate window functions (SUM, MIN, MAX, COUNT, AVG).
 class CudfWindow : public exec::Operator, public NvtxHelper {
  public:
@@ -59,7 +65,13 @@ class CudfWindow : public exec::Operator, public NvtxHelper {
   std::vector<cudf::order> sortOrders_;
   std::vector<cudf::null_order> nullOrders_;
 
-  std::vector<std::shared_ptr<CudfVector>> inputBatches_;
+  // Accumulated input data on the GPU. Each addInput() call concatenates
+  // the new batch into this table immediately rather than deferring to
+  // getOutput().
+  std::unique_ptr<cudf::table> accumulatedData_;
+  rmm::cuda_stream_view stream_{cudf::get_default_stream()};
+  memory::MemoryPool* pool_{nullptr};
+
   bool finished_ = false;
 };
 
