@@ -45,6 +45,7 @@ class HiveDataSource : public DataSource {
   static constexpr std::string_view kNumRamRead{"numRamRead"};
   static constexpr std::string_view kRamReadBytes{"ramReadBytes"};
   static constexpr std::string_view kNumBucketConversion{"numBucketConversion"};
+  static constexpr std::string_view kFileFormat{"fileFormat."};
 
   HiveDataSource(
       const RowTypePtr& outputType,
@@ -182,7 +183,8 @@ class HiveDataSource : public DataSource {
   std::unique_ptr<exec::ExprSet> remainingFilterExprSet_;
   RowVectorPtr emptyOutput_;
   dwio::common::RuntimeStatistics runtimeStats_;
-  std::atomic<uint64_t> totalRemainingFilterTime_{0};
+  std::atomic_uint64_t totalRemainingFilterTime_{0};
+  std::atomic_uint64_t totalRemainingFilterCpuTime_{0};
   uint64_t completedRows_ = 0;
 
   // Field indices referenced in both remaining filter and output type. These
@@ -192,6 +194,9 @@ class HiveDataSource : public DataSource {
   std::shared_ptr<random::RandomSkipTracker> randomSkip_;
 
   int64_t numBucketConversion_ = 0;
+
+  // Tracks the number of splits read per file format.
+  std::unordered_map<dwio::common::FileFormat, int64_t> numSplitsByFileFormat_;
 
   // Reusable memory for remaining filter evaluation.
   VectorPtr filterResult_;

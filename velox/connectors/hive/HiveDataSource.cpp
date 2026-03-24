@@ -22,6 +22,7 @@
 
 #include "velox/common/Casts.h"
 #include "velox/common/testutil/TestValue.h"
+#include "velox/common/time/CpuWallTimer.h"
 #include "velox/connectors/hive/HiveConfig.h"
 
 #include "velox/expression/FieldReference.h"
@@ -301,6 +302,8 @@ void HiveDataSource::addSplit(std::shared_ptr<ConnectorSplit> split) {
 
   VLOG(1) << "Adding split " << split_->toString();
 
+  ++numSplitsByFileFormat_[split_->fileFormat];
+
   if (splitReader_) {
     splitReader_.reset();
   }
@@ -426,7 +429,7 @@ std::unordered_map<std::string, RuntimeMetric>
 HiveDataSource::getRuntimeStats() {
   auto res = runtimeStats_.toRuntimeMetricMap();
   res.insert(
-      {Connector::kIoWaitWallNanos,
+      {std::string(Connector::kIoWaitWallNanos),
        RuntimeMetric(
            ioStatistics_->queryThreadIoLatencyUs().sum() * 1'000,
            ioStatistics_->queryThreadIoLatencyUs().count(),
@@ -436,7 +439,7 @@ HiveDataSource::getRuntimeStats() {
   // Breakdown of ioWaitWallNanos by I/O type
   if (ioStatistics_->storageReadLatencyUs().count() > 0) {
     res.insert(
-        {Connector::kStorageReadWallNanos,
+        {std::string(Connector::kStorageReadWallNanos),
          RuntimeMetric(
              ioStatistics_->storageReadLatencyUs().sum() * 1'000,
              ioStatistics_->storageReadLatencyUs().count(),
@@ -446,7 +449,7 @@ HiveDataSource::getRuntimeStats() {
   }
   if (ioStatistics_->ssdCacheReadLatencyUs().count() > 0) {
     res.insert(
-        {Connector::kSsdCacheReadWallNanos,
+        {std::string(Connector::kSsdCacheReadWallNanos),
          RuntimeMetric(
              ioStatistics_->ssdCacheReadLatencyUs().sum() * 1'000,
              ioStatistics_->ssdCacheReadLatencyUs().count(),
@@ -456,7 +459,7 @@ HiveDataSource::getRuntimeStats() {
   }
   if (ioStatistics_->cacheWaitLatencyUs().count() > 0) {
     res.insert(
-        {Connector::kCacheWaitWallNanos,
+        {std::string(Connector::kCacheWaitWallNanos),
          RuntimeMetric(
              ioStatistics_->cacheWaitLatencyUs().sum() * 1'000,
              ioStatistics_->cacheWaitLatencyUs().count(),
@@ -466,7 +469,7 @@ HiveDataSource::getRuntimeStats() {
   }
   if (ioStatistics_->coalescedSsdLoadLatencyUs().count() > 0) {
     res.insert(
-        {Connector::kCoalescedSsdLoadWallNanos,
+        {std::string(Connector::kCoalescedSsdLoadWallNanos),
          RuntimeMetric(
              ioStatistics_->coalescedSsdLoadLatencyUs().sum() * 1'000,
              ioStatistics_->coalescedSsdLoadLatencyUs().count(),
@@ -476,7 +479,7 @@ HiveDataSource::getRuntimeStats() {
   }
   if (ioStatistics_->coalescedStorageLoadLatencyUs().count() > 0) {
     res.insert(
-        {Connector::kCoalescedStorageLoadWallNanos,
+        {std::string(Connector::kCoalescedStorageLoadWallNanos),
          RuntimeMetric(
              ioStatistics_->coalescedStorageLoadLatencyUs().sum() * 1'000,
              ioStatistics_->coalescedStorageLoadLatencyUs().count(),
@@ -497,9 +500,13 @@ HiveDataSource::getRuntimeStats() {
        {std::string(kTotalScanTime),
         RuntimeMetric(
             ioStatistics_->totalScanTime(), RuntimeCounter::Unit::kNanos)},
-       {Connector::kTotalRemainingFilterTime,
+       {std::string(Connector::kTotalRemainingFilterTime),
         RuntimeMetric(
             totalRemainingFilterTime_.load(std::memory_order_relaxed),
+            RuntimeCounter::Unit::kNanos)},
+       {Connector::kTotalRemainingFilterCpuTime,
+        RuntimeMetric(
+            totalRemainingFilterCpuTime_.load(std::memory_order_relaxed),
             RuntimeCounter::Unit::kNanos)},
        {std::string(kOverreadBytes),
         RuntimeMetric(
@@ -546,6 +553,12 @@ HiveDataSource::getRuntimeStats() {
          RuntimeMetric(numBucketConversion_)});
   }
 
+  for (const auto& [format, count] : numSplitsByFileFormat_) {
+    res.insert(
+        {fmt::format("{}{}", kFileFormat, dwio::common::toString(format)),
+         RuntimeMetric(count)});
+  }
+
   const auto ioStatsMap = ioStats_->stats();
   for (const auto& storageStats : ioStatsMap) {
     res.emplace(storageStats.first, storageStats.second);
@@ -576,6 +589,10 @@ void HiveDataSource::setFromDataSource(
   ioStats_ = std::move(source->ioStats_);
 
   numBucketConversion_ += source->numBucketConversion_;
+
+  for (const auto& [format, count] : source->numSplitsByFileFormat_) {
+    numSplitsByFileFormat_[format] += count;
+  }
 }
 
 int64_t HiveDataSource::estimatedRowSize() {
@@ -597,17 +614,19 @@ vector_size_t HiveDataSource::evaluateRemainingFilter(RowVectorPtr& rowVector) {
         filterLazyDecoded_,
         filterLazyBaseRows_);
   }
-  uint64_t filterTimeUs{0};
+  CpuWallTiming filterTiming;
   vector_size_t rowsRemaining{0};
   {
-    MicrosecondTimer timer(&filterTimeUs);
+    CpuWallTimer timer(filterTiming);
     expressionEvaluator_->evaluate(
         remainingFilterExprSet_.get(), filterRows_, *rowVector, filterResult_);
     rowsRemaining = exec::processFilterResults(
         filterResult_, filterRows_, filterEvalCtx_, pool_);
   }
   totalRemainingFilterTime_.fetch_add(
-      filterTimeUs * 1000, std::memory_order_relaxed);
+      filterTiming.wallNanos, std::memory_order_relaxed);
+  totalRemainingFilterCpuTime_.fetch_add(
+      filterTiming.cpuNanos, std::memory_order_relaxed);
   return rowsRemaining;
 }
 

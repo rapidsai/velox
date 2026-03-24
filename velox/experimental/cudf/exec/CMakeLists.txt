@@ -23,8 +23,10 @@ add_library(
   CudfLocalMerge.cpp
   CudfLocalPartition.cpp
   CudfOrderBy.cpp
+  CudfBatchConcat.cpp
   CudfTopN.cpp
   DebugUtil.cpp
+  GpuResources.cpp
   OperatorAdapters.cpp
   ToCudf.cpp
   Utilities.cpp
