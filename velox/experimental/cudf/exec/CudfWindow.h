@@ -58,14 +58,41 @@ class CudfWindow : public exec::Operator, public NvtxHelper {
   bool isFinished() override;
 
  private:
-  // Compute rank/dense_rank/row_number via cudf::groupby::scan.
+  // Resolve the input column index for a window function's first argument.
+  cudf::size_type resolveInputColumn(
+      const core::WindowNode::Function& func) const;
+
+  // Compute row_number/rank/dense_rank via cudf::groupby::scan.
   std::unique_ptr<cudf::column> computeRankColumn(
       cudf::table_view const& sortedInput,
       const std::string& baseName,
       rmm::cuda_stream_view stream) const;
 
+  // Compute LAG or LEAD via cudf::grouped_rolling_window.
+  std::unique_ptr<cudf::column> computeLeadLagColumn(
+      cudf::table_view const& partKeys,
+      cudf::column_view inputCol,
+      const core::WindowNode::Function& func,
+      const std::string& baseName,
+      rmm::cuda_stream_view stream) const;
+
+  // Compute first_value or last_value via cudf::grouped_rolling_window.
+  std::unique_ptr<cudf::column> computeNthValueColumn(
+      cudf::table_view const& partKeys,
+      cudf::column_view inputCol,
+      const core::WindowNode::Function& func,
+      const std::string& baseName,
+      rmm::cuda_stream_view stream) const;
+
+  // Compute aggregate window functions (sum, min, max, count, avg).
+  std::unique_ptr<cudf::column> computeAggregateColumn(
+      cudf::table_view const& partKeys,
+      cudf::column_view inputCol,
+      const std::string& baseName,
+      rmm::cuda_stream_view stream) const;
+
   // Build a zero-copy STRUCT column_view over multiple sort key columns
-  // so cudf's row equality comparator detects ties across composite keys.
+  // for composite-key tie detection in rank functions.
   cudf::column_view multiSortKeyStructView(
       cudf::table_view const& sortedInput) const;
 

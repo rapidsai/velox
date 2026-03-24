@@ -19,6 +19,7 @@
 
 #include "velox/exec/tests/utils/AssertQueryBuilder.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
+#include "velox/functions/prestosql/aggregates/RegisterAggregateFunctions.h"
 #include "velox/functions/prestosql/registration/RegistrationFunctions.h"
 #include "velox/functions/prestosql/window/WindowFunctionsRegistration.h"
 #include "velox/parse/TypeResolver.h"
@@ -45,6 +46,7 @@ class CudfWindowTest : public testing::Test,
       serializer::presto::PrestoVectorSerde::registerVectorSerde();
     }
     functions::prestosql::registerAllScalarFunctions();
+    aggregate::prestosql::registerAllAggregateFunctions();
     window::prestosql::registerAllWindowFunctions();
     parse::registerTypeResolver();
     cudf_velox::CudfConfig::getInstance().allowCpuFallback = false;
@@ -109,6 +111,208 @@ TEST_F(CudfWindowTest, lagLead) {
           makeFlatVector<int64_t>({100, 200, 300, 10, 20}),
           lagValues,
           leadValues,
+      });
+
+  AssertQueryBuilder(plan).assertResults(expected);
+}
+
+TEST_F(CudfWindowTest, rankPartitionOrder) {
+  // Ties: partition 1 has two rows with val=20.
+  auto data = makeRowVector(
+      {"id", "val"},
+      {
+          makeFlatVector<int32_t>({1, 1, 1, 1, 2, 2, 2}),
+          makeFlatVector<int64_t>({10, 20, 20, 30, 5, 5, 15}),
+      });
+
+  auto plan = PlanBuilder()
+                  .values({data})
+                  .window({"rank() over (partition by id order by val)"})
+                  .orderBy({"id ASC NULLS LAST", "val ASC NULLS LAST"}, false)
+                  .planNode();
+
+  // rank(): tied rows get the same rank, next rank skips.
+  // Partition 1 (10,20,20,30): 1,2,2,4
+  // Partition 2 (5,5,15): 1,1,3
+  auto expected = makeRowVector(
+      {"id", "val", "w0"},
+      {
+          makeFlatVector<int32_t>({1, 1, 1, 1, 2, 2, 2}),
+          makeFlatVector<int64_t>({10, 20, 20, 30, 5, 5, 15}),
+          makeFlatVector<int64_t>({1, 2, 2, 4, 1, 1, 3}),
+      });
+
+  AssertQueryBuilder(plan).assertResults(expected);
+}
+
+TEST_F(CudfWindowTest, denseRankPartitionOrder) {
+  auto data = makeRowVector(
+      {"id", "val"},
+      {
+          makeFlatVector<int32_t>({1, 1, 1, 1, 2, 2, 2}),
+          makeFlatVector<int64_t>({10, 20, 20, 30, 5, 5, 15}),
+      });
+
+  auto plan = PlanBuilder()
+                  .values({data})
+                  .window({"dense_rank() over (partition by id order by val)"})
+                  .orderBy({"id ASC NULLS LAST", "val ASC NULLS LAST"}, false)
+                  .planNode();
+
+  // dense_rank(): tied rows get the same rank, no gaps.
+  // Partition 1 (10,20,20,30): 1,2,2,3
+  // Partition 2 (5,5,15): 1,1,2
+  auto expected = makeRowVector(
+      {"id", "val", "w0"},
+      {
+          makeFlatVector<int32_t>({1, 1, 1, 1, 2, 2, 2}),
+          makeFlatVector<int64_t>({10, 20, 20, 30, 5, 5, 15}),
+          makeFlatVector<int64_t>({1, 2, 2, 3, 1, 1, 2}),
+      });
+
+  AssertQueryBuilder(plan).assertResults(expected);
+}
+
+TEST_F(CudfWindowTest, firstValueLastValue) {
+  auto data = makeRowVector(
+      {"id", "val"},
+      {
+          makeFlatVector<int32_t>({1, 1, 1, 2, 2}),
+          makeFlatVector<int64_t>({10, 20, 30, 100, 200}),
+      });
+
+  auto plan =
+      PlanBuilder()
+          .values({data})
+          .window({
+              "first_value(val) over (partition by id order by val) as fv",
+              "last_value(val) over (partition by id order by val "
+              "rows between unbounded preceding and unbounded following) as lv",
+          })
+          .orderBy({"id ASC NULLS LAST", "val ASC NULLS LAST"}, false)
+          .planNode();
+
+  auto expected = makeRowVector(
+      {"id", "val", "fv", "lv"},
+      {
+          makeFlatVector<int32_t>({1, 1, 1, 2, 2}),
+          makeFlatVector<int64_t>({10, 20, 30, 100, 200}),
+          makeFlatVector<int64_t>({10, 10, 10, 100, 100}),
+          makeFlatVector<int64_t>({30, 30, 30, 200, 200}),
+      });
+
+  AssertQueryBuilder(plan).assertResults(expected);
+}
+
+TEST_F(CudfWindowTest, sumWindow) {
+  auto data = makeRowVector(
+      {"id", "val"},
+      {
+          makeFlatVector<int32_t>({1, 1, 1, 2, 2}),
+          makeFlatVector<int64_t>({10, 20, 30, 100, 200}),
+      });
+
+  auto plan =
+      PlanBuilder()
+          .values({data})
+          .window({
+              "sum(val) over (partition by id) as total",
+          })
+          .orderBy({"id ASC NULLS LAST", "val ASC NULLS LAST"}, false)
+          .planNode();
+
+  auto expected = makeRowVector(
+      {"id", "val", "total"},
+      {
+          makeFlatVector<int32_t>({1, 1, 1, 2, 2}),
+          makeFlatVector<int64_t>({10, 20, 30, 100, 200}),
+          makeFlatVector<int64_t>({60, 60, 60, 300, 300}),
+      });
+
+  AssertQueryBuilder(plan).assertResults(expected);
+}
+
+TEST_F(CudfWindowTest, minMaxWindow) {
+  auto data = makeRowVector(
+      {"id", "val"},
+      {
+          makeFlatVector<int32_t>({1, 1, 1, 2, 2}),
+          makeFlatVector<int64_t>({10, 20, 30, 100, 200}),
+      });
+
+  auto plan =
+      PlanBuilder()
+          .values({data})
+          .window({
+              "min(val) over (partition by id) as mn",
+              "max(val) over (partition by id) as mx",
+          })
+          .orderBy({"id ASC NULLS LAST", "val ASC NULLS LAST"}, false)
+          .planNode();
+
+  auto expected = makeRowVector(
+      {"id", "val", "mn", "mx"},
+      {
+          makeFlatVector<int32_t>({1, 1, 1, 2, 2}),
+          makeFlatVector<int64_t>({10, 20, 30, 100, 200}),
+          makeFlatVector<int64_t>({10, 10, 10, 100, 100}),
+          makeFlatVector<int64_t>({30, 30, 30, 200, 200}),
+      });
+
+  AssertQueryBuilder(plan).assertResults(expected);
+}
+
+TEST_F(CudfWindowTest, countWindow) {
+  auto data = makeRowVector(
+      {"id", "val"},
+      {
+          makeFlatVector<int32_t>({1, 1, 1, 2, 2}),
+          makeFlatVector<int64_t>({10, 20, 30, 100, 200}),
+      });
+
+  auto plan =
+      PlanBuilder()
+          .values({data})
+          .window({
+              "count(val) over (partition by id) as cnt",
+          })
+          .orderBy({"id ASC NULLS LAST", "val ASC NULLS LAST"}, false)
+          .planNode();
+
+  auto expected = makeRowVector(
+      {"id", "val", "cnt"},
+      {
+          makeFlatVector<int32_t>({1, 1, 1, 2, 2}),
+          makeFlatVector<int64_t>({10, 20, 30, 100, 200}),
+          makeFlatVector<int64_t>({3, 3, 3, 2, 2}),
+      });
+
+  AssertQueryBuilder(plan).assertResults(expected);
+}
+
+TEST_F(CudfWindowTest, avgWindow) {
+  auto data = makeRowVector(
+      {"id", "val"},
+      {
+          makeFlatVector<int32_t>({1, 1, 1, 2, 2}),
+          makeFlatVector<double>({10.0, 20.0, 30.0, 100.0, 200.0}),
+      });
+
+  auto plan =
+      PlanBuilder()
+          .values({data})
+          .window({
+              "avg(val) over (partition by id) as average",
+          })
+          .orderBy({"id ASC NULLS LAST", "val ASC NULLS LAST"}, false)
+          .planNode();
+
+  auto expected = makeRowVector(
+      {"id", "val", "average"},
+      {
+          makeFlatVector<int32_t>({1, 1, 1, 2, 2}),
+          makeFlatVector<double>({10.0, 20.0, 30.0, 100.0, 200.0}),
+          makeFlatVector<double>({20.0, 20.0, 20.0, 150.0, 150.0}),
       });
 
   AssertQueryBuilder(plan).assertResults(expected);

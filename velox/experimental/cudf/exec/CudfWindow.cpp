@@ -201,6 +201,90 @@ void CudfWindow::addInput(RowVectorPtr input) {
   inputBatches_.push_back(std::move(cudfInput));
 }
 
+cudf::size_type CudfWindow::resolveInputColumn(
+    const core::WindowNode::Function& func) const {
+  if (!func.functionCall->inputs().empty()) {
+    if (auto field =
+            std::dynamic_pointer_cast<const core::FieldAccessTypedExpr>(
+                func.functionCall->inputs()[0])) {
+      return windowNode_->inputType()->getChildIdx(field->name());
+    }
+  }
+  return 0;
+}
+
+std::unique_ptr<cudf::column> CudfWindow::computeLeadLagColumn(
+    cudf::table_view const& partKeys,
+    cudf::column_view inputCol,
+    const core::WindowNode::Function& func,
+    const std::string& baseName,
+    rmm::cuda_stream_view stream) const {
+  auto mr = cudf::get_current_device_resource_ref();
+  VELOX_CHECK_LE(
+      func.functionCall->inputs().size(), 2,
+      "cudf {} does not support default value (3rd argument)", baseName);
+  auto offset = getLeadLagOffset(func);
+
+  if (baseName == "lag") {
+    auto agg = cudf::make_lag_aggregation<cudf::rolling_aggregation>(offset);
+    return cudf::grouped_rolling_window(
+        partKeys, inputCol, offset + 1, 0, offset + 1, *agg, stream, mr);
+  }
+  auto agg = cudf::make_lead_aggregation<cudf::rolling_aggregation>(offset);
+  return cudf::grouped_rolling_window(
+      partKeys, inputCol, 0, offset + 1, offset + 1, *agg, stream, mr);
+}
+
+std::unique_ptr<cudf::column> CudfWindow::computeNthValueColumn(
+    cudf::table_view const& partKeys,
+    cudf::column_view inputCol,
+    const core::WindowNode::Function& func,
+    const std::string& baseName,
+    rmm::cuda_stream_view stream) const {
+  auto mr = cudf::get_current_device_resource_ref();
+  auto nullPolicy = func.ignoreNulls ? cudf::null_policy::EXCLUDE
+                                     : cudf::null_policy::INCLUDE;
+  if (baseName == "first_value") {
+    auto agg = cudf::make_nth_element_aggregation<cudf::rolling_aggregation>(
+        0, nullPolicy);
+    auto unbounded = cudf::window_bounds::unbounded();
+    auto current = cudf::window_bounds::get(1);
+    return cudf::grouped_rolling_window(
+        partKeys, inputCol, unbounded, current, 1, *agg, stream, mr);
+  }
+  // last_value
+  auto agg = cudf::make_nth_element_aggregation<cudf::rolling_aggregation>(
+      -1, nullPolicy);
+  auto unbounded = cudf::window_bounds::unbounded();
+  auto current = cudf::window_bounds::get(1);
+  return cudf::grouped_rolling_window(
+      partKeys, inputCol, current, unbounded, 1, *agg, stream, mr);
+}
+
+std::unique_ptr<cudf::column> CudfWindow::computeAggregateColumn(
+    cudf::table_view const& partKeys,
+    cudf::column_view inputCol,
+    const std::string& baseName,
+    rmm::cuda_stream_view stream) const {
+  auto mr = cudf::get_current_device_resource_ref();
+  std::unique_ptr<cudf::rolling_aggregation> agg;
+  if (baseName == "sum") {
+    agg = cudf::make_sum_aggregation<cudf::rolling_aggregation>();
+  } else if (baseName == "min") {
+    agg = cudf::make_min_aggregation<cudf::rolling_aggregation>();
+  } else if (baseName == "max") {
+    agg = cudf::make_max_aggregation<cudf::rolling_aggregation>();
+  } else if (baseName == "count") {
+    agg = cudf::make_count_aggregation<cudf::rolling_aggregation>(
+        cudf::null_policy::EXCLUDE);
+  } else {
+    agg = cudf::make_mean_aggregation<cudf::rolling_aggregation>();
+  }
+  auto bounds = cudf::window_bounds::unbounded();
+  return cudf::grouped_rolling_window(
+      partKeys, inputCol, bounds, bounds, 1, *agg, stream, mr);
+}
+
 void CudfWindow::noMoreInput() {
   Operator::noMoreInput();
   if (inputBatches_.empty()) {
@@ -283,58 +367,20 @@ RowVectorPtr CudfWindow::getOutput() {
 
   // 3. Evaluate each window function and collect result columns.
   std::vector<std::unique_ptr<cudf::column>> windowResultCols;
-  const auto& funcs = windowNode_->windowFunctions();
+  const auto& prefix = CudfConfig::getInstance().functionNamePrefix;
 
-  for (const auto& func : funcs) {
-    const auto baseName = stripFunctionPrefix(
-        func.functionCall->name(),
-        CudfConfig::getInstance().functionNamePrefix);
-
-    cudf::size_type inputColIdx = 0;
-    if (!func.functionCall->inputs().empty()) {
-      if (auto field =
-              std::dynamic_pointer_cast<const core::FieldAccessTypedExpr>(
-                  func.functionCall->inputs()[0])) {
-        inputColIdx = windowNode_->inputType()->getChildIdx(field->name());
-      }
-    }
+  for (const auto& func : windowNode_->windowFunctions()) {
+    const auto baseName =
+        stripFunctionPrefix(func.functionCall->name(), prefix);
+    auto inputColIdx = resolveInputColumn(func);
     auto inputCol = sortedView.column(inputColIdx);
 
-    if (baseName == "lag") {
-      VELOX_CHECK_LE(
-          func.functionCall->inputs().size(), 2,
-          "cudf LAG does not support default value (3rd argument)");
-      auto offset = getLeadLagOffset(func);
-      auto agg = cudf::make_lag_aggregation<cudf::rolling_aggregation>(offset);
-      windowResultCols.push_back(cudf::grouped_rolling_window(
-          partKeys, inputCol, offset + 1, 0, offset + 1, *agg, stream, mr));
-    } else if (baseName == "lead") {
-      VELOX_CHECK_LE(
-          func.functionCall->inputs().size(), 2,
-          "cudf LEAD does not support default value (3rd argument)");
-      auto offset = getLeadLagOffset(func);
-      auto agg =
-          cudf::make_lead_aggregation<cudf::rolling_aggregation>(offset);
-      windowResultCols.push_back(cudf::grouped_rolling_window(
-          partKeys, inputCol, 0, offset + 1, offset + 1, *agg, stream, mr));
-    } else if (baseName == "first_value") {
-      auto agg = cudf::make_nth_element_aggregation<cudf::rolling_aggregation>(
-          0,
-          func.ignoreNulls ? cudf::null_policy::EXCLUDE
-                           : cudf::null_policy::INCLUDE);
-      auto unbounded = cudf::window_bounds::unbounded();
-      auto current = cudf::window_bounds::get(1);
-      windowResultCols.push_back(cudf::grouped_rolling_window(
-          partKeys, inputCol, unbounded, current, 1, *agg, stream, mr));
-    } else if (baseName == "last_value") {
-      auto agg = cudf::make_nth_element_aggregation<cudf::rolling_aggregation>(
-          -1,
-          func.ignoreNulls ? cudf::null_policy::EXCLUDE
-                           : cudf::null_policy::INCLUDE);
-      auto unbounded = cudf::window_bounds::unbounded();
-      auto current = cudf::window_bounds::get(1);
-      windowResultCols.push_back(cudf::grouped_rolling_window(
-          partKeys, inputCol, current, unbounded, 1, *agg, stream, mr));
+    if (baseName == "lag" || baseName == "lead") {
+      windowResultCols.push_back(
+          computeLeadLagColumn(partKeys, inputCol, func, baseName, stream));
+    } else if (baseName == "first_value" || baseName == "last_value") {
+      windowResultCols.push_back(
+          computeNthValueColumn(partKeys, inputCol, func, baseName, stream));
     } else if (
         baseName == "row_number" || baseName == "rank" ||
         baseName == "dense_rank") {
@@ -343,22 +389,8 @@ RowVectorPtr CudfWindow::getOutput() {
     } else if (
         baseName == "sum" || baseName == "min" || baseName == "max" ||
         baseName == "count" || baseName == "avg") {
-      std::unique_ptr<cudf::rolling_aggregation> agg;
-      if (baseName == "sum") {
-        agg = cudf::make_sum_aggregation<cudf::rolling_aggregation>();
-      } else if (baseName == "min") {
-        agg = cudf::make_min_aggregation<cudf::rolling_aggregation>();
-      } else if (baseName == "max") {
-        agg = cudf::make_max_aggregation<cudf::rolling_aggregation>();
-      } else if (baseName == "count") {
-        agg = cudf::make_count_aggregation<cudf::rolling_aggregation>(
-            cudf::null_policy::EXCLUDE);
-      } else {
-        agg = cudf::make_mean_aggregation<cudf::rolling_aggregation>();
-      }
-      auto bounds = cudf::window_bounds::unbounded();
-      windowResultCols.push_back(cudf::grouped_rolling_window(
-          partKeys, inputCol, bounds, bounds, 1, *agg, stream, mr));
+      windowResultCols.push_back(
+          computeAggregateColumn(partKeys, inputCol, baseName, stream));
     } else {
       VELOX_FAIL("Unsupported window function for cudf: {}", baseName);
     }
