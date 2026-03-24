@@ -392,6 +392,7 @@ target_link_libraries(
   velox_exec_test_lib
   velox_test_util
   velox_window
+  velox_aggregates
   gtest
   gtest_main
   fmt::fmt
