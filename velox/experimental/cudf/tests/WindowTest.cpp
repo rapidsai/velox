@@ -91,14 +91,15 @@ TEST_F(CudfWindowTest, lagLead) {
           makeFlatVector<int64_t>({100, 200, 300, 10, 20}),
       });
 
-  auto plan = PlanBuilder()
-                  .values({data})
-                  .window({
-                      "lag(val, 1) over (partition by id order by val) as lag_val",
-                      "lead(val, 1) over (partition by id order by val) as lead_val",
-                  })
-                  .orderBy({"id ASC NULLS LAST", "val ASC NULLS LAST"}, false)
-                  .planNode();
+  auto plan =
+      PlanBuilder()
+          .values({data})
+          .window({
+              "lag(val, 1) over (partition by id order by val) as lag_val",
+              "lead(val, 1) over (partition by id order by val) as lead_val",
+          })
+          .orderBy({"id ASC NULLS LAST", "val ASC NULLS LAST"}, false)
+          .planNode();
 
   auto lagValues = makeNullableFlatVector<int64_t>(
       {std::nullopt, 100, 200, std::nullopt, 10});
@@ -212,14 +213,13 @@ TEST_F(CudfWindowTest, sumWindow) {
           makeFlatVector<int64_t>({10, 20, 30, 100, 200}),
       });
 
-  auto plan =
-      PlanBuilder()
-          .values({data})
-          .window({
-              "sum(val) over (partition by id) as total",
-          })
-          .orderBy({"id ASC NULLS LAST", "val ASC NULLS LAST"}, false)
-          .planNode();
+  auto plan = PlanBuilder()
+                  .values({data})
+                  .window({
+                      "sum(val) over (partition by id) as total",
+                  })
+                  .orderBy({"id ASC NULLS LAST", "val ASC NULLS LAST"}, false)
+                  .planNode();
 
   auto expected = makeRowVector(
       {"id", "val", "total"},
@@ -240,15 +240,14 @@ TEST_F(CudfWindowTest, minMaxWindow) {
           makeFlatVector<int64_t>({10, 20, 30, 100, 200}),
       });
 
-  auto plan =
-      PlanBuilder()
-          .values({data})
-          .window({
-              "min(val) over (partition by id) as mn",
-              "max(val) over (partition by id) as mx",
-          })
-          .orderBy({"id ASC NULLS LAST", "val ASC NULLS LAST"}, false)
-          .planNode();
+  auto plan = PlanBuilder()
+                  .values({data})
+                  .window({
+                      "min(val) over (partition by id) as mn",
+                      "max(val) over (partition by id) as mx",
+                  })
+                  .orderBy({"id ASC NULLS LAST", "val ASC NULLS LAST"}, false)
+                  .planNode();
 
   auto expected = makeRowVector(
       {"id", "val", "mn", "mx"},
@@ -270,14 +269,13 @@ TEST_F(CudfWindowTest, countWindow) {
           makeFlatVector<int64_t>({10, 20, 30, 100, 200}),
       });
 
-  auto plan =
-      PlanBuilder()
-          .values({data})
-          .window({
-              "count(val) over (partition by id) as cnt",
-          })
-          .orderBy({"id ASC NULLS LAST", "val ASC NULLS LAST"}, false)
-          .planNode();
+  auto plan = PlanBuilder()
+                  .values({data})
+                  .window({
+                      "count(val) over (partition by id) as cnt",
+                  })
+                  .orderBy({"id ASC NULLS LAST", "val ASC NULLS LAST"}, false)
+                  .planNode();
 
   auto expected = makeRowVector(
       {"id", "val", "cnt"},
@@ -298,14 +296,13 @@ TEST_F(CudfWindowTest, avgWindow) {
           makeFlatVector<double>({10.0, 20.0, 30.0, 100.0, 200.0}),
       });
 
-  auto plan =
-      PlanBuilder()
-          .values({data})
-          .window({
-              "avg(val) over (partition by id) as average",
-          })
-          .orderBy({"id ASC NULLS LAST", "val ASC NULLS LAST"}, false)
-          .planNode();
+  auto plan = PlanBuilder()
+                  .values({data})
+                  .window({
+                      "avg(val) over (partition by id) as average",
+                  })
+                  .orderBy({"id ASC NULLS LAST", "val ASC NULLS LAST"}, false)
+                  .planNode();
 
   auto expected = makeRowVector(
       {"id", "val", "average"},

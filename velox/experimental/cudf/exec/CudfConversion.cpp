@@ -87,8 +87,7 @@ VectorPtr castColumnToPlanType(
       (source->type()->isInteger() || source->type()->isSmallint() ||
        source->type()->isTinyint())) {
     DecodedVector decoded(*source);
-    auto result = BaseVector::create<FlatVector<int64_t>>(
-        BIGINT(), size, pool);
+    auto result = BaseVector::create<FlatVector<int64_t>>(BIGINT(), size, pool);
     for (vector_size_t i = 0; i < size; ++i) {
       if (decoded.isNullAt(i)) {
         result->setNull(i, true);

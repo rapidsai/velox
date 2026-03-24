@@ -5,7 +5,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,9 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include "velox/experimental/cudf/CudfConfig.h"
 #include "velox/experimental/cudf/exec/CudfWindow.h"
 #include "velox/experimental/cudf/exec/Utilities.h"
-#include "velox/experimental/cudf/CudfConfig.h"
 
 #include "velox/core/Expressions.h"
 
@@ -28,6 +28,7 @@
 #include <cudf/sorting.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf/types.hpp>
+
 #include <nvtx3/nvtx3.hpp>
 
 namespace facebook::velox::cudf_velox {
@@ -57,12 +58,10 @@ cudf::size_type getLeadLagOffset(const core::WindowNode::Function& func) {
   const auto& args = func.functionCall->inputs();
   if (args.size() >= 2) {
     if (auto constExpr =
-            std::dynamic_pointer_cast<const core::ConstantTypedExpr>(
-                args[1])) {
+            std::dynamic_pointer_cast<const core::ConstantTypedExpr>(args[1])) {
       if (constExpr->hasValueVector()) {
-        return constExpr->valueVector()
-            ->as<SimpleVector<int64_t>>()
-            ->valueAt(0);
+        return constExpr->valueVector()->as<SimpleVector<int64_t>>()->valueAt(
+            0);
       }
       return constExpr->value().value<int64_t>();
     }
@@ -86,7 +85,8 @@ cudf::rank_method toRankMethod(const std::string& baseName) {
 cudf::column_view CudfWindow::multiSortKeyStructView(
     cudf::table_view const& sortedInput) const {
   VELOX_CHECK_GE(
-      sortKeyIndices_.size(), 2,
+      sortKeyIndices_.size(),
+      2,
       "multiSortKeyStructView requires >= 2 sort keys");
   sortKeyStructChildren_.clear();
   sortKeyStructChildren_.reserve(sortKeyIndices_.size());
@@ -121,19 +121,21 @@ std::unique_ptr<cudf::column> CudfWindow::computeRankColumn(
     return multiSortKeyStructView(sortedInput);
   }();
 
-  auto colOrder = sortKeyIndices_.empty()
-      ? cudf::order::ASCENDING
-      : sortOrders_[0];
-  auto nullOrd = sortKeyIndices_.empty()
-      ? cudf::null_order::BEFORE
-      : nullOrders_[0];
+  auto colOrder =
+      sortKeyIndices_.empty() ? cudf::order::ASCENDING : sortOrders_[0];
+  auto nullOrd =
+      sortKeyIndices_.empty() ? cudf::null_order::BEFORE : nullOrders_[0];
 
   if (partitionKeyIndices_.empty()) {
     auto agg = cudf::make_rank_aggregation<cudf::scan_aggregation>(
         method, colOrder, cudf::null_policy::INCLUDE, nullOrd);
     return cudf::scan(
-        valuesCol, *agg, cudf::scan_type::INCLUSIVE,
-        cudf::null_policy::INCLUDE, stream, mr);
+        valuesCol,
+        *agg,
+        cudf::scan_type::INCLUSIVE,
+        cudf::null_policy::INCLUDE,
+        stream,
+        mr);
   }
 
   auto partCols = sortedInput.select(partitionKeyIndices_);
@@ -185,8 +187,7 @@ CudfWindow::CudfWindow(
         inputType->getChildIdx(windowNode->sortingKeys()[i]->name()));
     const auto& order = windowNode->sortingOrders()[i];
     sortOrders_.push_back(
-        order.isAscending() ? cudf::order::ASCENDING
-                            : cudf::order::DESCENDING);
+        order.isAscending() ? cudf::order::ASCENDING : cudf::order::DESCENDING);
     nullOrders_.push_back(
         (order.isNullsFirst() ^ !order.isAscending())
             ? cudf::null_order::BEFORE
@@ -221,8 +222,10 @@ std::unique_ptr<cudf::column> CudfWindow::computeLeadLagColumn(
     rmm::cuda_stream_view stream) const {
   auto mr = cudf::get_current_device_resource_ref();
   VELOX_CHECK_LE(
-      func.functionCall->inputs().size(), 2,
-      "cudf {} does not support default value (3rd argument)", baseName);
+      func.functionCall->inputs().size(),
+      2,
+      "cudf {} does not support default value (3rd argument)",
+      baseName);
   auto offset = getLeadLagOffset(func);
 
   if (baseName == "lag") {

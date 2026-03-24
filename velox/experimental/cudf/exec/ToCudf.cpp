@@ -33,10 +33,11 @@
 #include "velox/exec/Operator.h"
 #include "velox/exec/Values.h"
 
-#include <fmt/format.h>
 #include <cudf/detail/nvtx/ranges.hpp>
 
 #include <cuda.h>
+
+#include <fmt/format.h>
 
 #include <iostream>
 

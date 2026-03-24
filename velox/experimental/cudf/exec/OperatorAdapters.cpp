@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "velox/experimental/cudf/CudfConfig.h"
 #include "velox/experimental/cudf/connectors/hive/CudfHiveConnector.h"
 #include "velox/experimental/cudf/exec/CudfAssignUniqueId.h"
 #include "velox/experimental/cudf/exec/CudfBatchConcat.h"
@@ -26,7 +27,6 @@
 #include "velox/experimental/cudf/exec/CudfTopN.h"
 #include "velox/experimental/cudf/exec/CudfWindow.h"
 #include "velox/experimental/cudf/exec/OperatorAdapters.h"
-#include "velox/experimental/cudf/CudfConfig.h"
 #include "velox/experimental/cudf/exec/Utilities.h"
 #include "velox/experimental/cudf/expression/ExpressionEvaluator.h"
 
@@ -43,8 +43,8 @@
 #include "velox/exec/TableScan.h"
 #include "velox/exec/Task.h"
 #include "velox/exec/TopN.h"
-#include "velox/exec/Window.h"
 #include "velox/exec/Values.h"
+#include "velox/exec/Window.h"
 
 namespace facebook::velox::cudf_velox {
 
@@ -705,9 +705,18 @@ class WindowAdapter : public OperatorAdapter {
       return false;
     }
     static const std::unordered_set<std::string> kSupportedFuncs = {
-        "lag", "lead", "row_number", "rank", "dense_rank",
-        "first_value", "last_value",
-        "sum", "min", "max", "count", "avg"};
+        "lag",
+        "lead",
+        "row_number",
+        "rank",
+        "dense_rank",
+        "first_value",
+        "last_value",
+        "sum",
+        "min",
+        "max",
+        "count",
+        "avg"};
     const auto& prefix = CudfConfig::getInstance().functionNamePrefix;
     for (const auto& func : windowNode->windowFunctions()) {
       auto name = func.functionCall->name();
