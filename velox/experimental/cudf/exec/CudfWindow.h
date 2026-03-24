@@ -76,9 +76,7 @@ class CudfWindow : public exec::Operator, public NvtxHelper {
   std::vector<cudf::order> sortOrders_;
   std::vector<cudf::null_order> nullOrders_;
 
-  std::unique_ptr<cudf::table> accumulatedData_;
-  rmm::cuda_stream_view stream_{cudf::get_default_stream()};
-  memory::MemoryPool* pool_{nullptr};
+  std::vector<std::shared_ptr<CudfVector>> inputBatches_;
 
   // Scratch storage for multiSortKeyStructView children.
   mutable std::vector<cudf::column_view> sortKeyStructChildren_;

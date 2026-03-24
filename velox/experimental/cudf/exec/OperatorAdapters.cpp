@@ -26,6 +26,7 @@
 #include "velox/experimental/cudf/exec/CudfTopN.h"
 #include "velox/experimental/cudf/exec/CudfWindow.h"
 #include "velox/experimental/cudf/exec/OperatorAdapters.h"
+#include "velox/experimental/cudf/CudfConfig.h"
 #include "velox/experimental/cudf/exec/Utilities.h"
 #include "velox/experimental/cudf/expression/ExpressionEvaluator.h"
 
@@ -703,16 +704,25 @@ class WindowAdapter : public OperatorAdapter {
     if (!windowNode) {
       return false;
     }
+    static const std::unordered_set<std::string> kSupportedFuncs = {
+        "lag", "lead", "row_number", "rank", "dense_rank",
+        "first_value", "last_value",
+        "sum", "min", "max", "count", "avg"};
+    const auto& prefix = CudfConfig::getInstance().functionNamePrefix;
     for (const auto& func : windowNode->windowFunctions()) {
       auto name = func.functionCall->name();
       auto pos = name.rfind('.');
       auto baseName = pos == std::string::npos ? name : name.substr(pos + 1);
-      if (baseName != "lag" && baseName != "lead" &&
-          baseName != "row_number" && baseName != "rank" &&
-          baseName != "dense_rank" &&
-          baseName != "first_value" && baseName != "last_value" &&
-          baseName != "sum" && baseName != "min" && baseName != "max" &&
-          baseName != "count" && baseName != "avg") {
+      if (!prefix.empty() && baseName.size() > prefix.size() &&
+          baseName.substr(0, prefix.size()) == prefix) {
+        baseName = baseName.substr(prefix.size());
+      }
+      if (kSupportedFuncs.find(baseName) == kSupportedFuncs.end()) {
+        return false;
+      }
+      // Reject LAG/LEAD with default value (3rd argument).
+      if ((baseName == "lag" || baseName == "lead") &&
+          func.functionCall->inputs().size() > 2) {
         return false;
       }
     }

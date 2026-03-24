@@ -15,6 +15,7 @@
  */
 #include "velox/experimental/cudf/exec/CudfWindow.h"
 #include "velox/experimental/cudf/exec/Utilities.h"
+#include "velox/experimental/cudf/CudfConfig.h"
 
 #include "velox/core/Expressions.h"
 
@@ -33,9 +34,23 @@ namespace facebook::velox::cudf_velox {
 
 namespace {
 
+// Extract the base function name from a possibly-prefixed name.
+// Handles both Presto-style "presto.default.lag" and simple "lag".
 std::string getBaseFunctionName(const std::string& fullName) {
   auto pos = fullName.rfind('.');
   return pos == std::string::npos ? fullName : fullName.substr(pos + 1);
+}
+
+// Also strip any registered function name prefix (e.g. "spark_" for Spark).
+std::string stripFunctionPrefix(
+    const std::string& name,
+    const std::string& prefix) {
+  auto base = getBaseFunctionName(name);
+  if (!prefix.empty() && base.size() > prefix.size() &&
+      base.substr(0, prefix.size()) == prefix) {
+    return base.substr(prefix.size());
+  }
+  return base;
 }
 
 cudf::size_type getLeadLagOffset(const core::WindowNode::Function& func) {
@@ -183,24 +198,12 @@ void CudfWindow::addInput(RowVectorPtr input) {
   VELOX_NVTX_OPERATOR_FUNC_RANGE();
   auto cudfInput = std::dynamic_pointer_cast<CudfVector>(input);
   VELOX_CHECK_NOT_NULL(cudfInput, "CudfWindow expects CudfVector input");
-
-  stream_ = cudfInput->stream();
-  pool_ = cudfInput->pool();
-  auto mr = cudf::get_current_device_resource_ref();
-
-  if (!accumulatedData_) {
-    accumulatedData_ =
-        std::make_unique<cudf::table>(cudfInput->getTableView(), stream_, mr);
-  } else {
-    std::vector<cudf::table_view> views = {
-        accumulatedData_->view(), cudfInput->getTableView()};
-    accumulatedData_ = cudf::concatenate(views, stream_, mr);
-  }
+  inputBatches_.push_back(std::move(cudfInput));
 }
 
 void CudfWindow::noMoreInput() {
   Operator::noMoreInput();
-  if (!accumulatedData_ || accumulatedData_->num_rows() == 0) {
+  if (inputBatches_.empty()) {
     finished_ = true;
   }
 }
@@ -215,13 +218,30 @@ RowVectorPtr CudfWindow::getOutput() {
   if (finished_ || !noMoreInput_) {
     return nullptr;
   }
-  if (!accumulatedData_ || accumulatedData_->num_rows() == 0) {
+  if (inputBatches_.empty()) {
     finished_ = true;
     return nullptr;
   }
 
+  auto stream = inputBatches_[0]->stream();
   auto mr = cudf::get_current_device_resource_ref();
-  auto allView = accumulatedData_->view();
+  auto pool = inputBatches_[0]->pool();
+
+  // Concatenate all input batches into one table.
+  std::vector<cudf::table_view> views;
+  views.reserve(inputBatches_.size());
+  for (const auto& batch : inputBatches_) {
+    views.push_back(batch->getTableView());
+  }
+  std::unique_ptr<cudf::table> allData;
+  if (views.size() == 1) {
+    allData = std::make_unique<cudf::table>(views[0], stream, mr);
+  } else {
+    allData = cudf::concatenate(views, stream, mr);
+  }
+  inputBatches_.clear();
+
+  auto allView = allData->view();
 
   // 1. Sort by partition keys + sort keys if not already sorted.
   std::unique_ptr<cudf::table> sortedData;
@@ -245,13 +265,13 @@ RowVectorPtr CudfWindow::getOutput() {
 
     auto keyTable = allView.select(allSortKeys);
     auto indices = cudf::stable_sorted_order(
-        keyTable, allOrders, allNullOrders, stream_, mr);
+        keyTable, allOrders, allNullOrders, stream, mr);
     sortedData = cudf::detail::gather(
         allView,
         indices->view(),
         cudf::out_of_bounds_policy::DONT_CHECK,
         cudf::detail::negative_index_policy::NOT_ALLOWED,
-        stream_,
+        stream,
         mr);
     sortedView = sortedData->view();
   } else {
@@ -266,7 +286,9 @@ RowVectorPtr CudfWindow::getOutput() {
   const auto& funcs = windowNode_->windowFunctions();
 
   for (const auto& func : funcs) {
-    const auto baseName = getBaseFunctionName(func.functionCall->name());
+    const auto baseName = stripFunctionPrefix(
+        func.functionCall->name(),
+        CudfConfig::getInstance().functionNamePrefix);
 
     cudf::size_type inputColIdx = 0;
     if (!func.functionCall->inputs().empty()) {
@@ -279,16 +301,22 @@ RowVectorPtr CudfWindow::getOutput() {
     auto inputCol = sortedView.column(inputColIdx);
 
     if (baseName == "lag") {
+      VELOX_CHECK_LE(
+          func.functionCall->inputs().size(), 2,
+          "cudf LAG does not support default value (3rd argument)");
       auto offset = getLeadLagOffset(func);
       auto agg = cudf::make_lag_aggregation<cudf::rolling_aggregation>(offset);
       windowResultCols.push_back(cudf::grouped_rolling_window(
-          partKeys, inputCol, offset + 1, 0, offset + 1, *agg, stream_, mr));
+          partKeys, inputCol, offset + 1, 0, offset + 1, *agg, stream, mr));
     } else if (baseName == "lead") {
+      VELOX_CHECK_LE(
+          func.functionCall->inputs().size(), 2,
+          "cudf LEAD does not support default value (3rd argument)");
       auto offset = getLeadLagOffset(func);
       auto agg =
           cudf::make_lead_aggregation<cudf::rolling_aggregation>(offset);
       windowResultCols.push_back(cudf::grouped_rolling_window(
-          partKeys, inputCol, 0, offset + 1, offset + 1, *agg, stream_, mr));
+          partKeys, inputCol, 0, offset + 1, offset + 1, *agg, stream, mr));
     } else if (baseName == "first_value") {
       auto agg = cudf::make_nth_element_aggregation<cudf::rolling_aggregation>(
           0,
@@ -297,7 +325,7 @@ RowVectorPtr CudfWindow::getOutput() {
       auto unbounded = cudf::window_bounds::unbounded();
       auto current = cudf::window_bounds::get(1);
       windowResultCols.push_back(cudf::grouped_rolling_window(
-          partKeys, inputCol, unbounded, current, 1, *agg, stream_, mr));
+          partKeys, inputCol, unbounded, current, 1, *agg, stream, mr));
     } else if (baseName == "last_value") {
       auto agg = cudf::make_nth_element_aggregation<cudf::rolling_aggregation>(
           -1,
@@ -306,12 +334,12 @@ RowVectorPtr CudfWindow::getOutput() {
       auto unbounded = cudf::window_bounds::unbounded();
       auto current = cudf::window_bounds::get(1);
       windowResultCols.push_back(cudf::grouped_rolling_window(
-          partKeys, inputCol, current, unbounded, 1, *agg, stream_, mr));
+          partKeys, inputCol, current, unbounded, 1, *agg, stream, mr));
     } else if (
         baseName == "row_number" || baseName == "rank" ||
         baseName == "dense_rank") {
       windowResultCols.push_back(
-          computeRankColumn(sortedView, baseName, stream_));
+          computeRankColumn(sortedView, baseName, stream));
     } else if (
         baseName == "sum" || baseName == "min" || baseName == "max" ||
         baseName == "count" || baseName == "avg") {
@@ -330,14 +358,14 @@ RowVectorPtr CudfWindow::getOutput() {
       }
       auto bounds = cudf::window_bounds::unbounded();
       windowResultCols.push_back(cudf::grouped_rolling_window(
-          partKeys, inputCol, bounds, bounds, 1, *agg, stream_, mr));
+          partKeys, inputCol, bounds, bounds, 1, *agg, stream, mr));
     } else {
-      VELOX_FAIL("Unsupported window function for GPU: {}", baseName);
+      VELOX_FAIL("Unsupported window function for cudf: {}", baseName);
     }
   }
 
   // 4. Build the output table: input columns + window result columns.
-  auto& dataOwner = sortedData ? sortedData : accumulatedData_;
+  auto& dataOwner = sortedData ? sortedData : allData;
   auto sortedCols = dataOwner->release();
   for (auto& wc : windowResultCols) {
     sortedCols.push_back(std::move(wc));
@@ -345,10 +373,9 @@ RowVectorPtr CudfWindow::getOutput() {
   auto resultTable = std::make_unique<cudf::table>(std::move(sortedCols));
   auto resultSize = resultTable->num_rows();
 
-  accumulatedData_.reset();
   finished_ = true;
   return std::make_shared<CudfVector>(
-      pool_, outputType_, resultSize, std::move(resultTable), stream_);
+      pool, outputType_, resultSize, std::move(resultTable), stream);
 }
 
 } // namespace facebook::velox::cudf_velox
