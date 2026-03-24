@@ -22,6 +22,7 @@
 #include <cudf/concatenate.hpp>
 #include <cudf/detail/gather.hpp>
 #include <cudf/groupby.hpp>
+#include <cudf/reduction.hpp>
 #include <cudf/rolling.hpp>
 #include <cudf/sorting.hpp>
 #include <cudf/table/table_view.hpp>
@@ -54,7 +55,94 @@ cudf::size_type getLeadLagOffset(const core::WindowNode::Function& func) {
   return 1;
 }
 
+cudf::rank_method toRankMethod(const std::string& baseName) {
+  if (baseName == "row_number") {
+    return cudf::rank_method::FIRST;
+  } else if (baseName == "rank") {
+    return cudf::rank_method::MIN;
+  } else if (baseName == "dense_rank") {
+    return cudf::rank_method::DENSE;
+  }
+  VELOX_FAIL("toRankMethod called on non-rank function: {}", baseName);
+}
+
 } // namespace
+
+cudf::column_view CudfWindow::multiSortKeyStructView(
+    cudf::table_view const& sortedInput) const {
+  VELOX_CHECK_GE(
+      sortKeyIndices_.size(), 2,
+      "multiSortKeyStructView requires >= 2 sort keys");
+  sortKeyStructChildren_.clear();
+  sortKeyStructChildren_.reserve(sortKeyIndices_.size());
+  for (auto ch : sortKeyIndices_) {
+    sortKeyStructChildren_.push_back(sortedInput.column(ch));
+  }
+  return cudf::column_view(
+      cudf::data_type{cudf::type_id::STRUCT},
+      sortedInput.num_rows(),
+      nullptr,
+      nullptr,
+      0,
+      0,
+      sortKeyStructChildren_);
+}
+
+std::unique_ptr<cudf::column> CudfWindow::computeRankColumn(
+    cudf::table_view const& sortedInput,
+    const std::string& baseName,
+    rmm::cuda_stream_view stream) const {
+  auto mr = cudf::get_current_device_resource_ref();
+  auto method = toRankMethod(baseName);
+
+  // Build the "values" column for rank tie detection.
+  cudf::column_view valuesCol = [&]() -> cudf::column_view {
+    if (sortKeyIndices_.empty()) {
+      return sortedInput.column(0);
+    }
+    if (sortKeyIndices_.size() == 1 || baseName == "row_number") {
+      return sortedInput.column(sortKeyIndices_[0]);
+    }
+    return multiSortKeyStructView(sortedInput);
+  }();
+
+  auto colOrder = sortKeyIndices_.empty()
+      ? cudf::order::ASCENDING
+      : sortOrders_[0];
+  auto nullOrd = sortKeyIndices_.empty()
+      ? cudf::null_order::BEFORE
+      : nullOrders_[0];
+
+  if (partitionKeyIndices_.empty()) {
+    auto agg = cudf::make_rank_aggregation<cudf::scan_aggregation>(
+        method, colOrder, cudf::null_policy::INCLUDE, nullOrd);
+    return cudf::scan(
+        valuesCol, *agg, cudf::scan_type::INCLUSIVE,
+        cudf::null_policy::INCLUDE, stream, mr);
+  }
+
+  auto partCols = sortedInput.select(partitionKeyIndices_);
+  std::vector<cudf::groupby::scan_request> requests(1);
+  requests[0].values = valuesCol;
+  requests[0].aggregations.push_back(
+      cudf::make_rank_aggregation<cudf::groupby_scan_aggregation>(
+          method, colOrder, cudf::null_policy::INCLUDE, nullOrd));
+
+  cudf::groupby::groupby grouper(
+      cudf::table_view(partCols),
+      cudf::null_policy::INCLUDE,
+      cudf::sorted::YES,
+      std::vector<cudf::order>(
+          partitionKeyIndices_.size(), cudf::order::ASCENDING),
+      std::vector<cudf::null_order>(
+          partitionKeyIndices_.size(), cudf::null_order::BEFORE));
+
+  auto scanResult = grouper.scan(requests, stream, mr);
+  auto& aggResults = scanResult.second;
+  VELOX_CHECK_EQ(aggResults.size(), 1);
+  VELOX_CHECK_EQ(aggResults[0].results.size(), 1);
+  return std::move(aggResults[0].results[0]);
+}
 
 CudfWindow::CudfWindow(
     int32_t operatorId,
@@ -219,13 +307,11 @@ RowVectorPtr CudfWindow::getOutput() {
       auto current = cudf::window_bounds::get(1);
       windowResultCols.push_back(cudf::grouped_rolling_window(
           partKeys, inputCol, current, unbounded, 1, *agg, stream_, mr));
-    } else if (baseName == "row_number") {
-      auto agg = cudf::make_count_aggregation<cudf::rolling_aggregation>(
-          cudf::null_policy::INCLUDE);
-      auto unbounded = cudf::window_bounds::unbounded();
-      auto currentRow = cudf::window_bounds::get(0);
-      windowResultCols.push_back(cudf::grouped_rolling_window(
-          partKeys, inputCol, unbounded, currentRow, 1, *agg, stream_, mr));
+    } else if (
+        baseName == "row_number" || baseName == "rank" ||
+        baseName == "dense_rank") {
+      windowResultCols.push_back(
+          computeRankColumn(sortedView, baseName, stream_));
     } else if (
         baseName == "sum" || baseName == "min" || baseName == "max" ||
         baseName == "count" || baseName == "avg") {

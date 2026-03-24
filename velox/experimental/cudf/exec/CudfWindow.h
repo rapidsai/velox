@@ -21,19 +21,19 @@
 #include "velox/exec/Operator.h"
 
 #include <cudf/table/table.hpp>
+#include <cudf/types.hpp>
 
 namespace facebook::velox::cudf_velox {
 
-/// GPU-accelerated Window operator using cuDF's grouped_rolling_window API.
+/// GPU-accelerated Window operator using cuDF.
 ///
 /// Each incoming batch is immediately concatenated into an accumulated cudf
-/// table on the GPU in addInput(), avoiding the need to hold separate batch
-/// pointers and perform a bulk concatenation in getOutput(). Once all input
-/// has arrived, getOutput() sorts (if needed), evaluates the window functions,
-/// and returns the result.
+/// table on the GPU in addInput(). Once all input has arrived, getOutput()
+/// sorts (if needed), evaluates the window functions, and returns the result.
 ///
-/// Currently supports: LAG, LEAD, ROW_NUMBER, FIRST_VALUE, LAST_VALUE,
-/// and aggregate window functions (SUM, MIN, MAX, COUNT, AVG).
+/// Rank-like functions (row_number, rank, dense_rank) use
+/// cudf::groupby::scan with cudf::make_rank_aggregation.
+/// Aggregate windows and lag/lead use cudf::grouped_rolling_window.
 class CudfWindow : public exec::Operator, public NvtxHelper {
  public:
   CudfWindow(
@@ -58,6 +58,17 @@ class CudfWindow : public exec::Operator, public NvtxHelper {
   bool isFinished() override;
 
  private:
+  // Compute rank/dense_rank/row_number via cudf::groupby::scan.
+  std::unique_ptr<cudf::column> computeRankColumn(
+      cudf::table_view const& sortedInput,
+      const std::string& baseName,
+      rmm::cuda_stream_view stream) const;
+
+  // Build a zero-copy STRUCT column_view over multiple sort key columns
+  // so cudf's row equality comparator detects ties across composite keys.
+  cudf::column_view multiSortKeyStructView(
+      cudf::table_view const& sortedInput) const;
+
   std::shared_ptr<const core::WindowNode> windowNode_;
 
   std::vector<cudf::size_type> partitionKeyIndices_;
@@ -65,12 +76,12 @@ class CudfWindow : public exec::Operator, public NvtxHelper {
   std::vector<cudf::order> sortOrders_;
   std::vector<cudf::null_order> nullOrders_;
 
-  // Accumulated input data on the GPU. Each addInput() call concatenates
-  // the new batch into this table immediately rather than deferring to
-  // getOutput().
   std::unique_ptr<cudf::table> accumulatedData_;
   rmm::cuda_stream_view stream_{cudf::get_default_stream()};
   memory::MemoryPool* pool_{nullptr};
+
+  // Scratch storage for multiSortKeyStructView children.
+  mutable std::vector<cudf::column_view> sortKeyStructChildren_;
 
   bool finished_ = false;
 };

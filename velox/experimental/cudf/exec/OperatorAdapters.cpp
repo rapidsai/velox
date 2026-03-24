@@ -708,7 +708,8 @@ class WindowAdapter : public OperatorAdapter {
       auto pos = name.rfind('.');
       auto baseName = pos == std::string::npos ? name : name.substr(pos + 1);
       if (baseName != "lag" && baseName != "lead" &&
-          baseName != "row_number" &&
+          baseName != "row_number" && baseName != "rank" &&
+          baseName != "dense_rank" &&
           baseName != "first_value" && baseName != "last_value" &&
           baseName != "sum" && baseName != "min" && baseName != "max" &&
           baseName != "count" && baseName != "avg") {
