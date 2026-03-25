@@ -216,7 +216,9 @@ TEST_F(CudfWindowTest, sumWindow) {
   auto plan = PlanBuilder()
                   .values({data})
                   .window({
-                      "sum(val) over (partition by id) as total",
+                      "sum(val) over (partition by id "
+                      "rows between unbounded preceding and "
+                      "unbounded following) as total",
                   })
                   .orderBy({"id ASC NULLS LAST", "val ASC NULLS LAST"}, false)
                   .planNode();
@@ -243,8 +245,10 @@ TEST_F(CudfWindowTest, minMaxWindow) {
   auto plan = PlanBuilder()
                   .values({data})
                   .window({
-                      "min(val) over (partition by id) as mn",
-                      "max(val) over (partition by id) as mx",
+              "min(val) over (partition by id "
+              "rows between unbounded preceding and unbounded following) as mn",
+              "max(val) over (partition by id "
+              "rows between unbounded preceding and unbounded following) as mx",
                   })
                   .orderBy({"id ASC NULLS LAST", "val ASC NULLS LAST"}, false)
                   .planNode();
@@ -272,7 +276,8 @@ TEST_F(CudfWindowTest, countWindow) {
   auto plan = PlanBuilder()
                   .values({data})
                   .window({
-                      "count(val) over (partition by id) as cnt",
+                      "count(val) over (partition by id "
+              "rows between unbounded preceding and unbounded following) as cnt",
                   })
                   .orderBy({"id ASC NULLS LAST", "val ASC NULLS LAST"}, false)
                   .planNode();
@@ -299,7 +304,8 @@ TEST_F(CudfWindowTest, avgWindow) {
   auto plan = PlanBuilder()
                   .values({data})
                   .window({
-                      "avg(val) over (partition by id) as average",
+                      "avg(val) over (partition by id "
+              "rows between unbounded preceding and unbounded following) as average",
                   })
                   .orderBy({"id ASC NULLS LAST", "val ASC NULLS LAST"}, false)
                   .planNode();

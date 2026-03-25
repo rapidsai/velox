@@ -47,8 +47,7 @@ std::string stripFunctionPrefix(
     const std::string& name,
     const std::string& prefix) {
   auto base = getBaseFunctionName(name);
-  if (!prefix.empty() && base.size() > prefix.size() &&
-      base.substr(0, prefix.size()) == prefix) {
+  if (!prefix.empty() && base.find(prefix) == 0) {
     return base.substr(prefix.size());
   }
   return base;
@@ -195,6 +194,42 @@ CudfWindow::CudfWindow(
   }
 }
 
+std::pair<cudf::window_bounds, cudf::window_bounds> toWindowBounds(
+    const core::WindowNode::Frame& frame) {
+  auto toBound = [](core::WindowNode::BoundType type,
+                    const core::TypedExprPtr& value) -> cudf::window_bounds {
+    switch (type) {
+      case core::WindowNode::BoundType::kUnboundedPreceding:
+      case core::WindowNode::BoundType::kUnboundedFollowing:
+        return cudf::window_bounds::unbounded();
+      case core::WindowNode::BoundType::kCurrentRow:
+        return cudf::window_bounds::get(0);
+      case core::WindowNode::BoundType::kPreceding:
+      case core::WindowNode::BoundType::kFollowing: {
+        if (value) {
+          if (auto constExpr =
+                  std::dynamic_pointer_cast<const core::ConstantTypedExpr>(
+                      value)) {
+            if (constExpr->hasValueVector()) {
+              return cudf::window_bounds::get(
+                  constExpr->valueVector()
+                      ->as<SimpleVector<int64_t>>()
+                      ->valueAt(0));
+            }
+            return cudf::window_bounds::get(
+                constExpr->value().value<int64_t>());
+          }
+        }
+        return cudf::window_bounds::get(1);
+      }
+      default:
+        return cudf::window_bounds::unbounded();
+    }
+  };
+  return {toBound(frame.startType, frame.startValue),
+          toBound(frame.endType, frame.endValue)};
+}
+
 void CudfWindow::addInput(RowVectorPtr input) {
   VELOX_NVTX_OPERATOR_FUNC_RANGE();
   auto cudfInput = std::dynamic_pointer_cast<CudfVector>(input);
@@ -267,6 +302,7 @@ std::unique_ptr<cudf::column> CudfWindow::computeNthValueColumn(
 std::unique_ptr<cudf::column> CudfWindow::computeAggregateColumn(
     cudf::table_view const& partKeys,
     cudf::column_view inputCol,
+    const core::WindowNode::Function& func,
     const std::string& baseName,
     rmm::cuda_stream_view stream) const {
   auto mr = cudf::get_current_device_resource_ref();
@@ -283,9 +319,9 @@ std::unique_ptr<cudf::column> CudfWindow::computeAggregateColumn(
   } else {
     agg = cudf::make_mean_aggregation<cudf::rolling_aggregation>();
   }
-  auto bounds = cudf::window_bounds::unbounded();
+  auto [preceding, following] = toWindowBounds(func.frame);
   return cudf::grouped_rolling_window(
-      partKeys, inputCol, bounds, bounds, 1, *agg, stream, mr);
+      partKeys, inputCol, preceding, following, 1, *agg, stream, mr);
 }
 
 void CudfWindow::noMoreInput() {
@@ -393,7 +429,7 @@ RowVectorPtr CudfWindow::getOutput() {
         baseName == "sum" || baseName == "min" || baseName == "max" ||
         baseName == "count" || baseName == "avg") {
       windowResultCols.push_back(
-          computeAggregateColumn(partKeys, inputCol, baseName, stream));
+          computeAggregateColumn(partKeys, inputCol, func, baseName, stream));
     } else {
       VELOX_FAIL("Unsupported window function for cudf: {}", baseName);
     }

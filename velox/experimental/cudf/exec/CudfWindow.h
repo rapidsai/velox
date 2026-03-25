@@ -84,10 +84,12 @@ class CudfWindow : public exec::Operator, public NvtxHelper {
       const std::string& baseName,
       rmm::cuda_stream_view stream) const;
 
-  // Compute aggregate window functions (sum, min, max, count, avg).
+  // Compute aggregate window functions (sum, min, max, count, avg)
+  // with frame bounds from the WindowNode.
   std::unique_ptr<cudf::column> computeAggregateColumn(
       cudf::table_view const& partKeys,
       cudf::column_view inputCol,
+      const core::WindowNode::Function& func,
       const std::string& baseName,
       rmm::cuda_stream_view stream) const;
 

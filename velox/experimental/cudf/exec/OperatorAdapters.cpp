@@ -722,8 +722,7 @@ class WindowAdapter : public OperatorAdapter {
       auto name = func.functionCall->name();
       auto pos = name.rfind('.');
       auto baseName = pos == std::string::npos ? name : name.substr(pos + 1);
-      if (!prefix.empty() && baseName.size() > prefix.size() &&
-          baseName.substr(0, prefix.size()) == prefix) {
+      if (!prefix.empty() && baseName.find(prefix) == 0) {
         baseName = baseName.substr(prefix.size());
       }
       if (kSupportedFuncs.find(baseName) == kSupportedFuncs.end()) {
