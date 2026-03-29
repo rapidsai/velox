@@ -319,6 +319,30 @@ std::unique_ptr<cudf::column> CudfWindow::computeAggregateColumn(
   } else {
     agg = cudf::make_mean_aggregation<cudf::rolling_aggregation>();
   }
+
+  // For full-partition aggregation (UNBOUNDED...UNBOUNDED or
+  // UNBOUNDED...CURRENT ROW with no sort keys), force unbounded on both
+  // sides so grouped_rolling_window computes over the entire partition.
+  bool isUnboundedPreceding =
+      func.frame.startType ==
+      core::WindowNode::BoundType::kUnboundedPreceding;
+  bool isUnboundedFollowing =
+      func.frame.endType ==
+      core::WindowNode::BoundType::kUnboundedFollowing;
+  bool isCurrentRowFollowing =
+      func.frame.endType == core::WindowNode::BoundType::kCurrentRow;
+  bool isFullPartition = isUnboundedPreceding &&
+      (isUnboundedFollowing ||
+       (isCurrentRowFollowing && sortKeyIndices_.empty()));
+
+  if (isFullPartition) {
+    return cudf::grouped_rolling_window(
+        partKeys, inputCol,
+        cudf::window_bounds::unbounded(),
+        cudf::window_bounds::unbounded(),
+        1, *agg, stream, mr);
+  }
+
   auto [preceding, following] = toWindowBounds(func.frame);
   return cudf::grouped_rolling_window(
       partKeys, inputCol, preceding, following, 1, *agg, stream, mr);
