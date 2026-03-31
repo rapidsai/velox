@@ -154,6 +154,7 @@ velox_add_library(
   HashTableCache.h
   HilbertIndex.h
   IndexLookupJoin.h
+  IOutputBufferManager.h
   JoinBridge.h
   Limit.h
   LocalPartition.h
@@ -179,6 +180,7 @@ velox_add_library(
   OrderBy.h
   OutputBuffer.h
   OutputBufferManager.h
+  OutputBufferManagerRegistry.h
   ParallelProject.h
   PartitionFunction.h
   PartitionStreamingWindowBuild.h
