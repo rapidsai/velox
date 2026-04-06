@@ -268,7 +268,22 @@ RowVectorPtr CudfToVelox::convertFrontToVelox() {
   auto output = with_arrow::toVeloxColumn(
       tableView, pool(), outputType_, "", stream, get_temp_mr());
   stream.synchronize();
-  output->setType(outputType_);
+  if (!output->type()->kindEquals(outputType_)) {
+    std::vector<VectorPtr> children;
+    children.reserve(output->childrenSize());
+    for (column_index_t i = 0; i < output->childrenSize(); ++i) {
+      children.push_back(castColumnToPlanType(
+          output->childAt(i), outputType_->childAt(i), pool()));
+    }
+    output = std::make_shared<RowVector>(
+        pool(),
+        outputType_,
+        output->nulls(),
+        output->size(),
+        std::move(children));
+  } else {
+    output->setType(outputType_);
+  }
   return output;
 }
 
@@ -367,7 +382,22 @@ RowVectorPtr CudfToVelox::getOutput() {
       veloxBuffer_ = with_arrow::toVeloxColumn(
           tableView, pool(), outputType_, "", stream, get_temp_mr());
       stream.synchronize();
-      veloxBuffer_->setType(outputType_);
+      if (!veloxBuffer_->type()->kindEquals(outputType_)) {
+        std::vector<VectorPtr> children;
+        children.reserve(veloxBuffer_->childrenSize());
+        for (column_index_t i = 0; i < veloxBuffer_->childrenSize(); ++i) {
+          children.push_back(castColumnToPlanType(
+              veloxBuffer_->childAt(i), outputType_->childAt(i), pool()));
+        }
+        veloxBuffer_ = std::make_shared<RowVector>(
+            pool(),
+            outputType_,
+            veloxBuffer_->nulls(),
+            veloxBuffer_->size(),
+            std::move(children));
+      } else {
+        veloxBuffer_->setType(outputType_);
+      }
       veloxOffset_ = 0;
       averageRowSize_ = std::nullopt;
     }
