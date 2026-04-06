@@ -23,6 +23,7 @@ add_library(
   CudfLimit.cpp
   CudfLocalPartition.cpp
   CudfMarkDistinct.cpp
+  CudfNestedLoopJoin.cpp
   CudfOrderBy.cpp
   CudfTopN.cpp
   DebugUtil.cpp
