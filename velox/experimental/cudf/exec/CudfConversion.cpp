@@ -25,7 +25,11 @@
 #include "velox/core/QueryConfig.h"
 #include "velox/exec/Driver.h"
 #include "velox/exec/Operator.h"
+#include "velox/type/Type.h"
 #include "velox/vector/ComplexVector.h"
+#include "velox/vector/DecodedVector.h"
+#include "velox/vector/FlatVector.h"
+#include "velox/vector/SelectivityVector.h"
 
 #include <cudf/types.hpp>
 #include <cudf/utilities/default_stream.hpp>
@@ -67,6 +71,50 @@ cudf::size_type preferredGpuBatchSizeRows(
       std::numeric_limits<vector_size_t>::max(),
       "velox.cudf.gpu_batch_size_rows must be <= max(vector_size_t)");
   return batchSize;
+}
+
+/// Cast a column to the plan's output type when cuDF/Arrow produced a
+/// different physical type (e.g. INTEGER for ROW_NUMBER/COUNT vs BIGINT).
+VectorPtr castColumnToPlanType(
+    const VectorPtr& source,
+    const TypePtr& targetType,
+    memory::MemoryPool* pool) {
+  if (source->type()->kindEquals(targetType)) {
+    return source;
+  }
+  const auto size = source->size();
+  if (targetType->isBigint() &&
+      (source->type()->isInteger() || source->type()->isSmallint() ||
+       source->type()->isTinyint())) {
+    DecodedVector decoded(*source);
+    auto result = BaseVector::create<FlatVector<int64_t>>(BIGINT(), size, pool);
+    for (vector_size_t i = 0; i < size; ++i) {
+      if (decoded.isNullAt(i)) {
+        result->setNull(i, true);
+      } else {
+        int64_t v;
+        switch (source->typeKind()) {
+          case TypeKind::INTEGER:
+            v = decoded.valueAt<int32_t>(i);
+            break;
+          case TypeKind::SMALLINT:
+            v = decoded.valueAt<int16_t>(i);
+            break;
+          case TypeKind::TINYINT:
+            v = decoded.valueAt<int8_t>(i);
+            break;
+          default:
+            VELOX_UNREACHABLE();
+        }
+        result->set(i, v);
+      }
+    }
+    return result;
+  }
+  VELOX_UNSUPPORTED(
+      "CudfToVelox: cannot cast column from {} to {}",
+      source->type()->toString(),
+      targetType->toString());
 }
 } // namespace
 
@@ -221,6 +269,142 @@ RowVectorPtr CudfToVelox::convertFrontToVelox() {
       tableView, pool(), outputType_, "", stream, get_temp_mr());
   stream.synchronize();
   output->setType(outputType_);
+  return output;
+}
+
+RowVectorPtr CudfToVelox::getOutput() {
+  VELOX_NVTX_OPERATOR_FUNC_RANGE();
+  if (finished_ || inputs_.empty()) {
+    finished_ = noMoreInput_ && inputs_.empty();
+    return nullptr;
+  }
+
+  // Get the target batch size
+  const auto targetBatchSize = outputBatchRows(averageRowSize());
+  auto stream = inputs_.front()->stream();
+
+  // Process single input directly in these cases:
+  // 1. In passthrough mode
+  // 2. If we only have one input and it's smaller than or equal to the target
+  // batch size
+  if (isPassthroughMode() ||
+      (inputs_.size() == 1 && inputs_.front()->size() <= targetBatchSize)) {
+    // Move the CudfVector out to keep it alive while we use the view.
+    // This avoids expensive materialization when constructed from packed_table.
+    auto cudfVector = std::move(inputs_.front());
+    inputs_.pop_front();
+
+    auto tableView = cudfVector->getTableView();
+    if (tableView.num_rows() == 0) {
+      finished_ = noMoreInput_ && inputs_.empty();
+      return nullptr;
+    }
+    RowVectorPtr output = with_arrow::toVeloxColumn(
+        tableView, pool(), outputType_->names(), stream, get_temp_mr());
+    stream.synchronize();
+    finished_ = noMoreInput_ && inputs_.empty();
+    if (!output->type()->kindEquals(outputType_)) {
+      std::vector<VectorPtr> children;
+      children.reserve(output->childrenSize());
+      for (column_index_t i = 0; i < output->childrenSize(); ++i) {
+        children.push_back(castColumnToPlanType(
+            output->childAt(i), outputType_->childAt(i), pool()));
+      }
+      output = std::make_shared<RowVector>(
+          pool(),
+          outputType_,
+          output->nulls(),
+          output->size(),
+          std::move(children));
+    } else {
+      output->setType(outputType_);
+    }
+    // cudfVector goes out of scope here, freeing the GPU memory
+    return output;
+  }
+
+  // Calculate how many tables we need to concatenate to reach the target batch
+  // size and collect them in a vector
+  std::vector<CudfVectorPtr> selectedInputs;
+  vector_size_t totalSize = 0;
+
+  while (!inputs_.empty() && totalSize < targetBatchSize) {
+    auto& input = inputs_.front();
+    if (totalSize + input->size() <= targetBatchSize) {
+      totalSize += input->size();
+      selectedInputs.push_back(std::move(input));
+      inputs_.pop_front();
+    } else {
+      // If the next input would exceed targetBatchSize,
+      // we need to split it and only take what we need
+      auto cudfTableView = input->getTableView();
+      auto partitions = std::vector<cudf::size_type>{
+          static_cast<cudf::size_type>(targetBatchSize - totalSize)};
+      auto tableSplits = cudf::split(cudfTableView, partitions, stream);
+
+      // Create new CudfVector from the first part
+      auto firstPart =
+          std::make_unique<cudf::table>(tableSplits[0], stream, get_temp_mr());
+      auto firstPartSize = firstPart->num_rows();
+      auto firstPartVector = std::make_shared<CudfVector>(
+          pool(), input->type(), firstPartSize, std::move(firstPart), stream);
+
+      // Create new CudfVector from the second part
+      auto secondPart =
+          std::make_unique<cudf::table>(tableSplits[1], stream, get_temp_mr());
+      auto secondPartSize = secondPart->num_rows();
+      auto secondPartVector = std::make_shared<CudfVector>(
+          pool(), input->type(), secondPartSize, std::move(secondPart), stream);
+
+      // Replace the original input with the second part
+      input = std::move(secondPartVector);
+
+      // Add the first part to selectedInputs
+      selectedInputs.push_back(std::move(firstPartVector));
+      totalSize += firstPartSize;
+      break;
+    }
+  }
+
+  finished_ = noMoreInput_ && inputs_.empty();
+
+  // If we have no inputs to process, return nullptr
+  if (selectedInputs.empty()) {
+    return nullptr;
+  }
+
+  // Concatenate the selected tables on the GPU
+  auto resultTable =
+      getConcatenatedTable(selectedInputs, outputType_, stream, get_temp_mr());
+
+  // Convert the concatenated table to a RowVector
+  const auto size = resultTable->num_rows();
+  VELOX_CHECK_NOT_NULL(resultTable);
+  if (size == 0) {
+    return nullptr;
+  }
+
+  RowVectorPtr output = with_arrow::toVeloxColumn(
+      resultTable->view(), pool(), outputType_->names(), stream, get_temp_mr());
+  stream.synchronize();
+  finished_ = noMoreInput_ && inputs_.empty();
+  if (!output->type()->kindEquals(outputType_)) {
+    std::vector<VectorPtr> children;
+    children.reserve(output->childrenSize());
+    for (column_index_t i = 0; i < output->childrenSize(); ++i) {
+      children.push_back(castColumnToPlanType(
+          output->childAt(i), outputType_->childAt(i), pool()));
+    }
+    output = std::make_shared<RowVector>(
+        pool(),
+        outputType_,
+        output->nulls(),
+        output->size(),
+        std::move(children));
+  } else {
+    output->setType(outputType_);
+  }
+>>>>>>> pr-16892
   return output;
 }
 

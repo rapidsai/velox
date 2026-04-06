@@ -41,6 +41,7 @@ add_executable(
 add_executable(velox_cudf_mark_distinct_test Main.cpp MarkDistinctTest.cpp)
 add_executable(velox_cudf_topn_test Main.cpp TopNTest.cpp)
 add_executable(velox_cudf_batch_concat_test Main.cpp BatchConcatTest.cpp)
+add_executable(velox_cudf_window_test Main.cpp WindowTest.cpp)
 
 add_test(
   NAME velox_cudf_aggregation_test
@@ -169,6 +170,12 @@ add_test(
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
+add_test(
+  NAME velox_cudf_window_test
+  COMMAND velox_cudf_window_test
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
 set_tests_properties(velox_cudf_hash_join_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
 set_tests_properties(velox_cudf_order_by_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
 set_tests_properties(velox_cudf_aggregation_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
@@ -203,6 +210,7 @@ set_tests_properties(
   PROPERTIES LABELS cuda_driver TIMEOUT 3000
 )
 set_tests_properties(velox_cudf_batch_concat_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
+set_tests_properties(velox_cudf_window_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
 
 target_link_libraries(
   velox_cudf_aggregation_test
@@ -428,6 +436,19 @@ target_link_libraries(
   gtest_main
   fmt::fmt
   velox_cudf_exec
+)
+
+target_link_libraries(
+  velox_cudf_window_test
+  velox_cudf_exec
+  velox_exec
+  velox_exec_test_lib
+  velox_test_util
+  velox_window
+  velox_aggregates
+  gtest
+  gtest_main
+  fmt::fmt
 )
 
 add_subdirectory(utils)
