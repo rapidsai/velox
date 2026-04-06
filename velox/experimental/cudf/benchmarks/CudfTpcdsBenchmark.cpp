@@ -91,6 +91,7 @@ void CudfTpcdsBenchmark::initialize() {
     // so that TableScanAdapter::canRunOnGPU() returns true.
     const std::string prestoConnectorId = "hive";
     if (connector::ConnectorRegistry::tryGet(prestoConnectorId)) {
+      LOG(INFO) << "Unregistering existing connector: " << prestoConnectorId;
       connector::ConnectorRegistry::global().erase(prestoConnectorId);
     }
 
@@ -101,6 +102,9 @@ void CudfTpcdsBenchmark::initialize() {
         prestoConnectorId, properties, ioExecutor_.get());
     connector::ConnectorRegistry::global().insert(
         cudfHiveConnector->connectorId(), cudfHiveConnector);
+    LOG(INFO) << "Registered CudfHiveConnector under ID: " << prestoConnectorId;
+  } else {
+    LOG(INFO) << "velox_cudf_table_scan is disabled, using standard HiveConnector";
   }
 
   cudf_velox::CudfConfig::getInstance().memoryResource =

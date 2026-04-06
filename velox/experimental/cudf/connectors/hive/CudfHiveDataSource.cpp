@@ -80,6 +80,7 @@ CudfHiveDataSource::CudfHiveDataSource(
       baseReaderOpts_(pool_),
       outputType_(outputType),
       expressionEvaluator_(connectorQueryCtx->expressionEvaluator()) {
+  LOG(INFO) << "CudfHiveDataSource created for table: " << tableHandle->name();
   // Set up column projection if needed
   auto readColumnTypes = outputType_->children();
   for (const auto& outputName : outputType_->names()) {
