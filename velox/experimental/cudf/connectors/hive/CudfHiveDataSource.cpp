@@ -201,6 +201,8 @@ std::optional<RowVectorPtr> CudfHiveDataSource::next(
   VELOX_CHECK_NOT_NULL(
       splitReader_ or exptSplitReader_, "No split reader present");
 
+  VLOG(1) << "Starting GPU table scan for split: " << split_->filePath;
+
   std::unique_ptr<cudf::table> cudfTable;
   cudf::io::table_metadata metadata;
 
@@ -344,6 +346,10 @@ std::optional<RowVectorPtr> CudfHiveDataSource::next(
   // Update completedRows_.
   completedRows_ += output->size();
 
+  VLOG(1) << "GPU table scan completed chunk: " << output->size() << " rows"
+          << ", total rows so far: " << completedRows_
+          << ", file: " << split_->filePath;
+
   // TODO: Update `completedBytes_` here instead of in `addSplit()`
 
   return output;
@@ -404,7 +410,9 @@ void CudfHiveDataSource::addSplit(std::shared_ptr<ConnectorSplit> split) {
     }
   }();
 
-  VLOG(1) << "Adding split " << split_->toString();
+  VLOG(1) << "Adding split for GPU table scan: " << split_->toString()
+          << ", columns: " << readColumnNames_.size()
+          << ", useExperimentalReader: " << useExperimentalSplitReader_;
 
   // Split reader already exists, reset
   if (splitReader_ or exptSplitReader_) {
