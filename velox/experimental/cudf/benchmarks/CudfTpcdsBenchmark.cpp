@@ -22,6 +22,7 @@
 #include "velox/experimental/cudf/exec/ToCudf.h"
 #include "velox/experimental/cudf/tests/utils/CudfTpcdsQueryBuilder.h"
 
+#include "velox/connectors/ConnectorRegistry.h"
 #include "velox/connectors/hive/HiveConnector.h"
 #include "velox/exec/tests/utils/HiveConnectorTestBase.h"
 
@@ -89,8 +90,8 @@ void CudfTpcdsBenchmark::initialize() {
     // Unregister it and re-register CudfHiveConnector under the same ID
     // so that TableScanAdapter::canRunOnGPU() returns true.
     const std::string prestoConnectorId = "hive";
-    if (connector::hasConnector(prestoConnectorId)) {
-      connector::unregisterConnector(prestoConnectorId);
+    if (connector::ConnectorRegistry::tryGet(prestoConnectorId)) {
+      connector::ConnectorRegistry::global().erase(prestoConnectorId);
     }
 
     // Re-register with CuDF properties.
@@ -98,7 +99,8 @@ void CudfTpcdsBenchmark::initialize() {
     cudf_velox::connector::hive::CudfHiveConnectorFactory cudfHiveFactory;
     auto cudfHiveConnector = cudfHiveFactory.newConnector(
         prestoConnectorId, properties, ioExecutor_.get());
-    connector::registerConnector(cudfHiveConnector);
+    connector::ConnectorRegistry::global().insert(
+        cudfHiveConnector->connectorId(), cudfHiveConnector);
   }
 
   cudf_velox::CudfConfig::getInstance().memoryResource =

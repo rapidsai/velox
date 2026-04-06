@@ -43,6 +43,11 @@ namespace {
 
 constexpr auto oobPolicy = cudf::out_of_bounds_policy::DONT_CHECK;
 
+std::mutex& cudfGlobalMutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+
 } // namespace
 
 // --- CudfNestedLoopJoinBridge ---

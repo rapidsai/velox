@@ -16,6 +16,7 @@
 #include "velox/exec/tests/utils/TpcdsQueryBuilder.h"
 
 #include "velox/common/base/Exceptions.h"
+#include "velox/connectors/ConnectorRegistry.h"
 #include "velox/connectors/hive/HiveConnector.h"
 #include "velox/exec/tests/utils/HiveConnectorTestBase.h"
 
@@ -104,7 +105,8 @@ void TpcdsQueryBuilder::registerHiveConnector(
       connectorId,
       std::make_shared<config::ConfigBase>(
           std::unordered_map<std::string, std::string>()));
-  connector::registerConnector(hiveConnector);
+  connector::ConnectorRegistry::global().insert(
+      hiveConnector->connectorId(), hiveConnector);
 }
 
 VeloxPlan TpcdsQueryBuilder::getQueryPlan(
@@ -125,7 +127,7 @@ VeloxPlan TpcdsQueryBuilder::getQueryPlan(
     LOG(INFO) << "TpcdsQueryBuilder: detected connector ID '" << connectorId_
               << "' from plan";
 
-    if (!connector::hasConnector(connectorId_)) {
+    if (!connector::ConnectorRegistry::tryGet(connectorId_)) {
       registerHiveConnector(connectorId_);
       ownedConnector_ = true;
       LOG(INFO) << "TpcdsQueryBuilder: registered connector under ID '"
@@ -161,7 +163,7 @@ std::shared_ptr<connector::ConnectorSplit> TpcdsQueryBuilder::makeSplit(
 
 void TpcdsQueryBuilder::shutdown() {
   if (ownedConnector_ && !connectorId_.empty()) {
-    connector::unregisterConnector(connectorId_);
+    connector::ConnectorRegistry::global().erase(connectorId_);
     ownedConnector_ = false;
   }
   connectorId_.clear();
