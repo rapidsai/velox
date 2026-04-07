@@ -73,7 +73,6 @@ velox_add_library(
   OrderBy.cpp
   OutputBuffer.cpp
   OutputBufferManager.cpp
-  OutputBufferManagerRegistry.cpp
   ParallelProject.cpp
   PartitionFunction.cpp
   PartitionStreamingWindowBuild.cpp
@@ -180,7 +179,6 @@ velox_add_library(
   OrderBy.h
   OutputBuffer.h
   OutputBufferManager.h
-  OutputBufferManagerRegistry.h
   ParallelProject.h
   PartitionFunction.h
   PartitionStreamingWindowBuild.h
