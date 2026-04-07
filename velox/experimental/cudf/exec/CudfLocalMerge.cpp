@@ -15,10 +15,12 @@
  */
 
 #include "velox/experimental/cudf/exec/CudfLocalMerge.h"
+#include "velox/experimental/cudf/exec/GpuResources.h"
 #include "velox/experimental/cudf/exec/Utilities.h"
 
 #include "velox/exec/Task.h"
 
+#include <cudf/detail/utilities/stream_pool.hpp>
 #include <cudf/merge.hpp>
 
 namespace facebook::velox::cudf_velox {
@@ -167,7 +169,7 @@ RowVectorPtr CudfLocalMerge::getOutput() {
       if (it->size() == 1) {
         return std::move(it->front());
       }
-      auto concatenated = getConcatenatedTable(*it, outputType_, stream);
+      auto concatenated = getConcatenatedTable(std::move(*it), outputType_, stream, mr);
       auto numRows = concatenated->num_rows();
       return std::make_shared<CudfVector>(
           pool(), outputType_, numRows, std::move(concatenated), stream);
