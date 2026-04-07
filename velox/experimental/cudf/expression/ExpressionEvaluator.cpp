@@ -477,9 +477,7 @@ class BinaryFunction : public CudfFunction {
             rhsView = rhsCast->view();
           }
         }
-        if (hasDecimalZero(rhsView, stream, mr)) {
-          VELOX_USER_FAIL("Division by zero");
-        }
+        // Division by zero is handled in the kernel (returns 0)
         auto lhsScale = -lhsView.type().scale();
         auto rhsScale = -rhsView.type().scale();
         auto outScale = -type_.scale();
@@ -552,9 +550,7 @@ class BinaryFunction : public CudfFunction {
       return cudf::binary_operation(lhsView, rhsView, op_, type_, stream, mr);
     } else if (left_ == nullptr) {
       if (op_ == cudf::binary_operator::DIV && cudf::is_fixed_point(type_)) {
-        if (decimalScalarIsZero(*right_, stream)) {
-          VELOX_USER_FAIL("Division by zero");
-        }
+        // Division by zero is handled in the kernel (returns 0)
         auto lhsView = asView(inputColumns[0]);
         auto lhsScale = -lhsView.type().scale();
         auto rhsScale = -right_->type().scale();
@@ -632,10 +628,8 @@ class BinaryFunction : public CudfFunction {
           asView(inputColumns[0]), *right_, op_, type_, stream, mr);
     }
     if (op_ == cudf::binary_operator::DIV && cudf::is_fixed_point(type_)) {
+      // Division by zero is handled in the kernel (returns 0)
       auto rhsView = asView(inputColumns[0]);
-      if (hasDecimalZero(rhsView, stream, mr)) {
-        VELOX_USER_FAIL("Division by zero");
-      }
       auto lhsScale = -left_->type().scale();
       auto rhsScale = -rhsView.type().scale();
       auto outScale = -type_.scale();
@@ -1536,18 +1530,46 @@ bool registerBuiltinFunctions(const std::string& prefix) {
   // Our cudf binary ops can take all numeric types but instead of listing them
   // all, we're testing if input types can be casted to double. Coersion will
   // pass because all numerics can be casted to double.
-  // TODO (dm): This could break for decimal
-  registerCudfFunctions(
-      {prefix + "greaterthan", prefix + "gt"},
-      [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
-        return std::make_shared<BinaryFunction>(
-            expr, cudf::binary_operator::GREATER);
-      },
-      {FunctionSignatureBuilder()
-           .returnType("boolean")
-           .argumentType("double")
-           .argumentType("double")
-           .build()});
+  // Helper for registering comparison operations with DECIMAL support
+  auto registerComparisonOp = [&](const std::vector<std::string>& aliases,
+                                  cudf::binary_operator op) {
+    registerCudfFunctions(
+        aliases,
+        [op](
+            const std::string&,
+            const std::shared_ptr<velox::exec::Expr>& expr) {
+          return std::make_shared<BinaryFunction>(expr, op);
+        },
+        {FunctionSignatureBuilder()
+             .returnType("boolean")
+             .argumentType("double")
+             .argumentType("double")
+             .build(),
+         FunctionSignatureBuilder()
+             .integerVariable("a_precision")
+             .integerVariable("a_scale")
+             .integerVariable("b_precision")
+             .integerVariable("b_scale")
+             .returnType("boolean")
+             .argumentType("decimal(a_precision, a_scale)")
+             .argumentType("decimal(b_precision, b_scale)")
+             .build()});
+  };
+
+  registerComparisonOp(
+      {prefix + "greaterthan", prefix + "gt"}, cudf::binary_operator::GREATER);
+  registerComparisonOp(
+      {prefix + "lessthan", prefix + "lt"}, cudf::binary_operator::LESS);
+  registerComparisonOp(
+      {prefix + "greaterthanorequal", prefix + "gte"},
+      cudf::binary_operator::GREATER_EQUAL);
+  registerComparisonOp(
+      {prefix + "lessthanorequal", prefix + "lte"},
+      cudf::binary_operator::LESS_EQUAL);
+  registerComparisonOp(
+      {prefix + "equal", prefix + "eq"}, cudf::binary_operator::EQUAL);
+  registerComparisonOp(
+      {prefix + "notequal", prefix + "neq"}, cudf::binary_operator::NOT_EQUAL);
 
   // Helper for registering binary operations with DECIMAL support
   auto registerBinaryOp = [&](const std::vector<std::string>& aliases,
