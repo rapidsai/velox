@@ -32,7 +32,7 @@
 
 namespace facebook::velox::exec {
 
-class OutputBufferManager;
+class IOutputBufferManager;
 
 class HashJoinBridge;
 class NestedLoopJoinBridge;
@@ -1355,7 +1355,8 @@ class Task : public std::enable_shared_from_this<Task> {
   // ungrouped execution we use the [0] entry in this vector.
   std::unordered_map<uint32_t, SplitGroupState> splitGroupStates_;
 
-  std::weak_ptr<OutputBufferManager> bufferManager_;
+  std::vector<std::pair<std::string, std::weak_ptr<IOutputBufferManager>>>
+      bufferManagers_;
 
   // Boolean indicating that we have already received no-more-output-buffers
   // message. Subsequent messages will be ignored.
