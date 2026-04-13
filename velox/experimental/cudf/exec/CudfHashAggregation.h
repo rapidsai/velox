@@ -42,7 +42,8 @@ class CudfHashAggregation : public exec::Operator, public NvtxHelper {
 
     virtual void addGroupbyRequest(
         cudf::table_view const& tbl,
-        std::vector<cudf::groupby::aggregation_request>& requests) = 0;
+        std::vector<cudf::groupby::aggregation_request>& requests,
+        rmm::cuda_stream_view stream) = 0;
 
     virtual std::unique_ptr<cudf::column> doReduce(
         cudf::table_view const& input,
@@ -53,6 +54,8 @@ class CudfHashAggregation : public exec::Operator, public NvtxHelper {
     virtual std::unique_ptr<cudf::column> makeOutputColumn(
         std::vector<cudf::groupby::aggregation_result>& results,
         rmm::cuda_stream_view stream) = 0;
+
+    virtual ~Aggregator() = default;
 
    protected:
     Aggregator(
