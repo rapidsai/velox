@@ -105,6 +105,7 @@ std::unique_ptr<cudf::scalar> makeScalarFromValue(
     if (type->isDecimal()) {
       // Velox DECIMAL scale is positive for fractional digits
       // cuDF scale is negative for fractional digits
+      // @TODO check the bigger picture here!
       if (type->kind() == TypeKind::BIGINT) {
         auto const decimalType =
             std::dynamic_pointer_cast<const ShortDecimalType>(type);

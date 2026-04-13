@@ -21,6 +21,7 @@
 #include "velox/experimental/cudf/exec/Utilities.h"
 #include "velox/experimental/cudf/exec/VeloxCudfInterop.h"
 #include "velox/experimental/cudf/expression/AstExpression.h"
+#include "velox/experimental/cudf/expression/AstExpressionUtils.h"
 #include "velox/experimental/cudf/expression/ExpressionEvaluator.h"
 
 #include "velox/core/PlanNode.h"
@@ -439,7 +440,14 @@ void CudfHashJoinProbe::initializeFilter() {
   std::vector<velox::RowTypePtr> filterRowTypes{probeType_, buildType_};
   filterEvaluator_ = createCudfExpression(
       exprs.exprs()[0], facebook::velox::type::concatRowTypes(filterRowTypes));
-
+  
+  // For now we disable AST-based filtering (and force precomputation)
+  // if the filter expression contains decimal types, using the same
+  // shallow search as used for regular expression evaluation.
+  if (containsDecimalType(exprs.exprs()[0], false)) {
+    useAstFilter_ = false;
+  }
+  
   // Check if the filter expression spans both join sides (e.g., switch
   // expressions referencing columns from both probe and build). If so, we
   // cannot use AST-based filtering and must fall back to filterEvaluator_.
@@ -450,33 +458,41 @@ void CudfHashJoinProbe::initializeFilter() {
     return;
   }
 
+  // Validate AST filtering for this join type now to avoid run-time error.
+  if (joinNode_->isRightSemiFilterJoin() ||
+      joinNode_->isLeftSemiFilterJoin() || joinNode_->isAntiJoin()) {
+    VELOX_CHECK(
+        useAstFilter_,
+        "AST expression evaluation must be enabled for semi-filter and anti joins.");
+  }
+  
   // We don't need to get tables that contain conditional comparison columns
   // We'll pass the entire table. The ast will handle finding the required
   // columns. This is required because we build the ast with whole row schema
   // and the column locations in that schema translate to column locations
   // in whole tables
-
-  // create ast tree
-  if (joinNode_->isRightJoin() || joinNode_->isRightSemiFilterJoin()) {
-    createAstTree(
-        exprs.exprs()[0],
-        tree_,
-        scalars_,
-        buildType_,
-        probeType_,
-        rightPrecomputeInstructions_,
-        leftPrecomputeInstructions_);
-  } else {
-    createAstTree(
-        exprs.exprs()[0],
-        tree_,
-        scalars_,
-        probeType_,
-        buildType_,
-        leftPrecomputeInstructions_,
-        rightPrecomputeInstructions_);
+  if (useAstFilter_) {
+    // create ast tree
+    if (joinNode_->isRightJoin() || joinNode_->isRightSemiFilterJoin()) {
+      createAstTree(
+          exprs.exprs()[0],
+          tree_,
+          scalars_,
+          buildType_,
+          probeType_,
+          rightPrecomputeInstructions_,
+          leftPrecomputeInstructions_);
+    } else {
+      createAstTree(
+          exprs.exprs()[0],
+          tree_,
+          scalars_,
+          probeType_,
+          buildType_,
+          leftPrecomputeInstructions_,
+          rightPrecomputeInstructions_);
+    }
   }
-  useAstFilter_ = true;
 }
 
 bool CudfHashJoinProbe::needsInput() const {
@@ -940,15 +956,35 @@ std::vector<std::unique_ptr<cudf::table>> CudfHashJoinProbe::leftJoin(
     std::vector<std::unique_ptr<cudf::column>> joinedCols;
 
     if (joinNode_->filter()) {
-      cudfOutputs.push_back(filteredOutputIndices(
-          leftTableView,
-          leftIndicesCol,
-          rightTableView,
-          rightIndicesCol,
-          extendedLeftView,
-          extendedRightView,
-          cudf::join_kind::LEFT_JOIN,
-          stream));
+      if (useAstFilter_) {
+        cudfOutputs.push_back(filteredOutputIndices(
+            leftTableView,
+            leftIndicesCol,
+            rightTableView,
+            rightIndicesCol,
+            extendedLeftView,
+            extendedRightView,
+            cudf::join_kind::LEFT_JOIN,
+            stream));
+      } else {
+        auto filterFunc =
+            [stream](
+                std::vector<std::unique_ptr<cudf::column>>&& joinedCols,
+                cudf::column_view filterColumn) {
+              auto filterTable =
+                  std::make_unique<cudf::table>(std::move(joinedCols));
+              auto filteredTable = cudf::apply_boolean_mask(
+                  *filterTable, filterColumn, stream, get_output_mr());
+              return filteredTable->release();
+            };
+        cudfOutputs.push_back(filteredOutput(
+            leftTableView,
+            leftIndicesCol,
+            rightTableView,
+            rightIndicesCol,
+            filterFunc,
+            stream));
+      }
     } else {
       cudfOutputs.push_back(unfilteredOutput(
           leftTableView,
@@ -1763,10 +1799,10 @@ RowVectorPtr CudfHashJoinProbe::getOutput() {
         for (size_t li = 0; li < leftColumnOutputIndices_.size(); ++li) {
           auto outIdx = leftColumnOutputIndices_[li];
           auto probeChannel = leftColumnIndicesToGather_[li];
-          auto leftCudfType =
-              veloxToCudfTypeId(probeType_->childAt(probeChannel));
+          auto leftCudfDataType =
+              veloxToCudfDataType(probeType_->childAt(probeChannel));
           auto nullScalar = cudf::make_default_constructed_scalar(
-              cudf::data_type{leftCudfType}, stream, get_temp_mr());
+              leftCudfDataType, stream, get_temp_mr());
           outCols[outIdx] = cudf::make_column_from_scalar(
               *nullScalar, m, stream, get_output_mr());
         }
