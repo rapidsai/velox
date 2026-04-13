@@ -182,13 +182,21 @@ TEST_F(LocalMergeTest, offByOne) {
 
   auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
 
+  // CudfLocalMerge requires CudfVector inputs, which are produced by orderBy.
+  // The data is already sorted, so orderBy just converts to CudfVector.
   auto plan =
       PlanBuilder(planNodeIdGenerator)
           .localMerge(
               {"c0"},
               {
-                  PlanBuilder(planNodeIdGenerator).values({data1}).planNode(),
-                  PlanBuilder(planNodeIdGenerator).values({data2}).planNode(),
+                  PlanBuilder(planNodeIdGenerator)
+                      .values({data1})
+                      .orderBy({"c0"}, true)
+                      .planNode(),
+                  PlanBuilder(planNodeIdGenerator)
+                      .values({data2})
+                      .orderBy({"c0"}, true)
+                      .planNode(),
               })
           .planNode();
 
