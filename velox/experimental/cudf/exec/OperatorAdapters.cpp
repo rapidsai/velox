@@ -1101,7 +1101,10 @@ void registerAllOperatorAdapters() {
   registry.registerAdapter(std::make_unique<LocalExchangeAdapter>());
   registry.registerAdapter(std::make_unique<LocalMergeAdapter>());
   registry.registerAdapter(std::make_unique<AssignUniqueIdAdapter>());
+<<<<<<< HEAD
   registry.registerAdapter(std::make_unique<MarkDistinctAdapter>());
+=======
+>>>>>>> main
   registry.registerAdapter(std::make_unique<EnforceSingleRowAdapter>());
   registry.registerAdapter(std::make_unique<ValuesAdapter>());
   registry.registerAdapter(std::make_unique<CallbackSinkAdapter>());
