@@ -16,18 +16,20 @@
 #include "velox/experimental/cudf/CudfConfig.h"
 #include "velox/experimental/cudf/exec/CudfWindow.h"
 #include "velox/experimental/cudf/exec/Utilities.h"
+#include "velox/experimental/cudf/exec/VeloxCudfInterop.h"
 
 #include "velox/core/Expressions.h"
 
 #include <cudf/aggregation.hpp>
 #include <cudf/concatenate.hpp>
-#include <cudf/detail/gather.hpp>
+#include <cudf/copying.hpp>
 #include <cudf/groupby.hpp>
 #include <cudf/reduction.hpp>
 #include <cudf/rolling.hpp>
 #include <cudf/sorting.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf/types.hpp>
+#include <cudf/unary.hpp>
 
 #include <nvtx3/nvtx3.hpp>
 
@@ -413,7 +415,7 @@ RowVectorPtr CudfWindow::getOutput() {
     auto keyTable = allView.select(allSortKeys);
     auto indices = cudf::stable_sorted_order(
         keyTable, allOrders, allNullOrders, stream, mr);
-    sortedData = cudf::detail::gather(
+    sortedData = cudf::gather(
         allView,
         indices->view(),
         cudf::out_of_bounds_policy::DONT_CHECK,
@@ -438,25 +440,33 @@ RowVectorPtr CudfWindow::getOutput() {
     auto inputColIdx = resolveInputColumn(func);
     auto inputCol = sortedView.column(inputColIdx);
 
+    std::unique_ptr<cudf::column> resultCol;
+
     if (baseName == "lag" || baseName == "lead") {
-      windowResultCols.push_back(
-          computeLeadLagColumn(partKeys, inputCol, func, baseName, stream));
+      resultCol = computeLeadLagColumn(partKeys, inputCol, func, baseName, stream);
     } else if (baseName == "first_value" || baseName == "last_value") {
-      windowResultCols.push_back(
-          computeNthValueColumn(partKeys, inputCol, func, baseName, stream));
+      resultCol = computeNthValueColumn(partKeys, inputCol, func, baseName, stream);
     } else if (
         baseName == "row_number" || baseName == "rank" ||
         baseName == "dense_rank") {
-      windowResultCols.push_back(
-          computeRankColumn(sortedView, baseName, stream));
+      resultCol = computeRankColumn(sortedView, baseName, stream);
     } else if (
         baseName == "sum" || baseName == "min" || baseName == "max" ||
         baseName == "count" || baseName == "avg") {
-      windowResultCols.push_back(
-          computeAggregateColumn(partKeys, inputCol, func, baseName, stream));
+      resultCol = computeAggregateColumn(partKeys, inputCol, func, baseName, stream);
     } else {
       VELOX_FAIL("Unsupported window function for cudf: {}", baseName);
     }
+
+    // Cast to expected output type if needed (e.g., cudf produces INT32 for
+    // rank/count but Velox expects BIGINT).
+    auto expectedType = func.functionCall->type();
+    auto cudfExpectedType = veloxToCudfDataType(expectedType);
+    if (resultCol->type() != cudfExpectedType) {
+      resultCol = cudf::cast(resultCol->view(), cudfExpectedType, stream, mr);
+    }
+
+    windowResultCols.push_back(std::move(resultCol));
   }
 
   // 4. Build the output table: input columns + window result columns.

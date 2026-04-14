@@ -321,4 +321,48 @@ TEST_F(CudfWindowTest, avgWindow) {
   AssertQueryBuilder(plan).assertResults(expected);
 }
 
+// Verify that CudfWindow outputs correct types for window functions.
+// cudf produces INT32 for rank/count functions, but Velox expects BIGINT.
+// This test ensures CudfWindow casts the output to the correct type.
+TEST_F(CudfWindowTest, outputTypesAreCorrect) {
+  auto data = makeRowVector(
+      {"id", "val"},
+      {
+          makeFlatVector<int32_t>({1, 1, 2, 2}),
+          makeFlatVector<int64_t>({10, 20, 30, 40}),
+      });
+  std::vector<std::string> queries{
+      "row_number() over (partition by id order by val) as rn",
+      "rank() over (partition by id order by val) as rnk",
+      "dense_rank() over (partition by id order by val) as drnk"
+  };
+
+  auto plan =
+      PlanBuilder()
+          .values({data})
+          .window(queries)
+          .planNode();
+
+  auto result = AssertQueryBuilder(plan).copyResults(pool());
+
+  // Verify output types are BIGINT (not INT32 which cudf produces natively).
+  // row_number, rank, dense_rank, count should all be BIGINT in Presto.
+  ASSERT_EQ(result->childAt(2)->type()->kind(), TypeKind::BIGINT); // rn
+  ASSERT_EQ(result->childAt(3)->type()->kind(), TypeKind::BIGINT); // rnk
+  ASSERT_EQ(result->childAt(4)->type()->kind(), TypeKind::BIGINT); // drnk
+
+  // Also verify the values are correct.
+  auto expected = makeRowVector(
+      {"id", "val", "rn", "rnk", "drnk"},
+      {
+          makeFlatVector<int32_t>({1, 1, 2, 2}),
+          makeFlatVector<int64_t>({10, 20, 30, 40}),
+          makeFlatVector<int64_t>({1, 2, 1, 2}),
+          makeFlatVector<int64_t>({1, 2, 1, 2}),
+          makeFlatVector<int64_t>({1, 2, 1, 2}),
+      });
+
+  AssertQueryBuilder(plan).assertResults(expected);
+}
+
 } // namespace
