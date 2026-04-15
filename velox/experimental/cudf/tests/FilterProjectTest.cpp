@@ -1312,6 +1312,59 @@ TEST_F(CudfFilterProjectTest, switchExpr) {
   facebook::velox::test::assertEqualVectors(expected, result);
 }
 
+TEST_F(CudfFilterProjectTest, switchExprDivisionByZeroGuard) {
+  // Test that CASE WHEN guards against division-by-zero.
+  // pmc has zeros in half its entries; the CASE should return null for those rows.
+  auto data = makeRowVector(
+      {"amc", "pmc"},
+      {
+          makeFlatVector<int64_t>({10, 20, 30, 40, 50, 60, 70, 80, 90, 100}),
+          makeFlatVector<int64_t>({1, 0, 2, 0, 3, 0, 4, 0, 5, 0}),
+      });
+
+  // Division of DECIMAL(15,4) / DECIMAL(15,4) produces DECIMAL(19,4).
+  // The THEN clause must match that type.
+  auto plan =
+      PlanBuilder()
+          .values({data})
+          .project(
+              {"CASE WHEN pmc = 0 THEN cast(null as decimal(19,4)) "
+               "ELSE cast(amc AS decimal(15,4)) / cast(pmc AS decimal(15,4)) "
+               "END AS am_pm_ratio"})
+          .planNode();
+
+  auto result = AssertQueryBuilder(plan).copyResults(pool());
+
+  // Expected: division result for non-zero pmc, null for zero pmc
+  // Row 0: 10/1 = 10.0000
+  // Row 1: null (pmc=0)
+  // Row 2: 30/2 = 15.0000
+  // Row 3: null (pmc=0)
+  // Row 4: 50/3 = 16.6666...
+  // Row 5: null (pmc=0)
+  // Row 6: 70/4 = 17.5000
+  // Row 7: null (pmc=0)
+  // Row 8: 90/5 = 18.0000
+  // Row 9: null (pmc=0)
+  auto expectedType = DECIMAL(19, 4);
+  auto expected = makeRowVector({
+      makeNullableFlatVector<int128_t>(
+          {100000,
+           std::nullopt,
+           150000,
+           std::nullopt,
+           166667, // rounded
+           std::nullopt,
+           175000,
+           std::nullopt,
+           180000,
+           std::nullopt},
+          expectedType),
+  });
+
+  facebook::velox::test::assertEqualVectors(expected, result);
+}
+
 TEST_F(CudfFilterProjectTest, greatestLeastAllColumns) {
   auto data = makeRowVector({
       makeFlatVector<double>({1.0, 5.0, -3.0}),
