@@ -69,6 +69,15 @@ cudf::ast::literal makeLiteralFromScalar(
     VELOX_FAIL("Unsupported base type for literal");
   } else if (type->kind() == TypeKind::VARCHAR) {
     return cudf::ast::literal{*static_cast<cudf::string_scalar*>(&scalar)};
+  } else if constexpr (std::is_same_v<T, Timestamp>) {
+    const auto& engine = CudfConfig::getInstance().functionEngine;
+    if (engine == "spark") {
+      using CudfScalarType = cudf::timestamp_scalar<cudf::timestamp_us>;
+      return cudf::ast::literal{*static_cast<CudfScalarType*>(&scalar)};
+    } else {
+      using CudfScalarType = cudf::timestamp_scalar<cudf::timestamp_ns>;
+      return cudf::ast::literal{*static_cast<CudfScalarType*>(&scalar)};
+    }
   } else {
     // TODO for non-numeric types too.
     VELOX_NYI(
@@ -216,7 +225,9 @@ cudf::ast::literal makeScalarAndLiteral(
     const variant& var,
     std::vector<std::unique_ptr<cudf::scalar>>& scalars) {
   using T = typename TypeTraits<kind>::NativeType;
-  if constexpr (cudf::is_fixed_width<T>() || kind == TypeKind::VARCHAR) {
+  if constexpr (
+      cudf::is_fixed_width<T>() || kind == TypeKind::VARCHAR ||
+      kind == TypeKind::TIMESTAMP) {
     auto value = var.value<T>();
     auto scalar = makeScalarFromValue(type, value, false);
     scalars.emplace_back(std::move(scalar));

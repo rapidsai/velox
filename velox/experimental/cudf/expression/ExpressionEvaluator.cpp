@@ -755,7 +755,7 @@ class LogicalFunction : public CudfFunction {
     size_t columnIndex = 0;
     for (const auto& literal : literals_) {
       if (literal) {
-        auto column = cudf::make_column_from_scalar(*literal, rowCount, stream);
+        auto column = cudf::make_column_from_scalar(*literal, rowCount, stream, mr);
         operands.push_back(column->view());
         literalColumns.push_back(std::move(column));
       } else {
@@ -2113,12 +2113,6 @@ bool registerBuiltinFunctions(const std::string& prefix) {
            .argumentType("T")
            .build()});
 
-  if (CudfConfig::getInstance().functionEngine == "spark") {
-    registerSparkFunctions(prefix);
-  } else {
-    registerPrestoFunctions(prefix);
-  }
-
   //
   // regular binary operators
   //
@@ -2166,8 +2160,8 @@ bool registerBuiltinFunctions(const std::string& prefix) {
   // regular comparison operators
   //
 
-  auto registerComparisonOp = [&](const std::vector<std::string>& aliases,
-                                  cudf::binary_operator op) {
+  auto registerRegularComparisonOp = [&](const std::vector<std::string>& aliases,
+                                         cudf::binary_operator op) {
     registerCudfFunctions(
         aliases,
         [op](
@@ -2191,19 +2185,19 @@ bool registerBuiltinFunctions(const std::string& prefix) {
              .build()});
   };
 
-  registerComparisonOp(
+  registerRegularComparisonOp(
       {prefix + "equal", prefix + "eq"}, cudf::binary_operator::EQUAL);
-  registerComparisonOp(
+  registerRegularComparisonOp(
       {prefix + "notequal", prefix + "neq"}, cudf::binary_operator::NOT_EQUAL);
-  registerComparisonOp(
+  registerRegularComparisonOp(
       {prefix + "greaterthanorequal", prefix + "gte"},
       cudf::binary_operator::GREATER_EQUAL);
-  registerComparisonOp(
+  registerRegularComparisonOp(
       {prefix + "lessthanorequal", prefix + "lte"},
       cudf::binary_operator::LESS_EQUAL);
-  registerComparisonOp(
+  registerRegularComparisonOp(
       {prefix + "greaterthan", prefix + "gt"}, cudf::binary_operator::GREATER);
-  registerComparisonOp(
+  registerRegularComparisonOp(
       {prefix + "lessthan", prefix + "lt"}, cudf::binary_operator::LESS);
 
   //
@@ -2306,6 +2300,14 @@ bool registerBuiltinFunctions(const std::string& prefix) {
            .argumentType("decimal(p,s)")
            .variableArity("decimal(p,s)")
            .build()});
+
+  // Register function-engine specific functions last so they can override
+  // generic binary operator registrations with more specific signatures.
+  if (CudfConfig::getInstance().functionEngine == "spark") {
+    registerSparkFunctions(prefix);
+  } else {
+    registerPrestoFunctions(prefix);
+  }
 
   return true;
 }
