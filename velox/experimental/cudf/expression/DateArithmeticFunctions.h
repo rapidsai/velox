@@ -37,6 +37,7 @@ class DateAddFunction : public CudfFunction {
 /// plus(DATE, INTERVAL DAY TO SECOND) -> DATE.
 /// Used by TPC-DS and Presto for date + interval arithmetic.
 /// Converts the interval from milliseconds to days and adds to the date.
+/// Supports both constant and non-constant interval arguments.
 class DatePlusIntervalFunction : public CudfFunction {
  public:
   explicit DatePlusIntervalFunction(
@@ -46,6 +47,14 @@ class DatePlusIntervalFunction : public CudfFunction {
       std::vector<ColumnOrView>& inputColumns,
       rmm::cuda_stream_view stream,
       rmm::device_async_resource_ref mr) const override;
+
+ private:
+  // The interval value converted to days, stored as DURATION_DAYS scalar.
+  // Only set when the interval argument is a constant.
+  std::unique_ptr<cudf::scalar> value_;
+
+  // True if the interval argument is a constant.
+  bool isConstantInterval_{false};
 };
 
 } // namespace facebook::velox::cudf_velox

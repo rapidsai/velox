@@ -313,6 +313,49 @@ TEST_P(MultiThreadedHashJoinTest, filter) {
       .run();
 }
 
+// Test inner join with a filter using plus(date, constant interval).
+// This tests DatePlusIntervalFunction with a literal interval argument.
+TEST_F(HashJoinTest, innerJoinWithDatePlusConstantIntervalFilter) {
+  auto probeType = ROW({"t_k0", "d_date"}, {BIGINT(), DATE()});
+  std::vector<RowVectorPtr> probeVectors = {makeRowVector(
+      {"t_k0", "d_date"},
+      {makeFlatVector<int64_t>({1, 2, 3, 4, 5}),
+       makeFlatVector<int32_t>(
+           {DATE()->toDays("2019-05-20"),
+            DATE()->toDays("2019-05-25"),
+            DATE()->toDays("2019-05-28"),
+            DATE()->toDays("2019-06-01"),
+            DATE()->toDays("2019-06-15")},
+           DATE())})};
+
+  auto buildType = ROW({"u_k0", "u_data"}, {BIGINT(), BIGINT()});
+  std::vector<RowVectorPtr> buildVectors = {makeRowVector(
+      {"u_k0", "u_data"},
+      {makeFlatVector<int64_t>({1, 2, 3, 4, 5}),
+       makeFlatVector<int64_t>({100, 200, 300, 400, 500})})};
+
+  // Filter: plus(d_date, 5-day-interval) > '2019-06-01'
+  // Adds 5 days to d_date and checks if result > June 1st.
+  // Expected matches: rows where d_date > 2019-05-27 (i.e., rows 3, 4, 5).
+  HashJoinBuilder(*pool_, duckDbQueryRunner_, driverExecutor_.get())
+      .injectSpill(false)
+      .numDrivers(1)
+      .probeType(probeType)
+      .probeKeys({"t_k0"})
+      .probeVectors(std::move(probeVectors))
+      .buildType(buildType)
+      .buildKeys({"u_k0"})
+      .buildVectors(std::move(buildVectors))
+      .joinType(core::JoinType::kInner)
+      .joinFilter(
+          "plus(d_date, cast('5 00:00:00.000' as interval day to second)) > DATE '2019-06-01'")
+      .joinOutputLayout({"t_k0", "d_date", "u_data"})
+      .referenceQuery(
+          "SELECT t.t_k0, t.d_date, u.u_data FROM t INNER JOIN u "
+          "ON t.t_k0 = u.u_k0 AND t.d_date + INTERVAL '5' DAY > DATE '2019-06-01'")
+      .run();
+}
+
 DEBUG_ONLY_TEST_P(MultiThreadedHashJoinTest, filterSpillOnFirstProbeInput) {
   auto spillDirectory = TempDirectoryPath::create();
   std::atomic_bool injectProbeSpillOnce{true};

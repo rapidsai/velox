@@ -26,6 +26,51 @@
 
 namespace facebook::velox::cudf_velox {
 
+namespace {
+// Parse interval string in format "[-]DAYS HH:MM:SS.mmm" to milliseconds.
+// This is the inverse of IntervalDayTimeType::valueToString().
+// Examples: "5 00:00:00.000", "1 03:48:20.100", "-2 12:30:00.500"
+int64_t parseIntervalDayTimeString(const std::string& str) {
+  int64_t sign = 1;
+  size_t pos = 0;
+
+  // Check for negative sign
+  if (!str.empty() && str[0] == '-') {
+    sign = -1;
+    pos = 1;
+  }
+
+  // Find the space separating days from time
+  auto spacePos = str.find(' ', pos);
+  VELOX_USER_CHECK(
+      spacePos != std::string::npos,
+      "Invalid interval format, expected 'DAYS HH:MM:SS.mmm': {}",
+      str);
+
+  // Parse days
+  int64_t days = std::stoll(str.substr(pos, spacePos - pos));
+
+  // Parse time part HH:MM:SS.mmm using int for sscanf compatibility
+  int hours = 0, minutes = 0, seconds = 0, millis = 0;
+  int parsedFields = sscanf(
+      str.c_str() + spacePos + 1,
+      "%d:%d:%d.%d",
+      &hours,
+      &minutes,
+      &seconds,
+      &millis);
+
+  VELOX_USER_CHECK(
+      parsedFields >= 3,
+      "Invalid interval time format, expected 'HH:MM:SS[.mmm]': {}",
+      str);
+
+  return sign *
+      (days * kMillisInDay + hours * kMillisInHour + minutes * kMillisInMinute +
+       seconds * kMillisInSecond + millis);
+}
+} // namespace
+
 DateAddFunction::DateAddFunction(
     const std::shared_ptr<velox::exec::Expr>& expr) {
   VELOX_CHECK_EQ(
@@ -65,6 +110,66 @@ DatePlusIntervalFunction::DatePlusIntervalFunction(
   VELOX_CHECK(
       expr->inputs()[1]->type()->isIntervalDayTime(),
       "Second argument to plus must be an interval day to second");
+
+  // Check if the interval argument is a constant.
+  // It could be either:
+  // 1. A direct ConstantExpr with interval type (constant-folded)
+  // 2. A cast(ConstantExpr<VARCHAR>) to interval - we parse the string ourselves
+  //    since Velox doesn't support cast from VARCHAR to interval
+  auto intervalExpr = expr->inputs()[1];
+  int64_t intervalMillis = 0;
+  bool foundConstant = false;
+
+  // Case 1: Direct ConstantExpr with interval type
+  auto constExpr =
+      std::dynamic_pointer_cast<velox::exec::ConstantExpr>(intervalExpr);
+  if (constExpr && constExpr->type()->isIntervalDayTime()) {
+    auto constValue = constExpr->value();
+    intervalMillis =
+        constValue->as<velox::ConstantVector<int64_t>>()->valueAt(0);
+    foundConstant = true;
+  }
+
+  // Case 2: cast(ConstantExpr<VARCHAR>) to interval
+  if (!foundConstant &&
+      (intervalExpr->name() == "cast" || intervalExpr->name() == "try_cast") &&
+      intervalExpr->type()->isIntervalDayTime() &&
+      !intervalExpr->inputs().empty()) {
+    auto innerConstExpr = std::dynamic_pointer_cast<velox::exec::ConstantExpr>(
+        intervalExpr->inputs()[0]);
+    if (innerConstExpr && innerConstExpr->type()->isVarchar()) {
+      // Extract the VARCHAR value and parse it
+      auto constValue = innerConstExpr->value();
+      VELOX_CHECK_NOT_NULL(constValue, "ConstantExpr value is null");
+      VELOX_CHECK(
+          !constValue->isNullAt(0),
+          "Cannot cast null VARCHAR to interval");
+      auto varcharValue =
+          constValue->asUnchecked<velox::ConstantVector<velox::StringView>>()
+              ->valueAt(0);
+      intervalMillis = parseIntervalDayTimeString(varcharValue.str());
+      foundConstant = true;
+    }
+  }
+
+  if (foundConstant) {
+    isConstantInterval_ = true;
+
+    // Validate that the interval represents whole days.
+    VELOX_USER_CHECK_EQ(
+        intervalMillis % kMillisInDay,
+        0,
+        "Cannot add hours, minutes, seconds or milliseconds to a date");
+
+    // Convert milliseconds to days and create the scalar.
+    auto days = static_cast<int32_t>(intervalMillis / kMillisInDay);
+    auto stream = cudf::get_default_stream(cudf::allow_default_stream);
+    auto mr = get_temp_mr();
+    value_ = std::make_unique<cudf::duration_scalar<cudf::duration_D>>(
+        days, true, stream, mr);
+    stream.synchronize();
+  }
+  // else: non-constant interval column - will be handled in eval()
 }
 
 ColumnOrView DatePlusIntervalFunction::eval(
@@ -72,6 +177,19 @@ ColumnOrView DatePlusIntervalFunction::eval(
     rmm::cuda_stream_view stream,
     rmm::device_async_resource_ref mr) const {
   auto dateCol = asView(inputColumns[0]);
+
+  if (isConstantInterval_) {
+    // Use the pre-computed scalar for constant intervals.
+    return cudf::binary_operation(
+        dateCol,
+        *value_,
+        cudf::binary_operator::ADD,
+        cudf::data_type(cudf::type_id::TIMESTAMP_DAYS),
+        stream,
+        mr);
+  }
+
+  // Handle non-constant interval column.
   auto intervalCol = asView(inputColumns[1]);
 
   // Validate that all intervals are whole days.

@@ -2333,10 +2333,22 @@ std::shared_ptr<FunctionExpression> FunctionExpression::create(
 
   if (node->function_) {
     for (const auto& input : expr->inputs()) {
-      if (input->name() != "literal") {
-        node->subexpressions_.push_back(
-            createCudfExpression(input, inputRowSchema));
+      // Skip literal inputs - they're handled by the function constructor
+      if (input->name() == "literal") {
+        continue;
       }
+      // Skip cast(literal) to interval expressions - they're effectively
+      // constants that the function constructor should have already extracted.
+      // This is needed because cast from VARCHAR to interval is not supported
+      // by cuDF, but functions like DatePlusIntervalFunction can parse the
+      // interval string directly.
+      if ((input->name() == "cast" || input->name() == "try_cast") &&
+          input->type()->isIntervalDayTime() && !input->inputs().empty() &&
+          input->inputs()[0]->name() == "literal") {
+        continue;
+      }
+      node->subexpressions_.push_back(
+          createCudfExpression(input, inputRowSchema));
     }
   }
 
