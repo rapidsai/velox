@@ -686,7 +686,7 @@ cudf::ast::expression const& AstContext::pushExprToTree(
         sideIdx = 0;
       }
       auto node =
-          createCudfExpression(expr, inputRowSchema[sideIdx], kAstEvaluatorName);
+          createCudfExpression(expr, inputRowSchema[sideIdx]);
       return addPrecomputeInstructionOnSide(sideIdx, 0, name, "", node);
     }
     VELOX_FAIL("Unsupported type for cast operation");
@@ -727,7 +727,7 @@ cudf::ast::expression const& AstContext::pushExprToTree(
       sideIdx = 0; // Default to left side if no fields found
     }
     auto node =
-        createCudfExpression(expr, inputRowSchema[sideIdx], kAstEvaluatorName);
+        createCudfExpression(expr, inputRowSchema[sideIdx]);
     return addPrecomputeInstructionOnSide(sideIdx, 0, name, "", node);
   } else {
     VELOX_FAIL("Unsupported expression: {}", name);
