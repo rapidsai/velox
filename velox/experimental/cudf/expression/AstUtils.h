@@ -171,7 +171,7 @@ std::unique_ptr<cudf::scalar> makeScalarFromValue(
     stream.synchronize();
     return scalar;
   }
-  VELOX_NYI("Scalar creation not implemented for type " + type->toString());
+  VELOX_NYI("Scalar creation not implemented for type {}", type->toString());
 }
 
 template <TypeKind Kind>
@@ -206,7 +206,7 @@ cudf::ast::literal makeScalarAndLiteral(
     scalars.emplace_back(std::move(scalar));
     return makeLiteralFromScalar<T>(*(scalars.back()), type);
   }
-  VELOX_NYI("Scalar creation not implemented for type " + type->toString());
+  VELOX_NYI("Scalar creation not implemented for type {}", type->toString());
 }
 
 } // namespace facebook::velox::cudf_velox

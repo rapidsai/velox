@@ -807,6 +807,47 @@ class ValuesAdapter : public OperatorAdapter {
   }
 };
 
+/// MarkDistinctAdapter - Replaces with CudfMarkDistinct
+class MarkDistinctAdapter : public OperatorAdapter {
+ public:
+  MarkDistinctAdapter() : OperatorAdapter("MarkDistinct") {}
+
+  bool canHandle(const exec::Operator* op) const override {
+    return dynamic_cast<const exec::MarkDistinct*>(op) != nullptr;
+  }
+
+  bool canRunOnGPU(
+      const exec::Operator* /*op*/,
+      const core::PlanNodePtr& planNode,
+      exec::DriverCtx* /*ctx*/) const override {
+    return std::dynamic_pointer_cast<const core::MarkDistinctNode>(planNode) !=
+        nullptr;
+  }
+
+  bool acceptsGpuInput() const override {
+    return true;
+  }
+
+  bool producesGpuOutput() const override {
+    return true;
+  }
+
+  std::vector<std::unique_ptr<exec::Operator>> createReplacements(
+      const exec::Operator* /*op*/,
+      const core::PlanNodePtr& planNode,
+      exec::DriverCtx* ctx,
+      int32_t operatorId) const override {
+    auto markDistinctPlanNode =
+        std::dynamic_pointer_cast<const core::MarkDistinctNode>(planNode);
+
+    std::vector<std::unique_ptr<exec::Operator>> result;
+    result.push_back(
+        std::make_unique<CudfMarkDistinct>(
+            operatorId, ctx, markDistinctPlanNode));
+    return result;
+  }
+};
+
 /// EnforceSingleRowAdapter - Replaces with CudfEnforceSingleRow
 class EnforceSingleRowAdapter : public OperatorAdapter {
  public:
