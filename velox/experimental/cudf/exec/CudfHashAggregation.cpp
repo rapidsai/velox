@@ -2074,6 +2074,14 @@ bool registerStepAwareBuiltinAggregationFunctions(const std::string& prefix) {
           .argumentType("double")
           .build(),
       FunctionSignatureBuilder()
+          .returnType("date")
+          .argumentType("date")
+          .build(),
+      FunctionSignatureBuilder()
+          .returnType("timestamp")
+          .argumentType("timestamp")
+          .build(),
+      FunctionSignatureBuilder()
           .returnType("varchar")
           .argumentType("varchar")
           .build(),

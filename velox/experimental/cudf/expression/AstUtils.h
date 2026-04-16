@@ -15,9 +15,10 @@
  */
 #pragma once
 
+#include "velox/experimental/cudf/CudfConfig.h"
 #include "velox/experimental/cudf/CudfNoDefaults.h"
-
 #include "velox/expression/ConstantExpr.h"
+#include "velox/type/Timestamp.h"
 #include "velox/type/Type.h"
 #include "velox/vector/BaseVector.h"
 #include "velox/vector/SimpleVector.h"
@@ -26,6 +27,7 @@
 #include <cudf/ast/expressions.hpp>
 #include <cudf/fixed_point/fixed_point.hpp>
 #include <cudf/scalar/scalar.hpp>
+#include <cudf/types.hpp>
 #include <cudf/utilities/default_stream.hpp>
 
 namespace facebook::velox::cudf_velox {
@@ -100,8 +102,22 @@ std::unique_ptr<cudf::scalar> makeScalarFromValue(
   // the scalar, causing use-before-alloc.  Synchronising here is
   // cheap (one-time cost per scalar) and guarantees the memory is
   // available on every stream.
-
-  if constexpr (cudf::is_fixed_width<T>()) {
+  if constexpr (std::is_same_v<T, Timestamp>) {
+    const auto& engine = CudfConfig::getInstance().functionEngine;
+    if (engine == "spark") {
+      using CudfTimestampType = cudf::timestamp_us;
+      auto micros = isNull ? 0 : value.toMicros();
+      return std::make_unique<cudf::timestamp_scalar<CudfTimestampType>>(
+          CudfTimestampType{cudf::duration_us{micros}}, !isNull, stream, mr);
+    } else if (engine == "presto") {
+      using CudfTimestampType = cudf::timestamp_ns;
+      auto nanos = isNull ? 0 : value.toNanos();
+      return std::make_unique<cudf::timestamp_scalar<CudfTimestampType>>(
+          CudfTimestampType{cudf::duration_ns{nanos}}, !isNull, stream, mr);
+    } else {
+      VELOX_FAIL("Unsupported function engine: {}", engine);
+    }
+  } else if constexpr (cudf::is_fixed_width<T>()) {
     if (type->isDecimal()) {
       // Velox DECIMAL scale is positive for fractional digits
       // cuDF scale is negative for fractional digits
