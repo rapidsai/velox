@@ -1553,24 +1553,27 @@ bool registerCudfFunction(
     const std::string& name,
     CudfFunctionFactory factory,
     const std::vector<exec::FunctionSignaturePtr>& signatures,
-    bool overwrite,
     CudfCanEvaluate canEvaluate) {
   auto& registry = getCudfFunctionRegistry();
-  if (!overwrite && registry.find(name) != registry.end()) {
-    return false;
+  CudfFunctionEntry newEntry{std::move(factory), signatures, std::move(canEvaluate)};
+
+  auto it = registry.find(name);
+  if (it == registry.end()) {
+    // First registration for this name
+    registry[name] = CudfFunctionSpec{{std::move(newEntry)}};
+  } else {
+    // Add new entry at the beginning - later registrations have higher priority
+    it->second.entries.insert(it->second.entries.begin(), std::move(newEntry));
   }
-  registry[name] =
-      CudfFunctionSpec{std::move(factory), signatures, std::move(canEvaluate)};
   return true;
 }
 
 void registerCudfFunctions(
     const std::vector<std::string>& aliases,
     CudfFunctionFactory factory,
-    const std::vector<exec::FunctionSignaturePtr>& signatures,
-    bool overwrite) {
+    const std::vector<exec::FunctionSignaturePtr>& signatures) {
   for (const auto& name : aliases) {
-    registerCudfFunction(name, factory, signatures, overwrite);
+    registerCudfFunction(name, factory, signatures);
   }
 }
 
@@ -1579,8 +1582,16 @@ std::shared_ptr<CudfFunction> createCudfFunction(
     const std::shared_ptr<velox::exec::Expr>& expr) {
   auto& registry = getCudfFunctionRegistry();
   auto it = registry.find(name);
-  if (it != registry.end()) {
-    return it->second.factory(name, expr);
+  if (it == registry.end()) {
+    return nullptr;
+  }
+  // Iterate through entries and find one whose signature matches.
+  // Empty signatures means "matches any" (special forms like cast).
+  for (const auto& entry : it->second.entries) {
+    if (entry.signatures.empty() ||
+        matchCallAgainstSignatures(*expr, entry.signatures)) {
+      return entry.factory(name, expr);
+    }
   }
   return nullptr;
 }
@@ -1630,7 +1641,6 @@ void registerSparkFunctions(const std::string& prefix) {
            .constantArgumentType("varchar")
            .argumentType("timestamp")
            .build()},
-      true,
       DateTruncFunction::canEvaluate);
 }
 
@@ -1663,7 +1673,6 @@ void registerPrestoFunctions(const std::string& prefix) {
            .constantArgumentType("varchar")
            .argumentType("date")
            .build()},
-      true,
       DateTruncFunction::canEvaluate);
 }
 
@@ -2400,14 +2409,19 @@ bool FunctionExpression::canEvaluate(std::shared_ptr<velox::exec::Expr> expr) {
   if (it == registry.end()) {
     return false;
   }
-  const auto& spec = it->second;
-  if (!matchCallAgainstSignatures(*expr, spec.signatures)) {
-    return false;
+  // Iterate through entries and find one whose signature matches.
+  // Empty signatures means "matches any" (special forms like cast).
+  for (const auto& entry : it->second.entries) {
+    if (!entry.signatures.empty() &&
+        !matchCallAgainstSignatures(*expr, entry.signatures)) {
+      continue;
+    }
+    if (entry.canEvaluate) {
+      return entry.canEvaluate(expr);
+    }
+    return true;
   }
-  if (spec.canEvaluate) {
-    return spec.canEvaluate(expr);
-  }
-  return true;
+  return false;
 }
 
 bool canBeEvaluatedByCudf(std::shared_ptr<velox::exec::Expr> expr, bool deep) {
