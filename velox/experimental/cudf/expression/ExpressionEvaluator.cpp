@@ -1676,6 +1676,8 @@ void registerPrestoFunctions(const std::string& prefix) {
       DateTruncFunction::canEvaluate);
 }
 
+=======
+>>>>>>> feat/stddev-samp-aggregation
 bool registerBuiltinFunctions(const std::string& prefix) {
   using exec::FunctionSignatureBuilder;
 
@@ -2483,6 +2485,11 @@ std::shared_ptr<CudfExpression> createCudfExpression(
   }
 
   return FunctionExpression::create(expr, inputRowSchema);
+}
+
+void unregisterFunctions() {
+  auto& registry = getCudfFunctionRegistry();
+  registry.clear();
 }
 
 } // namespace facebook::velox::cudf_velox

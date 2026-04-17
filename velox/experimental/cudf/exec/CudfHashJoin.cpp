@@ -402,16 +402,14 @@ CudfHashJoinProbe::CudfHashJoinProbe(
               << rightColumnIndicesToGather_[i];
     }
   }
-
-  // Note: Filter initialization is deferred to initializeFilter() to avoid
-  // memory allocations during driver initialization, which Velox disallows.
 }
 
-void CudfHashJoinProbe::initializeFilter() {
-  if (filterInitialized_ || !joinNode_->filter()) {
+void CudfHashJoinProbe::initialize() {
+  Operator::initialize();
+
+  if (!joinNode_->filter()) {
     return;
   }
-  filterInitialized_ = true;
 
   // simplify expression
   exec::ExprSet exprs({joinNode_->filter()}, operatorCtx_->execCtx());
@@ -682,6 +680,8 @@ std::unique_ptr<cudf::table> CudfHashJoinProbe::filteredOutput(
         std::vector<std::unique_ptr<cudf::column>>&&,
         cudf::column_view)> func,
     rmm::cuda_stream_view stream) {
+  VELOX_CHECK(
+      isInitialized(), "Filter must be initialized before filteredOutput");
   auto leftResult = cudf::gather(
       leftTableView, leftIndicesCol, oobPolicy, stream, get_output_mr());
   auto rightResult = cudf::gather(
@@ -738,6 +738,9 @@ std::unique_ptr<cudf::table> CudfHashJoinProbe::filteredOutputIndices(
     cudf::table_view extendedRightView,
     cudf::join_kind joinKind,
     rmm::cuda_stream_view stream) {
+  VELOX_CHECK(
+      isInitialized(),
+      "Filter must be initialized before filteredOutputIndices");
   // Use extended views (with precomputed columns) for filter evaluation
   auto [filteredLeftJoinIndices, filteredRightJoinIndices] =
       cudf::filter_join_indices(
