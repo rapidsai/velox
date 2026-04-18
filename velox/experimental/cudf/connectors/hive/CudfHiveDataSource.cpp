@@ -199,30 +199,12 @@ void CudfHiveDataSource::addSplit(std::shared_ptr<ConnectorSplit> split) {
   // Virtual method for class-specific conversion of the split
   convertSplit(split);
 
-<<<<<<< HEAD
   VLOG(1) << "Adding split for GPU table scan: " << split_->toString()
           << ", columns: " << readColumnNames_.size()
-          << ", useExperimentalReader: " << useExperimentalSplitReader_;
+          << ", useExperimentalReader: " << useExperimentalCudfReader_;
 
-  // Split reader already exists, reset
-  if (splitReader_ or exptSplitReader_) {
-    splitReader_.reset();
-    exptSplitReader_.reset();
-    hybridScanState_.reset();
-  }
-
-  // Create a cudf split reader
-  if (useExperimentalSplitReader_) {
-    exptSplitReader_ = createExperimentalSplitReader();
-    hybridScanState_ = std::make_unique<
-        facebook::velox::cudf_velox::connector::hive::HybridScanState>();
-  } else {
-    splitReader_ = createSplitReader();
-  }
-=======
   cudfSplitReader_ = createCudfSplitReader();
   cudfSplitReader_->prepareSplit(runtimeStats_);
->>>>>>> feat/stddev-samp-aggregation
 
   // TODO: `completedBytes_` should be updated in `next()` as we read more and
   // more table bytes
@@ -299,14 +281,7 @@ std::optional<RowVectorPtr> CudfHiveDataSource::next(
 
   VELOX_CHECK_NOT_NULL(output, "Cudf to Velox conversion yielded a nullptr");
 
-<<<<<<< HEAD
-  // Set filter expression created in constructor if any subfield filters
-  if (subfieldFilterExpr_ != nullptr) {
-    readerOptions_.set_filter(*subfieldFilterExpr_);
-  }
-=======
   completedRows_ += output->size();
->>>>>>> feat/stddev-samp-aggregation
 
   // TODO: Update `completedBytes_` here instead of in `addSplit()`
 

@@ -838,7 +838,8 @@ struct StddevSampAggregator : cudf_velox::CudfHashAggregation::Aggregator {
 
   void addGroupbyRequest(
       cudf::table_view const& tbl,
-      std::vector<cudf::groupby::aggregation_request>& requests) override {
+      std::vector<cudf::groupby::aggregation_request>& requests,
+      rmm::cuda_stream_view /*stream*/) override {
     switch (step) {
       case core::AggregationNode::Step::kSingle: {
         // Use cuDF's built-in std aggregation with ddof=1 (sample stddev)
@@ -893,12 +894,12 @@ struct StddevSampAggregator : cudf_velox::CudfHashAggregation::Aggregator {
 
         auto const size = count->size();
         const auto& outputType = asRowType(resultType);
-        auto const cudfCountType = cudf::data_type(
-            cudf_velox::veloxToCudfTypeId(outputType->childAt(0)));
-        auto const cudfMeanType = cudf::data_type(
-            cudf_velox::veloxToCudfTypeId(outputType->childAt(1)));
-        auto const cudfM2Type = cudf::data_type(
-            cudf_velox::veloxToCudfTypeId(outputType->childAt(2)));
+        auto const cudfCountType =
+            cudf_velox::veloxToCudfDataType(outputType->childAt(0));
+        auto const cudfMeanType =
+            cudf_velox::veloxToCudfDataType(outputType->childAt(1));
+        auto const cudfM2Type =
+            cudf_velox::veloxToCudfDataType(outputType->childAt(2));
 
         if (count->type() != cudfCountType) {
           count = cudf::cast(*count, cudfCountType, stream, get_output_mr());
@@ -929,12 +930,12 @@ struct StddevSampAggregator : cudf_velox::CudfHashAggregation::Aggregator {
 
         // Cast children to expected types if needed
         const auto& outputType = asRowType(resultType);
-        auto const cudfCountType = cudf::data_type(
-            cudf_velox::veloxToCudfTypeId(outputType->childAt(0)));
-        auto const cudfMeanType = cudf::data_type(
-            cudf_velox::veloxToCudfTypeId(outputType->childAt(1)));
-        auto const cudfM2Type = cudf::data_type(
-            cudf_velox::veloxToCudfTypeId(outputType->childAt(2)));
+        auto const cudfCountType =
+            cudf_velox::veloxToCudfDataType(outputType->childAt(0));
+        auto const cudfMeanType =
+            cudf_velox::veloxToCudfDataType(outputType->childAt(1));
+        auto const cudfM2Type =
+            cudf_velox::veloxToCudfDataType(outputType->childAt(2));
 
         // Extract children, cast if needed, and reassemble
         auto mergedView = merged->view();

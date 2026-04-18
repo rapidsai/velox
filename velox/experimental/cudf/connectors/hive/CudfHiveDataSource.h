@@ -112,6 +112,10 @@ class CudfHiveDataSource : public DataSource, public NvtxHelper {
   cudf::ast::expression const* subfieldFilterExpr_{nullptr};
 
  private:
+  // Returns the row type for the table, based on either the table handle's data
+  // columns or the output type.
+  const RowTypePtr getTableRowType();
+
   memory::MemoryPool* const pool_;
 
   size_t completedRows_{0};

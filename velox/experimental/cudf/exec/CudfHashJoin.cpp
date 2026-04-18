@@ -484,10 +484,6 @@ bool CudfHashJoinProbe::needsInput() const {
 }
 
 void CudfHashJoinProbe::doAddInput(RowVectorPtr input) {
-  // Initialize filter on first input (deferred from constructor to avoid
-  // memory allocations during driver initialization).
-  initializeFilter();
-
   if (skipInput_) {
     VELOX_CHECK_NULL(input_);
     return;
@@ -1727,9 +1723,6 @@ RowVectorPtr CudfHashJoinProbe::doGetOutput() {
   if (CudfConfig::getInstance().debugEnabled) {
     VLOG(2) << "Calling CudfHashJoinProbe::getOutput";
   }
-  // Initialize filter if not already done (deferred from constructor to avoid
-  // memory allocations during driver initialization).
-  initializeFilter();
 
   if (finished_ or !hashObject_.has_value()) {
     return nullptr;
@@ -1907,10 +1900,6 @@ bool CudfHashJoinProbe::skipProbeOnEmptyBuild() const {
 }
 
 exec::BlockingReason CudfHashJoinProbe::isBlocked(ContinueFuture* future) {
-  // Initialize filter if not already done (deferred from constructor to avoid
-  // memory allocations during driver initialization).
-  initializeFilter();
-
   if ((joinNode_->isRightJoin() || joinNode_->isRightSemiFilterJoin() ||
        joinNode_->isFullJoin()) &&
       hashObject_.has_value()) {

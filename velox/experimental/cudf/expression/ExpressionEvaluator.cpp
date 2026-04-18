@@ -1670,14 +1670,12 @@ void registerPrestoFunctions(const std::string& prefix) {
            .build(),
        FunctionSignatureBuilder()
            .returnType("date")
-           .constantArgumentType("varchar")
-           .argumentType("date")
-           .build()},
+            .constantArgumentType("varchar")
+            .argumentType("date")
+            .build()},
       DateTruncFunction::canEvaluate);
 }
 
-=======
->>>>>>> feat/stddev-samp-aggregation
 bool registerBuiltinFunctions(const std::string& prefix) {
   using exec::FunctionSignatureBuilder;
 
