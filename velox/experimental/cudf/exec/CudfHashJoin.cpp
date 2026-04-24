@@ -205,9 +205,11 @@ void CudfHashJoinBuild::doNoMoreInput() {
   };
 
   if (CudfConfig::getInstance().debugEnabled) {
-    VLOG(1) << "CudfHashJoinBuild: build batches";
-    VLOG(1) << "Build batches number of columns: "
-            << inputs_[0]->getTableView().num_columns();
+    VLOG(1) << "CudfHashJoinBuild: build batches count: " << inputs_.size();
+    if (!inputs_.empty()) {
+      VLOG(1) << "Build batches number of columns: "
+              << inputs_[0]->getTableView().num_columns();
+    }
     for (auto i = 0; i < inputs_.size(); i++) {
       VLOG(1) << "Build batch " << i
               << ": number of rows: " << inputs_[i]->getTableView().num_rows();
@@ -225,7 +227,7 @@ void CudfHashJoinBuild::doNoMoreInput() {
   for (auto const& tbl : tbls) {
     VELOX_CHECK_NOT_NULL(tbl);
   }
-  if (CudfConfig::getInstance().debugEnabled) {
+  if (CudfConfig::getInstance().debugEnabled && !tbls.empty()) {
     VLOG(1) << "Build table number of columns: " << tbls[0]->num_columns();
     for (auto i = 0; i < tbls.size(); i++) {
       VLOG(1) << "Build table " << i
@@ -415,6 +417,21 @@ void CudfHashJoinProbe::initialize() {
   exec::ExprSet exprs({joinNode_->filter()}, operatorCtx_->execCtx());
   VELOX_CHECK_EQ(exprs.exprs().size(), 1);
 
+  // For now we disable AST-based filtering (and force precomputation)
+  // if the filter expression contains decimal types, using the same
+  // shallow search as used for regular expression evaluation.
+  if (containsDecimalType(exprs.exprs()[0], false)) {
+    useAstFilter_ = false;
+  }
+
+  // Validate AST filtering for this join type now to avoid run-time error.
+  if (joinNode_->isRightSemiFilterJoin() || joinNode_->isLeftSemiFilterJoin() ||
+      joinNode_->isAntiJoin()) {
+    VELOX_CHECK(
+        useAstFilter_,
+        "AST expression evaluation must be enabled for semi-filter and anti joins.");
+  }
+
   // Create a reusable evaluator for the filter column. This is expensive to
   // build, and the expression + input schema are stable for the lifetime of
   // the operator instance.
@@ -452,6 +469,7 @@ void CudfHashJoinProbe::initialize() {
   // columns. This is required because we build the ast with whole row schema
   // and the column locations in that schema translate to column locations
   // in whole tables
+
   if (useAstFilter_) {
     // create ast tree
     if (joinNode_->isRightJoin() || joinNode_->isRightSemiFilterJoin()) {
@@ -824,7 +842,6 @@ std::vector<std::unique_ptr<cudf::table>> CudfHashJoinProbe::innerJoin(
 
     if (joinNode_->filter()) {
       if (useAstFilter_) {
-        // Use AST-based filtering (faster)
         cudfOutputs.push_back(filteredOutputIndices(
             leftTableView,
             leftIndicesCol,
@@ -835,23 +852,16 @@ std::vector<std::unique_ptr<cudf::table>> CudfHashJoinProbe::innerJoin(
             cudf::join_kind::INNER_JOIN,
             stream));
       } else {
-        // Filter spans both sides - use filterEvaluator_ with gathered rows
         auto filterFunc =
-            [this, &stream](
+            [stream](
                 std::vector<std::unique_ptr<cudf::column>>&& joinedCols,
-                cudf::column_view filterColumn)
-            -> std::vector<std::unique_ptr<cudf::column>> {
-          // Apply boolean mask to filter joined rows
-          std::vector<cudf::column_view> colViews;
-          colViews.reserve(joinedCols.size());
-          for (const auto& col : joinedCols) {
-            colViews.push_back(col->view());
-          }
-          cudf::table_view filterTableView(colViews);
-          auto filteredTable = cudf::apply_boolean_mask(
-              filterTableView, filterColumn, stream, get_output_mr());
-          return filteredTable->release();
-        };
+                cudf::column_view filterColumn) {
+              auto filterTable =
+                  std::make_unique<cudf::table>(std::move(joinedCols));
+              auto filteredTable = cudf::apply_boolean_mask(
+                  *filterTable, filterColumn, stream, get_output_mr());
+              return filteredTable->release();
+            };
         cudfOutputs.push_back(filteredOutput(
             leftTableView,
             leftIndicesCol,

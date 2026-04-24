@@ -39,6 +39,7 @@
 #include <cudf/fixed_point/fixed_point.hpp>
 #include <cudf/hashing.hpp>
 #include <cudf/lists/count_elements.hpp>
+#include <cudf/null_mask.hpp>
 #include <cudf/reduction.hpp>
 #include <cudf/replace.hpp>
 #include <cudf/round.hpp>
@@ -131,6 +132,19 @@ std::unique_ptr<cudf::scalar> castDecimalScalar(
     cudf::data_type targetType,
     rmm::cuda_stream_view stream,
     rmm::device_async_resource_ref mr) {
+  if (!src.is_valid(stream)) {
+    VELOX_CHECK(
+        targetType.id() == cudf::type_id::DECIMAL64 ||
+            targetType.id() == cudf::type_id::DECIMAL128,
+        "castDecimalScalar: target must be DECIMAL64 or DECIMAL128");
+    if (targetType.id() == cudf::type_id::DECIMAL128) {
+      return std::make_unique<cudf::fixed_point_scalar<numeric::decimal128>>(
+          0, numeric::scale_type{targetType.scale()}, false, stream, mr);
+    }
+    return std::make_unique<cudf::fixed_point_scalar<numeric::decimal64>>(
+        0, numeric::scale_type{targetType.scale()}, false, stream, mr);
+  }
+
   __int128_t rep;
   if (src.type().id() == cudf::type_id::DECIMAL64) {
     auto const& dec =
@@ -451,6 +465,9 @@ class BinaryFunction : public CudfFunction {
             rhsView = rhsCast->view();
           }
         }
+        if (hasDecimalZero(rhsView, stream, mr)) {
+          VELOX_USER_FAIL("Division by zero");
+        }
         auto lhsScale = -lhsView.type().scale();
         auto rhsScale = -rhsView.type().scale();
         auto outScale = -type_.scale();
@@ -608,6 +625,9 @@ class BinaryFunction : public CudfFunction {
     }
     if (op_ == cudf::binary_operator::DIV && cudf::is_fixed_point(type_)) {
       auto rhsView = asView(inputColumns[0]);
+      if (hasDecimalZero(rhsView, stream, mr)) {
+        VELOX_USER_FAIL("Division by zero");
+      }
       auto lhsScale = -left_->type().scale();
       auto rhsScale = -rhsView.type().scale();
       auto outScale = -type_.scale();
@@ -701,6 +721,7 @@ class UnaryFunction : public CudfFunction {
     // do we need to support unary functions with ONLY a literal input?
     // assuming not for now
   }
+
   ColumnOrView eval(
       std::vector<ColumnOrView>& inputColumns,
       rmm::cuda_stream_view stream,
@@ -1402,54 +1423,146 @@ class LikeFunction : public CudfFunction {
   std::string pattern_;
 };
 
-class StartswithFunction : public CudfFunction {
+class StringPatternPredicateFunction : public CudfFunction {
  public:
-  explicit StartswithFunction(const std::shared_ptr<velox::exec::Expr>& expr) {
+  explicit StringPatternPredicateFunction(
+      const std::shared_ptr<velox::exec::Expr>& expr,
+      std::string_view functionName) {
     using velox::exec::ConstantExpr;
-    VELOX_CHECK_EQ(expr->inputs().size(), 2, "startswith expects 2 inputs");
+    VELOX_CHECK_EQ(
+        expr->inputs().size(), 2, "{} expects 2 inputs", functionName);
 
-    auto patternExpr =
-        std::dynamic_pointer_cast<ConstantExpr>(expr->inputs()[1]);
-    VELOX_CHECK_NOT_NULL(patternExpr, "startswith pattern must be a constant");
-    pattern_ = patternExpr->value()->toString(0);
+    if (auto inputExpr =
+            std::dynamic_pointer_cast<ConstantExpr>(expr->inputs()[0])) {
+      inputIsConstant_ = true;
+      inputIsNull_ = inputExpr->value()->isNullAt(0);
+      if (!inputIsNull_) {
+        input_ = inputExpr->value()->toString(0);
+      }
+    }
+
+    if (auto patternExpr =
+            std::dynamic_pointer_cast<ConstantExpr>(expr->inputs()[1])) {
+      patternIsConstant_ = true;
+      patternIsNull_ = patternExpr->value()->isNullAt(0);
+      if (!patternIsNull_) {
+        pattern_ = patternExpr->value()->toString(0);
+      }
+    }
+
+    // Fully constant string-match calls stay off the cuDF path because the
+    // evaluator has no input column to derive the output row count from.
+    VELOX_CHECK(
+        !(inputIsConstant_ && patternIsConstant_),
+        "{} with two constant inputs is not supported by the cuDF evaluator",
+        functionName);
   }
 
   ColumnOrView eval(
       std::vector<ColumnOrView>& inputColumns,
       rmm::cuda_stream_view stream,
       rmm::device_async_resource_ref mr) const override {
-    auto inputCol = asView(inputColumns[0]);
-    cudf::string_scalar patternScalar(pattern_, true, stream, mr);
-    return cudf::strings::starts_with(inputCol, patternScalar, stream, mr);
+    size_t nextInput = 0;
+    auto rowCount = inputColumns.empty() ? vector_size_t{1}
+                                         : asView(inputColumns[0]).size();
+
+    std::unique_ptr<cudf::column> inputColumnHolder;
+    cudf::column_view inputCol;
+    if (inputIsConstant_) {
+      cudf::string_scalar inputScalar(input_, !inputIsNull_, stream, mr);
+      inputColumnHolder =
+          cudf::make_column_from_scalar(inputScalar, rowCount, stream, mr);
+      inputCol = inputColumnHolder->view();
+    } else {
+      inputCol = asView(inputColumns[nextInput++]);
+    }
+
+    if (patternIsConstant_) {
+      if (patternIsNull_) {
+        auto nullScalar = cudf::numeric_scalar<bool>(false, false, stream, mr);
+        return cudf::make_column_from_scalar(
+            nullScalar, inputCol.size(), stream, mr);
+      }
+      cudf::string_scalar patternScalar(pattern_, true, stream, mr);
+      return evaluateMatch(inputCol, patternScalar, stream, mr);
+    }
+
+    auto patternCol = asView(inputColumns[nextInput]);
+    auto result = evaluateMatch(inputCol, patternCol, stream, mr);
+    // Match Velox CPU null propagation for column/column evaluation: libcudf
+    // can return a valid false when the pattern row is null, but Velox returns
+    // null if either side is null.
+    auto [nullMask, nullCount] =
+        cudf::bitmask_and(cudf::table_view({inputCol, patternCol}), stream, mr);
+    result->set_null_mask(std::move(nullMask), nullCount);
+    return result;
   }
 
- private:
+ protected:
+  virtual std::unique_ptr<cudf::column> evaluateMatch(
+      cudf::column_view inputCol,
+      cudf::string_scalar const& patternScalar,
+      rmm::cuda_stream_view stream,
+      rmm::device_async_resource_ref mr) const = 0;
+
+  virtual std::unique_ptr<cudf::column> evaluateMatch(
+      cudf::column_view inputCol,
+      cudf::column_view patternCol,
+      rmm::cuda_stream_view stream,
+      rmm::device_async_resource_ref mr) const = 0;
+
+  bool inputIsConstant_{false};
+  bool inputIsNull_{false};
+  bool patternIsNull_{false};
+  bool patternIsConstant_{false};
+  std::string input_;
   std::string pattern_;
 };
 
-class EndswithFunction : public CudfFunction {
+class StartswithFunction : public StringPatternPredicateFunction {
  public:
-  explicit EndswithFunction(const std::shared_ptr<velox::exec::Expr>& expr) {
-    using velox::exec::ConstantExpr;
-    VELOX_CHECK_EQ(expr->inputs().size(), 2, "endswith expects 2 inputs");
+  explicit StartswithFunction(const std::shared_ptr<velox::exec::Expr>& expr)
+      : StringPatternPredicateFunction(expr, "startswith") {}
 
-    auto patternExpr =
-        std::dynamic_pointer_cast<ConstantExpr>(expr->inputs()[1]);
-    VELOX_CHECK_NOT_NULL(patternExpr, "endswith pattern must be a constant");
-    pattern_ = patternExpr->value()->toString(0);
-  }
-
-  ColumnOrView eval(
-      std::vector<ColumnOrView>& inputColumns,
+ protected:
+  std::unique_ptr<cudf::column> evaluateMatch(
+      cudf::column_view inputCol,
+      cudf::string_scalar const& patternScalar,
       rmm::cuda_stream_view stream,
       rmm::device_async_resource_ref mr) const override {
-    auto inputCol = asView(inputColumns[0]);
-    cudf::string_scalar patternScalar(pattern_, true, stream, mr);
+    return cudf::strings::starts_with(inputCol, patternScalar, stream, mr);
+  }
+
+  std::unique_ptr<cudf::column> evaluateMatch(
+      cudf::column_view inputCol,
+      cudf::column_view patternCol,
+      rmm::cuda_stream_view stream,
+      rmm::device_async_resource_ref mr) const override {
+    return cudf::strings::starts_with(inputCol, patternCol, stream, mr);
+  }
+};
+
+class EndswithFunction : public StringPatternPredicateFunction {
+ public:
+  explicit EndswithFunction(const std::shared_ptr<velox::exec::Expr>& expr)
+      : StringPatternPredicateFunction(expr, "endswith") {}
+
+ protected:
+  std::unique_ptr<cudf::column> evaluateMatch(
+      cudf::column_view inputCol,
+      cudf::string_scalar const& patternScalar,
+      rmm::cuda_stream_view stream,
+      rmm::device_async_resource_ref mr) const override {
     return cudf::strings::ends_with(inputCol, patternScalar, stream, mr);
   }
 
- private:
-  std::string pattern_;
+  std::unique_ptr<cudf::column> evaluateMatch(
+      cudf::column_view inputCol,
+      cudf::column_view patternCol,
+      rmm::cuda_stream_view stream,
+      rmm::device_async_resource_ref mr) const override {
+    return cudf::strings::ends_with(inputCol, patternCol, stream, mr);
+  }
 };
 
 class ContainsFunction : public CudfFunction {
@@ -2004,6 +2117,28 @@ bool registerBuiltinFunctions(const std::string& prefix) {
            .build()});
 
   registerCudfFunction(
+      prefix + "startswith",
+      [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
+        return std::make_shared<StartswithFunction>(expr);
+      },
+      {FunctionSignatureBuilder()
+           .returnType("boolean")
+           .argumentType("varchar")
+           .argumentType("varchar")
+           .build()});
+
+  registerCudfFunction(
+      prefix + "endswith",
+      [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
+        return std::make_shared<EndswithFunction>(expr);
+      },
+      {FunctionSignatureBuilder()
+           .returnType("boolean")
+           .argumentType("varchar")
+           .argumentType("varchar")
+           .build()});
+
+  registerCudfFunction(
       prefix + "concat",
       [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
         return std::make_shared<ConcatFunction>(expr);
@@ -2169,8 +2304,8 @@ bool registerBuiltinFunctions(const std::string& prefix) {
   // regular comparison operators
   //
 
-  auto registerRegularComparisonOp = [&](const std::vector<std::string>& aliases,
-                                         cudf::binary_operator op) {
+  auto registerComparisonOp = [&](const std::vector<std::string>& aliases,
+                                  cudf::binary_operator op) {
     registerCudfFunctions(
         aliases,
         [op](
@@ -2194,19 +2329,19 @@ bool registerBuiltinFunctions(const std::string& prefix) {
              .build()});
   };
 
-  registerRegularComparisonOp(
+  registerComparisonOp(
       {prefix + "equal", prefix + "eq"}, cudf::binary_operator::EQUAL);
-  registerRegularComparisonOp(
+  registerComparisonOp(
       {prefix + "notequal", prefix + "neq"}, cudf::binary_operator::NOT_EQUAL);
-  registerRegularComparisonOp(
+  registerComparisonOp(
       {prefix + "greaterthanorequal", prefix + "gte"},
       cudf::binary_operator::GREATER_EQUAL);
-  registerRegularComparisonOp(
+  registerComparisonOp(
       {prefix + "lessthanorequal", prefix + "lte"},
       cudf::binary_operator::LESS_EQUAL);
-  registerRegularComparisonOp(
+  registerComparisonOp(
       {prefix + "greaterthan", prefix + "gt"}, cudf::binary_operator::GREATER);
-  registerRegularComparisonOp(
+  registerComparisonOp(
       {prefix + "lessthan", prefix + "lt"}, cudf::binary_operator::LESS);
 
   //

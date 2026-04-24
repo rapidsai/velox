@@ -1049,7 +1049,6 @@ TEST_F(CudfDecimalTest, decimalDivideRounds) {
 }
 
 TEST_F(CudfDecimalTest, decimalDivideByZero) {
-  // Division by zero produces null instead of throwing an error.
   auto rowType = ROW({
       {"a", DECIMAL(10, 2)},
       {"b", DECIMAL(10, 2)},
@@ -1289,6 +1288,34 @@ TEST_F(CudfDecimalTest, decimalArithmeticWithScalarLeft) {
                       "CAST('2.00' AS DECIMAL(10, 2)) * a AS mul_l",
                       "CAST('10.00' AS DECIMAL(10, 2)) / a AS div_l",
                       "CAST('10.00' AS DECIMAL(10, 2)) % a AS mod_l",
+                  })
+                  .planNode();
+
+  unregisterCudf();
+  auto cpuResult =
+      facebook::velox::exec::test::AssertQueryBuilder(plan).copyResults(pool());
+  registerCudf();
+
+  auto gpuResult =
+      facebook::velox::exec::test::AssertQueryBuilder(plan).copyResults(pool());
+
+  facebook::velox::test::assertEqualVectors(cpuResult, gpuResult);
+}
+
+TEST_F(CudfDecimalTest, decimalDivideNullScalar) {
+  auto input = makeRowVector(
+      {"a"},
+      {
+          makeFlatVector<int64_t>({500, -250, 100}, DECIMAL(10, 2)),
+      });
+
+  std::vector<RowVectorPtr> vectors = {input};
+
+  auto plan = exec::test::PlanBuilder()
+                  .values(vectors)
+                  .project({
+                      "a / CAST(NULL AS DECIMAL(10, 2)) AS div_null_r",
+                      "CAST(NULL AS DECIMAL(10, 2)) / a AS div_null_l",
                   })
                   .planNode();
 

@@ -560,7 +560,6 @@ cudf::ast::expression const& AstContext::pushExprToTree(
 
   const auto name =
       stripPrefix(expr->name(), CudfConfig::getInstance().functionNamePrefix);
-  
   if (!detail::isAstExprSupported(expr)) {
     if (canBeEvaluatedByCudf(expr, /*deep=*/false)) {
       // Shallow check: only verify this operation is supported

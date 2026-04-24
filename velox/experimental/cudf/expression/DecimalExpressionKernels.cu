@@ -23,6 +23,7 @@
 #include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf/transform.hpp>
+#include <cudf/types.hpp>
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
@@ -197,6 +198,20 @@ __int128_t getDecimalScalarValue(
   return static_cast<__int128_t>(dec.value(stream));
 }
 
+/// Column of \p outputType with \p size rows, all null (e.g. NULL scalar
+/// operand).
+std::unique_ptr<cudf::column> makeAllNullDecimalColumn(
+    cudf::data_type outputType,
+    cudf::size_type size,
+    rmm::cuda_stream_view stream,
+    rmm::device_async_resource_ref mr) {
+  if (size == 0) {
+    return cudf::make_empty_column(outputType);
+  }
+  return cudf::make_fixed_width_column(
+      outputType, size, cudf::mask_state::ALL_NULL, stream, mr);
+}
+
 } // namespace
 
 std::unique_ptr<cudf::column> decimalDivide(
@@ -278,6 +293,10 @@ std::unique_ptr<cudf::column> decimalDivide(
   CUDF_EXPECTS(
       aRescale >= 0, "Decimal divide requires non-negative rescale factor");
 
+  if (!rhs.is_valid(stream)) {
+    return makeAllNullDecimalColumn(outputType, lhs.size(), stream, mr);
+  }
+
   auto nullMask = cudf::copy_bitmask(lhs, stream, mr);
   auto nullCount = lhs.null_count();
   auto out = cudf::make_fixed_width_column(
@@ -319,6 +338,10 @@ std::unique_ptr<cudf::column> decimalDivide(
     rmm::device_async_resource_ref mr) {
   CUDF_EXPECTS(
       aRescale >= 0, "Decimal divide requires non-negative rescale factor");
+
+  if (!lhs.is_valid(stream)) {
+    return makeAllNullDecimalColumn(outputType, rhs.size(), stream, mr);
+  }
 
   // Combine rhs null mask with a mask that marks zero divisors as null.
   auto inputNullMask = cudf::copy_bitmask(rhs, stream, mr);
