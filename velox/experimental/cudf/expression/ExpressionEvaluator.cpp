@@ -2214,7 +2214,17 @@ bool registerBuiltinFunctions(const std::string& prefix) {
           .returnType("boolean")
           .argumentType("date")
           .argumentType("date")
-          .build()};
+          .build(),
+      FunctionSignatureBuilder()
+          .integerVariable("a_precision")
+          .integerVariable("a_scale")
+          .integerVariable("b_precision")
+          .integerVariable("b_scale")
+          .returnType("boolean")
+          .argumentType("decimal(a_precision, a_scale)")
+          .argumentType("decimal(b_precision, b_scale)")
+          .build()
+  };
 
   auto registerComparisonOp = [&](const std::vector<std::string>& aliases,
                                   cudf::binary_operator op) {
@@ -2299,50 +2309,6 @@ bool registerBuiltinFunctions(const std::string& prefix) {
   registerBinaryOp({prefix + "multiply"}, cudf::binary_operator::MUL);
   registerBinaryOp({prefix + "divide"}, cudf::binary_operator::DIV);
   registerBinaryOp({prefix + "mod"}, cudf::binary_operator::MOD);
-
-  //
-  // regular comparison operators
-  //
-
-  auto registerComparisonOp = [&](const std::vector<std::string>& aliases,
-                                  cudf::binary_operator op) {
-    registerCudfFunctions(
-        aliases,
-        [op](
-            const std::string&,
-            const std::shared_ptr<velox::exec::Expr>& expr) {
-          return std::make_shared<BinaryFunction>(expr, op);
-        },
-        {FunctionSignatureBuilder()
-             .returnType("boolean")
-             .argumentType("double")
-             .argumentType("double")
-             .build(),
-         FunctionSignatureBuilder()
-             .integerVariable("a_precision")
-             .integerVariable("a_scale")
-             .integerVariable("b_precision")
-             .integerVariable("b_scale")
-             .returnType("boolean")
-             .argumentType("decimal(a_precision, a_scale)")
-             .argumentType("decimal(b_precision, b_scale)")
-             .build()});
-  };
-
-  registerComparisonOp(
-      {prefix + "equal", prefix + "eq"}, cudf::binary_operator::EQUAL);
-  registerComparisonOp(
-      {prefix + "notequal", prefix + "neq"}, cudf::binary_operator::NOT_EQUAL);
-  registerComparisonOp(
-      {prefix + "greaterthanorequal", prefix + "gte"},
-      cudf::binary_operator::GREATER_EQUAL);
-  registerComparisonOp(
-      {prefix + "lessthanorequal", prefix + "lte"},
-      cudf::binary_operator::LESS_EQUAL);
-  registerComparisonOp(
-      {prefix + "greaterthan", prefix + "gt"}, cudf::binary_operator::GREATER);
-  registerComparisonOp(
-      {prefix + "lessthan", prefix + "lt"}, cudf::binary_operator::LESS);
 
   //
   // regular unary operators
