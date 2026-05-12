@@ -31,3 +31,5 @@ target_link_libraries(
   PRIVATE velox_hive_connector velox_dwio_common
   PUBLIC cudf::cudf velox_cudf_expression
 )
+
+add_subdirectory(iceberg)
