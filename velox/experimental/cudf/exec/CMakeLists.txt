@@ -31,6 +31,7 @@ add_library(
   CudfMarkDistinct.cpp
   CudfOrderBy.cpp
   CudfTopN.cpp
+  CudfWindow.cpp
   DebugUtil.cpp
   DecimalAggregationCommon.cpp
   DecimalAggregationKernels.cu

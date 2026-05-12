@@ -45,6 +45,7 @@ add_executable(
 add_executable(velox_cudf_mark_distinct_test Main.cpp MarkDistinctTest.cpp)
 add_executable(velox_cudf_topn_test Main.cpp TopNTest.cpp)
 add_executable(velox_cudf_batch_concat_test Main.cpp BatchConcatTest.cpp)
+add_executable(velox_cudf_window_test Main.cpp WindowTest.cpp)
 add_executable(velox_cudf_string_function_test Main.cpp StringFunctionTest.cpp)
 
 # cuDF Join Fuzzer - standalone executable for fuzz testing GPU hash joins
@@ -203,6 +204,12 @@ add_test(
 )
 
 add_test(
+  NAME velox_cudf_window_test
+  COMMAND velox_cudf_window_test
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+add_test(
   NAME velox_cudf_string_function_test
   COMMAND velox_cudf_string_function_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
@@ -239,11 +246,11 @@ set_tests_properties(
 set_tests_properties(velox_cudf_decimal_expression_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
 set_tests_properties(velox_cudf_decimal_aggregation_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
 set_tests_properties(velox_cudf_filter_project_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
-set_tests_properties(velox_cudf_function_registry_test PROPERTIES LABELS cuda_driver TIMEOUT 300)
-set_tests_properties(velox_cudf_hash_join_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
 set_tests_properties(velox_cudf_limit_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
 set_tests_properties(velox_cudf_local_merge_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
 set_tests_properties(velox_cudf_local_partition_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
+set_tests_properties(velox_cudf_function_registry_test PROPERTIES LABELS cuda_driver TIMEOUT 300)
+set_tests_properties(velox_cudf_hash_join_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
 set_tests_properties(velox_cudf_order_by_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
 set_tests_properties(velox_cudf_interop_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
 if(VELOX_ENABLE_S3)
@@ -264,6 +271,7 @@ set_tests_properties(
   PROPERTIES LABELS cuda_driver TIMEOUT 3000
 )
 set_tests_properties(velox_cudf_batch_concat_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
+set_tests_properties(velox_cudf_window_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
 set_tests_properties(velox_cudf_string_function_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
 
 target_link_libraries(
@@ -564,6 +572,19 @@ target_link_libraries(
   velox_test_util
   gtest
   gtest_main
+)
+
+target_link_libraries(
+  velox_cudf_window_test
+  velox_cudf_exec
+  velox_exec
+  velox_exec_test_lib
+  velox_test_util
+  velox_window
+  velox_aggregates
+  gtest
+  gtest_main
+  fmt::fmt
 )
 
 add_subdirectory(utils)
