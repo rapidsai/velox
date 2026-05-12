@@ -41,10 +41,12 @@ class CudfLimit : public CudfOperatorBase {
  protected:
   void doAddInput(RowVectorPtr input) override;
   RowVectorPtr doGetOutput() override;
+  void doClose() override;
 
  private:
   int64_t remainingOffset_;
   int64_t remainingLimit_;
   bool finished_{false};
+  uint64_t queuedInputBytes_{0};
 };
 } // namespace facebook::velox::cudf_velox

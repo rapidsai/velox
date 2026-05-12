@@ -62,6 +62,7 @@ class CudfFromVelox : public CudfOperatorBase {
   std::vector<RowVectorPtr> inputs_;
   std::size_t currentOutputSize_ = 0;
   bool finished_ = false;
+  uint64_t queuedInputBytes_{0};
 };
 
 class CudfToVelox : public CudfOperatorBase {
@@ -104,6 +105,7 @@ class CudfToVelox : public CudfOperatorBase {
   // Current offset into veloxBuffer_ for the next slice.
   vector_size_t veloxOffset_{0};
   bool finished_ = false;
+  uint64_t queuedInputBytes_{0};
 };
 
 } // namespace facebook::velox::cudf_velox
