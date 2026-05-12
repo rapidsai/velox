@@ -168,6 +168,12 @@ void CudfHashJoinBuild::doAddInput(RowVectorPtr input) {
       lockedStats->numNullKeys += null_count;
     }
     inputs_.push_back(std::move(cudfInput));
+    queuedInputBytes_ += input->estimateFlatSize();
+    addRuntimeStat(
+        "gpuQueuedInputBytes",
+        RuntimeCounter(
+            static_cast<int64_t>(queuedInputBytes_),
+            RuntimeCounter::Unit::kBytes));
   }
 }
 
@@ -193,8 +199,16 @@ void CudfHashJoinBuild::doNoMoreInput() {
     auto op = peer->findOperator(planNodeId());
     auto* build = dynamic_cast<CudfHashJoinBuild*>(op);
     VELOX_CHECK_NOT_NULL(build);
+    for (const auto& peerInput : build->inputs_) {
+      queuedInputBytes_ += peerInput->estimateFlatSize();
+    }
     inputs_.insert(inputs_.end(), build->inputs_.begin(), build->inputs_.end());
   }
+  addRuntimeStat(
+      "gpuQueuedInputBytes",
+      RuntimeCounter(
+          static_cast<int64_t>(queuedInputBytes_),
+          RuntimeCounter::Unit::kBytes));
 
   SCOPE_EXIT {
     // Realize the promises so that the other Drivers (which were not
@@ -224,6 +238,10 @@ void CudfHashJoinBuild::doNoMoreInput() {
       joinNode_->sources()[1]->outputType(),
       stream,
       get_output_mr());
+
+  queuedInputBytes_ = 0;
+  addRuntimeStat(
+      "gpuQueuedInputBytes", RuntimeCounter(0, RuntimeCounter::Unit::kBytes));
 
   for (auto const& tbl : tbls) {
     VELOX_CHECK_NOT_NULL(tbl);
@@ -286,6 +304,30 @@ void CudfHashJoinBuild::doNoMoreInput() {
       std::dynamic_pointer_cast<CudfHashJoinBridge>(joinBridge);
 
   cudfHashJoinBridge->setBuildStream(stream);
+  {
+    uint64_t buildTableBytes = 0;
+    uint64_t buildTableRows = 0;
+    for (const auto& tbl : shared_tbls) {
+      buildTableBytes += tbl->alloc_size();
+      buildTableRows += tbl->num_rows();
+    }
+    addRuntimeStat(
+        "gpuBridgeBuildTableBytes",
+        RuntimeCounter(
+            static_cast<int64_t>(buildTableBytes),
+            RuntimeCounter::Unit::kBytes));
+    addRuntimeStat(
+        "gpuBridgeBuildTableRows",
+        RuntimeCounter(static_cast<int64_t>(buildTableRows)));
+    addRuntimeStat(
+        "gpuBuildTableBytes",
+        RuntimeCounter(
+            static_cast<int64_t>(buildTableBytes),
+            RuntimeCounter::Unit::kBytes));
+    addRuntimeStat(
+        "gpuBuildTableRows",
+        RuntimeCounter(static_cast<int64_t>(buildTableRows)));
+  }
   cudfHashJoinBridge->setHashTable(
       std::make_optional(
           std::make_pair(std::move(shared_tbls), std::move(hashObjects))));
@@ -503,9 +545,16 @@ void CudfHashJoinProbe::doAddInput(RowVectorPtr input) {
     auto lockedStats = stats_.wlock();
     lockedStats->numNullKeys += null_count;
   }
+  auto inputBytes = input->estimateFlatSize();
   if (joinNode_->isRightSemiFilterJoin()) {
     // Queue inputs and process all at once
     if (input->size() > 0) {
+      queuedInputBytes_ += inputBytes;
+      addRuntimeStat(
+          "gpuQueuedInputBytes",
+          RuntimeCounter(
+              static_cast<int64_t>(queuedInputBytes_),
+              RuntimeCounter::Unit::kBytes));
       inputs_.push_back(std::move(cudfInput));
     }
     return;
@@ -513,6 +562,12 @@ void CudfHashJoinProbe::doAddInput(RowVectorPtr input) {
 
   if (input->size() > 0) {
     input_ = std::move(input);
+    queuedInputBytes_ = inputBytes;
+    addRuntimeStat(
+        "gpuQueuedInputBytes",
+        RuntimeCounter(
+            static_cast<int64_t>(queuedInputBytes_),
+            RuntimeCounter::Unit::kBytes));
   }
 }
 
@@ -2092,6 +2147,9 @@ RowVectorPtr CudfHashJoinProbe::doGetOutput() {
   // the refcount while cudfInput still holds a reference.
   cudfInput.reset();
   input_.reset();
+  queuedInputBytes_ = 0;
+  addRuntimeStat(
+      "gpuQueuedInputBytes", RuntimeCounter(0, RuntimeCounter::Unit::kBytes));
   finished_ =
       noMoreInput_ && !joinNode_->isRightJoin() && !joinNode_->isFullJoin();
 
@@ -2146,6 +2204,16 @@ exec::BlockingReason CudfHashJoinProbe::isBlocked(ContinueFuture* future) {
     return exec::BlockingReason::kWaitForJoinBuild;
   }
   hashObject_ = std::move(hashObject);
+  if (hashObject_.has_value()) {
+    uint64_t receivedBytes = 0;
+    for (const auto& tbl : hashObject_->first) {
+      receivedBytes += tbl->alloc_size();
+    }
+    addRuntimeStat(
+        "gpuBridgeReceivedBytes",
+        RuntimeCounter(
+            static_cast<int64_t>(receivedBytes), RuntimeCounter::Unit::kBytes));
+  }
   buildStream_ = cudfJoinBridge->getBuildStream();
 
   // Lazy initialize matched flags only when build side is done
