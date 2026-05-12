@@ -32,6 +32,8 @@ add_library(
   CudfOrderBy.cpp
   CudfTopN.cpp
   DebugUtil.cpp
+  DecimalAggregationCommon.cpp
+  DecimalAggregationKernels.cu
   GpuResources.cpp
   OperatorAdapters.cpp
   PrestoAggregateFunctions.cpp
@@ -40,6 +42,8 @@ add_library(
   Utilities.cpp
   VeloxCudfInterop.cpp
 )
+
+set_target_properties(velox_cudf_exec PROPERTIES CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON)
 
 target_link_libraries(
   velox_cudf_exec
