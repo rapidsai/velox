@@ -62,6 +62,7 @@ struct ResolvedAggregateInfo {
   VectorPtr constant;
   TypePtr resultType;
   std::optional<CountInputKind> countInputKind;
+  bool isDecimalInput;
 };
 
 // Parse aggregate inputs from the aggregation node and resolve companion steps,
