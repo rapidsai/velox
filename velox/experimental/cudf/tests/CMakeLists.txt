@@ -50,6 +50,25 @@ add_executable(velox_cudf_string_function_test Main.cpp StringFunctionTest.cpp)
 # cuDF Join Fuzzer - standalone executable for fuzz testing GPU hash joins
 add_executable(velox_cudf_join_fuzzer CudfJoinFuzzerRunner.cpp CudfJoinFuzzer.cpp)
 
+add_executable(velox_cudf_interop_test Main.cpp InteropTest.cpp)
+add_test(
+  NAME velox_cudf_interop_test
+  COMMAND velox_cudf_interop_test
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(
+  velox_cudf_interop_test
+  velox_cudf_exec
+  velox_exec
+  velox_exec_test_lib
+  velox_test_util
+  velox_vector_fuzzer
+  gtest
+  gtest_main
+  fmt::fmt
+)
+set_tests_properties(velox_cudf_interop_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
+
 add_test(
   NAME velox_cudf_aggregation_test
   COMMAND velox_cudf_aggregation_test
