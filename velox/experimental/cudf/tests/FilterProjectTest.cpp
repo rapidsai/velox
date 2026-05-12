@@ -48,6 +48,7 @@ class CudfFilterProjectTest : public OperatorTestBase {
     OperatorTestBase::SetUp();
     filesystems::registerLocalFileSystem();
     cudf_velox::CudfConfig::getInstance().allowCpuFallback = false;
+    cudf_velox::CudfConfig::getInstance().memoryResource = "cuda";
     cudf_velox::registerCudf();
     cudf_velox::registerPrestoFunctions(
         cudf_velox::CudfConfig::getInstance().functionNamePrefix);
@@ -2020,6 +2021,7 @@ class CudfSimpleFilterProjectTest : public cudf_velox::CudfFunctionBaseTest {
     functions::prestosql::registerAllScalarFunctions();
     aggregate::prestosql::registerAllAggregateFunctions();
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
+    cudf_velox::CudfConfig::getInstance().memoryResource = "cuda";
     cudf_velox::registerCudf();
   }
 
@@ -2266,6 +2268,156 @@ TEST_F(CudfFilterProjectTest, andAndAndWithDecimalDivideBelowExpr) {
       makeNullableFlatVector<bool>({true, false, false, false}),
   });
   facebook::velox::test::assertEqualVectors(expected, result);
+}
+
+TEST_F(CudfFilterProjectTest, dateDiffDayDate) {
+  // Days since epoch: 2025-02-01=20120, 2025-02-10=20129, 2025-02-11=20130,
+  // 2025-01-01=20089, 2025-03-01=20148
+  auto dates = makeRowVector({
+      makeFlatVector<int32_t>({20120, 20129, 20089}, DATE()),
+      makeFlatVector<int32_t>({20130, 20129, 20148}, DATE()),
+  });
+  createDuckDbTable({dates});
+
+  auto plan = PlanBuilder()
+                  .values({dates})
+                  .project({"date_diff('day', c0, c1) AS result"})
+                  .planNode();
+
+  runTest(plan, "SELECT date_diff('day', c0, c1) AS result FROM tmp");
+}
+
+TEST_F(CudfFilterProjectTest, dateDiffMonthDate) {
+  // 2019-02-28=17955, 2020-03-28=18349, 2023-06-15=19523, 2025-03-01=20148
+  auto dates = makeRowVector({
+      makeFlatVector<int32_t>({17955, 19523}, DATE()),
+      makeFlatVector<int32_t>({18349, 20148}, DATE()),
+  });
+  createDuckDbTable({dates});
+
+  auto plan = PlanBuilder()
+                  .values({dates})
+                  .project({"date_diff('month', c0, c1) AS result"})
+                  .planNode();
+
+  runTest(plan, "SELECT date_diff('month', c0, c1) AS result FROM tmp");
+}
+
+TEST_F(CudfFilterProjectTest, dateDiffDayTimestamp) {
+  auto timestamps = makeRowVector({
+      makeFlatVector<Timestamp>(
+          {Timestamp(1738381800, 0), Timestamp(1739955900, 0)}),
+      makeFlatVector<Timestamp>(
+          {Timestamp(1738556100, 0), Timestamp(1739987400, 0)}),
+  });
+  createDuckDbTable({timestamps});
+
+  auto plan = PlanBuilder()
+                  .values({timestamps})
+                  .project({"date_diff('day', c0, c1) AS result"})
+                  .planNode();
+
+  runTest(plan, "SELECT date_diff('day', c0, c1) AS result FROM tmp");
+}
+
+TEST_F(CudfFilterProjectTest, dateDiffSecondTimestamp) {
+  auto timestamps = makeRowVector({
+      makeFlatVector<Timestamp>({Timestamp(1740733200, 500000000)}),
+      makeFlatVector<Timestamp>({Timestamp(1740819600, 500000000)}),
+  });
+  createDuckDbTable({timestamps});
+
+  auto plan = PlanBuilder()
+                  .values({timestamps})
+                  .project({"date_diff('second', c0, c1) AS result"})
+                  .planNode();
+
+  runTest(plan, "SELECT date_diff('second', c0, c1) AS result FROM tmp");
+}
+
+TEST_F(CudfFilterProjectTest, toUnixtime) {
+  auto timestamps = makeRowVector({
+      makeFlatVector<Timestamp>(
+          {Timestamp(1738568700, 0), Timestamp(0, 0), Timestamp(1740718800, 0)}),
+  });
+  createDuckDbTable({timestamps});
+
+  auto plan = PlanBuilder()
+                  .values({timestamps})
+                  .project({"to_unixtime(c0) AS result"})
+                  .planNode();
+
+  runTest(plan, "SELECT to_unixtime(c0) AS result FROM tmp");
+}
+
+TEST_F(CudfFilterProjectTest, toUnixtimeEpochDayPattern) {
+  auto timestamps = makeRowVector({
+      makeFlatVector<Timestamp>(
+          {Timestamp(1738568700, 0),
+           Timestamp(1739520600, 0),
+           Timestamp(1740555000, 0)}),
+  });
+  createDuckDbTable({timestamps});
+
+  auto plan =
+      PlanBuilder()
+          .values({timestamps})
+          .project(
+              {"cast(to_unixtime(c0) / 86400.0 as bigint) AS result"})
+          .planNode();
+
+  runTest(
+      plan,
+      "SELECT cast(to_unixtime(c0) / 86400.0 as bigint) AS result FROM tmp");
+}
+
+// These tests mirror the CudfFilterProjectTest date_diff/to_unixtime tests
+// but use CudfSimpleFilterProjectTest (no DuckDB) so they work on aarch64
+// 64K-page kernels where DuckDB's allocator cannot initialize.
+TEST_F(CudfSimpleFilterProjectTest, dateDiffDayDate) {
+  auto result = evaluateOnce<int64_t, int32_t, int32_t>(
+      "date_diff('day', c0, c1)",
+      {DATE(), DATE()},
+      std::optional<int32_t>(20120),
+      std::optional<int32_t>(20130));
+  EXPECT_EQ(result, 10);
+}
+
+TEST_F(CudfSimpleFilterProjectTest, dateDiffMonthDate) {
+  // 2019-02-28 (17955) to 2020-03-28 (18349) = 13 months
+  auto result = evaluateOnce<int64_t, int32_t, int32_t>(
+      "date_diff('month', c0, c1)",
+      {DATE(), DATE()},
+      std::optional<int32_t>(17955),
+      std::optional<int32_t>(18349));
+  EXPECT_EQ(result, 13);
+}
+
+TEST_F(CudfSimpleFilterProjectTest, dateDiffSecondTimestamp) {
+  // 86400 seconds apart
+  auto data = makeRowVector({
+      makeFlatVector<Timestamp>({Timestamp(1740733200, 500000000)}),
+      makeFlatVector<Timestamp>({Timestamp(1740819600, 500000000)}),
+  });
+  auto exprSet =
+      compileExpression("date_diff('second', c0, c1)", asRowType(data->type()));
+  auto result = evaluate(*exprSet, data);
+  auto expected = makeFlatVector<int64_t>({86400});
+  facebook::velox::test::assertEqualVectors(expected, result);
+}
+
+TEST_F(CudfSimpleFilterProjectTest, toUnixtime) {
+  auto result = evaluateOnce<double, Timestamp>(
+      "to_unixtime(c0)",
+      std::optional<Timestamp>(Timestamp(1738568700, 0)));
+  EXPECT_DOUBLE_EQ(result.value(), 1738568700.0);
+}
+
+TEST_F(CudfSimpleFilterProjectTest, toUnixtimeEpoch) {
+  auto result = evaluateOnce<double, Timestamp>(
+      "to_unixtime(c0)",
+      std::optional<Timestamp>(Timestamp(0, 0)));
+  EXPECT_DOUBLE_EQ(result.value(), 0.0);
 }
 
 } // namespace
