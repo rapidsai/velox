@@ -214,6 +214,8 @@ class CudfHashJoinProbe : public CudfOperatorBase {
   /** @brief Output column positions for right table columns */
   std::vector<size_t> rightColumnOutputIndices_;
   bool finished_{false};
+  /** @brief Number of rows produced for zero-column join outputs */
+  vector_size_t zeroColumnOutputRows_{0};
 
   /// True if any build table has NULL values in join key columns.
   /// Used for null-aware LEFT SEMI PROJECT to determine match column
