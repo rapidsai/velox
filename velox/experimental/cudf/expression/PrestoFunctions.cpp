@@ -16,11 +16,25 @@
 
 #include "velox/experimental/cudf/expression/ExpressionEvaluator.h"
 #include "velox/experimental/cudf/expression/PrestoFunctions.h"
+#include "velox/experimental/cudf/expression/prestosql/DatePlusIntervalFunction.h"
+
+#include "velox/expression/FunctionSignature.h"
 
 namespace facebook::velox::cudf_velox {
 
 void registerPrestoFunctions(const std::string& prefix) {
-  // Presto-specific functions will be registered here in the future
+  using exec::FunctionSignatureBuilder;
+
+  registerCudfFunction(
+      prefix + "plus",
+      [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
+        return std::make_shared<prestosql::DatePlusIntervalFunction>(expr);
+      },
+      {FunctionSignatureBuilder()
+           .returnType("date")
+           .argumentType("date")
+           .argumentType("interval day to second")
+           .build()});
 }
 
 } // namespace facebook::velox::cudf_velox

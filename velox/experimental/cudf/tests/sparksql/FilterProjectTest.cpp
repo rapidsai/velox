@@ -885,6 +885,5 @@ TEST_F(CudfFilterProjectTest, unaryMathFunctions) {
   // Absolute value
   testUnaryFunction("abs(c0)", -5.5, 5.5);
 }
-
 } // namespace
 } // namespace facebook::velox::cudf_velox
