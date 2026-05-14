@@ -75,6 +75,7 @@ class CudfTopN : public CudfOperatorBase {
   std::vector<CudfVectorPtr> topNBatches_;
   int32_t kBatchSize_{5};
   bool finished_ = false;
+  uint64_t queuedInputBytes_{0};
   std::unique_ptr<CudaEvent> cudaEvent_;
 };
 } // namespace facebook::velox::cudf_velox

@@ -99,6 +99,12 @@ void CudfFromVelox::doAddInput(RowVectorPtr input) {
     // Accumulate inputs
     inputs_.push_back(input);
     currentOutputSize_ += input->size();
+    queuedInputBytes_ += input->estimateFlatSize();
+    addRuntimeStat(
+        "gpuQueuedInputBytes",
+        RuntimeCounter(
+            static_cast<int64_t>(queuedInputBytes_),
+            RuntimeCounter::Unit::kBytes));
   }
 }
 
@@ -132,8 +138,16 @@ RowVectorPtr CudfFromVelox::doGetOutput() {
   auto input = mergeRowVectors(selectedInputs, inputs_[0]->pool());
 
   // Remove processed inputs
+  for (size_t i = 0; i < selectedInputs.size(); ++i) {
+    queuedInputBytes_ -= selectedInputs[i]->estimateFlatSize();
+  }
   inputs_.erase(inputs_.begin(), inputs_.begin() + selectedInputs.size());
   currentOutputSize_ -= totalSize;
+  addRuntimeStat(
+      "gpuQueuedInputBytes",
+      RuntimeCounter(
+          static_cast<int64_t>(queuedInputBytes_),
+          RuntimeCounter::Unit::kBytes));
 
   // Early return if no input
   if (input->size() == 0) {
@@ -192,6 +206,12 @@ void CudfToVelox::doAddInput(RowVectorPtr input) {
     auto cudfInput = std::dynamic_pointer_cast<CudfVector>(input);
     VELOX_CHECK_NOT_NULL(cudfInput);
     inputs_.push_back(std::move(cudfInput));
+    queuedInputBytes_ += input->estimateFlatSize();
+    addRuntimeStat(
+        "gpuQueuedInputBytes",
+        RuntimeCounter(
+            static_cast<int64_t>(queuedInputBytes_),
+            RuntimeCounter::Unit::kBytes));
   }
 }
 
@@ -208,7 +228,13 @@ std::optional<uint64_t> CudfToVelox::averageRowSize() {
 // responsible for any further slicing.
 RowVectorPtr CudfToVelox::convertFrontToVelox() {
   auto cudfVector = std::move(inputs_.front());
+  queuedInputBytes_ -= cudfVector->estimateFlatSize();
   inputs_.pop_front();
+  addRuntimeStat(
+      "gpuQueuedInputBytes",
+      RuntimeCounter(
+          static_cast<int64_t>(queuedInputBytes_),
+          RuntimeCounter::Unit::kBytes));
   auto stream = cudfVector->stream();
   auto tableView = cudfVector->getTableView();
   auto output = with_arrow::toVeloxColumn(
