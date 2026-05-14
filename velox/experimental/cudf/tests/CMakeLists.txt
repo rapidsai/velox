@@ -47,6 +47,9 @@ add_executable(velox_cudf_topn_test Main.cpp TopNTest.cpp)
 add_executable(velox_cudf_batch_concat_test Main.cpp BatchConcatTest.cpp)
 add_executable(velox_cudf_string_function_test Main.cpp StringFunctionTest.cpp)
 
+# cuDF Join Fuzzer - standalone executable for fuzz testing GPU hash joins
+add_executable(velox_cudf_join_fuzzer CudfJoinFuzzerRunner.cpp CudfJoinFuzzer.cpp)
+
 add_test(
   NAME velox_cudf_aggregation_test
   COMMAND velox_cudf_aggregation_test
@@ -525,6 +528,24 @@ target_link_libraries(
   gtest
   gtest_main
 )
+
+target_link_libraries(
+  velox_cudf_join_fuzzer
+  velox_cudf_exec
+  velox_exec
+  velox_exec_test_lib
+  velox_join_fuzzer_base
+  velox_fuzzer_util
+  velox_vector_fuzzer
+  velox_functions_prestosql
+  velox_hive_connector
+  velox_presto_serializer
+  Folly::folly
+  gflags
+  fmt::fmt
+)
+
+set_target_properties(velox_cudf_join_fuzzer PROPERTIES LABELS cuda_driver)
 
 add_subdirectory(utils)
 
