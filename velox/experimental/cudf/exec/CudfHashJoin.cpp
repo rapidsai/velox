@@ -700,6 +700,23 @@ std::unique_ptr<cudf::table> CudfHashJoinProbe::unfilteredOutput(
     cudf::table_view rightTableView,
     cudf::column_view rightIndicesCol,
     rmm::cuda_stream_view stream) {
+  // When the join has 0 output columns (existence filter), add a dummy padding
+  // column so that cudf::table::num_rows() carries the correct row count.
+  if (leftColumnIndicesToGather_.empty() &&
+      rightColumnIndicesToGather_.empty()) {
+    auto numRows = static_cast<cudf::size_type>(leftIndicesCol.size());
+    auto zero = cudf::numeric_scalar<uint8_t>(0, true, stream, get_output_mr());
+    auto padding =
+        cudf::make_column_from_scalar(zero, numRows, stream, get_output_mr());
+    std::vector<std::unique_ptr<cudf::column>> cols;
+    cols.push_back(std::move(padding));
+    if (buildStream_.has_value()) {
+      cudaEvent_->recordFrom(stream).waitOn(buildStream_.value());
+    }
+    stream.synchronize();
+    return std::make_unique<cudf::table>(std::move(cols));
+  }
+
   std::vector<std::unique_ptr<cudf::column>> joinedCols;
   auto leftInput = leftTableView.select(leftColumnIndicesToGather_);
   auto rightInput = rightTableView.select(rightColumnIndicesToGather_);
@@ -2067,6 +2084,14 @@ RowVectorPtr CudfHashJoinProbe::doGetOutput() {
             auto outIdx = rightColumnOutputIndices_[ri];
             outCols[outIdx] = std::move(rightCols[ri]);
           }
+        }
+        // When outputType_ has 0 fields (existence-filter join), add a padding
+        // column so cudf::table::num_rows() reports the correct count.
+        if (outCols.empty()) {
+          auto zero =
+              cudf::numeric_scalar<uint8_t>(0, true, stream, get_output_mr());
+          outCols.push_back(
+              cudf::make_column_from_scalar(zero, m, stream, get_output_mr()));
         }
         toConcat.push_back(std::make_unique<cudf::table>(std::move(outCols)));
       }
