@@ -1,0 +1,111 @@
+# Staging Branch Manifest
+# This file describes how this staging branch was created
+
+metadata:
+  generated_at: "2026-05-14T18:47:48Z"
+  target_repository: "rapidsai/velox"
+  target_branch: "staging-test"
+  dated_branch: "staging-test_05-14-2026"
+
+base:
+  repository: "facebookincubator/velox"
+  branch: "main"
+  commit: "59f88d56b95c2854723e46f26f37f9e341abb2c4"
+  url: "https://github.com/facebookincubator/velox/tree/59f88d56b95c2854723e46f26f37f9e341abb2c4"
+
+additional_merge:
+  null  # No additional repository merged
+
+merged_prs:
+  - number: 16423
+    commit: "5d4c061638873981b7ac7a5fdfa915f583c890b0"
+    author: "shrshi"
+    title: "feat(cudf): Add cuDF join fuzzer with CI integration"
+    url: "https://github.com/facebookincubator/velox/pull/16423"
+  - number: 16504
+    commit: "b85fd7387ae09df5bf21daace0320269de6e7ba1"
+    author: "pramodsatya"
+    title: "feat(cuDF): Support function signature retrieval from registry"
+    url: "https://github.com/facebookincubator/velox/pull/16504"
+  - number: 16542
+    commit: "67bc51c35d87ca8e6fe8a6f3f3eea78821f8317f"
+    author: "karthikeyann"
+    title: "feat(cudf): Add CudfLocalMerge and allow PartitionOutput without Fallback"
+    url: "https://github.com/facebookincubator/velox/pull/16542"
+  - number: 16578
+    commit: "7a42c8b7aea6b0ee0f0e7eab945de7a4aee9dff8"
+    author: "karthikeyann"
+    title: "feat(cudf): Add GPU runtime memory stats for cudf operators"
+    url: "https://github.com/facebookincubator/velox/pull/16578"
+  - number: 16634
+    commit: "ac135c812badb1ccd081d470a880919655631190"
+    author: "mattgara"
+    title: "feat(cudf): Add basic support for timestamp and date"
+    url: "https://github.com/facebookincubator/velox/pull/16634"
+  - number: 16751
+    commit: "e49f979b1afddf8e0de8c95d770bf6c318eb69e8"
+    author: "simoneves"
+    title: "feat(cudf): GPU Decimal (Part 3 of 3)"
+    url: "https://github.com/facebookincubator/velox/pull/16751"
+  - number: 16760
+    commit: "516487a0b572f740ae4600b591e6f69b79bf6f90"
+    author: "jinchengchenghh"
+    title: "feat(cudf): Support velox to cudf table conversion directly(Part2)"
+    url: "https://github.com/facebookincubator/velox/pull/16760"
+  - number: 16892
+    commit: "3aac07287c10a75cadec270db5ed0283c640d5b6"
+    author: "patdevinwilson"
+    title: "feat(cudf): Add GPU-accelerated Window operator"
+    url: "https://github.com/facebookincubator/velox/pull/16892"
+  - number: 16980
+    commit: "b35924b3d1dad2d22410b7d8b81cb976c0b4d303"
+    author: "karthikeyann"
+    title: "feat: Add IOutputBufferManager interface and OutputBufferManagerRegistry"
+    url: "https://github.com/facebookincubator/velox/pull/16980"
+  - number: 17054
+    commit: "047179df77cf583f78d7b8eeb8633d4fd2d96b0c"
+    author: "mhaseeb123"
+    title: "feat(cudf): Add Iceberg support to velox-cudf"
+    url: "https://github.com/facebookincubator/velox/pull/17054"
+  - number: 17367
+    commit: "d372586cd6576a9d4a23856b85ad702c694182e3"
+    author: "mattgara"
+    title: "fix(cudf): Preserve zero-column hash join row counts"
+    url: "https://github.com/facebookincubator/velox/pull/17367"
+  - number: 17402
+    commit: "6ae8f23b1e54b2861ce9220e4765c06d6c9f8b4c"
+    author: "dan13bauer"
+    title: "fix(cudf): Handle 0-column join output in CudfHashJoinProbe"
+    url: "https://github.com/facebookincubator/velox/pull/17402"
+
+skipped_prs:  # PRs not merged (see reason per entry)
+  - number: 16444
+    commit: "965adda970537cc69988e2d6240415a7389e5585"
+    author: "pramodsatya"
+    title: "feat(cuDF): Add CudfPlanNodeChecker"
+    url: "https://github.com/facebookincubator/velox/pull/16444"
+    reason: "PR_TIMEOUT (900s): conflict auto-resolve stopped with 4 file(s) still unmerged (examples: velox/experimental/cudf/exec/OperatorAdapters.cpp, velox/experimental/cudf/expression/ExpressionEvaluator.cpp, velox/experimental/cudf/tests/AggregationSelec...)."
+  - number: 16535
+    commit: "1090507907e666380234efce9731109b4697ccf4"
+    author: "pramodsatya"
+    title: "refactor(cuDF): Separate cuDF query and system configs"
+    url: "https://github.com/facebookincubator/velox/pull/16535"
+    reason: "PR_TIMEOUT (900s): conflict auto-resolve stopped with 10 file(s) still unmerged (examples: velox/experimental/cudf/exec/CudfHashJoin.cpp, velox/experimental/cudf/exec/CudfTopN.cpp, velox/experimental/cudf/exec/CudfTopN.h, velox/experimental/cudf/ex...)."
+  - number: 16859
+    commit: "87eaec1f58c2d946279f490a77b2d2b94b7bc7bf"
+    author: "jinchengchenghh"
+    title: "feat(cudf): Support cudf table to velox conversion directly(Part3)"
+    url: "https://github.com/facebookincubator/velox/pull/16859"
+    reason: "PR_TIMEOUT (900s): conflict auto-resolve stopped with 4 file(s) still unmerged (examples: velox/experimental/cudf/exec/VeloxCudfInterop.cpp, velox/experimental/cudf/tests/CMakeLists.txt, velox/experimental/cudf/tests/InteropTest.cpp, velox/experim...)."
+  - number: 16889
+    commit: "8c46ae29118e41a54bbb14ad39d2c8b81c17e8c9"
+    author: "patdevinwilson"
+    title: "feat(cudf): added date_diff and to_unixtime"
+    url: "https://github.com/facebookincubator/velox/pull/16889"
+    reason: "Conflicts remain after rerere/Claude (1 file(s): velox/experimental/cudf/expression/ExpressionEvaluator.cpp)."
+  - number: 16898
+    commit: "67008b990b4bbe7636d15b11f3b3958b43fc472d"
+    author: "Avinash-Raj"
+    title: "feat(cudf): Add cuDF round(DOUBLE[, INTEGER]) for TPC-DS"
+    url: "https://github.com/facebookincubator/velox/pull/16898"
+    reason: "Conflicts remain after rerere/Claude (1 file(s): velox/experimental/cudf/expression/ExpressionEvaluator.cpp)."
