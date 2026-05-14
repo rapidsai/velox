@@ -28,6 +28,7 @@ add_library(
   CudfNestedLoopJoin.cpp
   CudfReduce.cpp
   CudfLimit.cpp
+  CudfLocalMerge.cpp
   CudfLocalPartition.cpp
   CudfMarkDistinct.cpp
   CudfOrderBy.cpp
