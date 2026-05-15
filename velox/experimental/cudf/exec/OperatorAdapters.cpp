@@ -16,12 +16,14 @@
 
 #include "velox/experimental/cudf/CudfConfig.h"
 #include "velox/experimental/cudf/connectors/hive/CudfHiveConnector.h"
+#include "velox/experimental/cudf/exec/CudfAggregation.h"
 #include "velox/experimental/cudf/exec/CudfAssignUniqueId.h"
 #include "velox/experimental/cudf/exec/CudfBatchConcat.h"
+#include "velox/experimental/cudf/exec/CudfDistinct.h"
 #include "velox/experimental/cudf/exec/CudfEnforceSingleRow.h"
 #include "velox/experimental/cudf/exec/CudfFilterProject.h"
 #include "velox/experimental/cudf/exec/CudfGroupId.h"
-#include "velox/experimental/cudf/exec/CudfHashAggregation.h"
+#include "velox/experimental/cudf/exec/CudfGroupby.h"
 #include "velox/experimental/cudf/exec/CudfHashJoin.h"
 #include "velox/experimental/cudf/exec/CudfLimit.h"
 #include "velox/experimental/cudf/exec/CudfLocalMerge.h"
@@ -29,6 +31,7 @@
 #include "velox/experimental/cudf/exec/CudfMarkDistinct.h"
 #include "velox/experimental/cudf/exec/CudfNestedLoopJoin.h"
 #include "velox/experimental/cudf/exec/CudfOrderBy.h"
+#include "velox/experimental/cudf/exec/CudfReduce.h"
 #include "velox/experimental/cudf/exec/CudfTopN.h"
 #include "velox/experimental/cudf/exec/CudfWindow.h"
 #include "velox/experimental/cudf/exec/OperatorAdapters.h"
@@ -235,7 +238,7 @@ class FilterProjectAdapter : public OperatorAdapter {
   }
 };
 
-/// AggregationAdapter - Replaces with CudfHashAggregation
+/// AggregationAdapter - Replaces with CudfGroupby, CudfDistinct, or CudfReduce
 class AggregationAdapter : public OperatorAdapter {
  public:
   AggregationAdapter() : OperatorAdapter("Aggregation") {}
@@ -291,15 +294,25 @@ class AggregationAdapter : public OperatorAdapter {
     auto aggregationPlanNode =
         std::dynamic_pointer_cast<const core::AggregationNode>(planNode);
 
+    bool isGlobal = aggregationPlanNode->groupingKeys().empty();
+    bool isDistinct = !isGlobal && aggregationPlanNode->aggregates().empty();
+
     std::vector<std::unique_ptr<exec::Operator>> result;
     if (CudfConfig::getInstance().concatOptimizationEnabled) {
       result.push_back(
           std::make_unique<CudfBatchConcat>(
               operatorId, ctx, aggregationPlanNode));
     }
-    result.push_back(
-        std::make_unique<CudfHashAggregation>(
-            operatorId, ctx, aggregationPlanNode));
+    if (isGlobal) {
+      result.push_back(
+          std::make_unique<CudfReduce>(operatorId, ctx, aggregationPlanNode));
+    } else if (isDistinct) {
+      result.push_back(
+          std::make_unique<CudfDistinct>(operatorId, ctx, aggregationPlanNode));
+    } else {
+      result.push_back(
+          std::make_unique<CudfGroupby>(operatorId, ctx, aggregationPlanNode));
+    }
     return result;
   }
 };
@@ -340,14 +353,6 @@ class CudfHashJoinBaseAdapter : public OperatorAdapter {
       LOG_FALLBACK(
           "HashJoin null-aware anti join with filter not implemented, PlanNode id: {}",
           planNode->id());
-      return false;
-    }
-
-    // Null-aware LEFT SEMI PROJECT with filter requires tracking per-row
-    // NULL vs no-match state during filter evaluation, which is not yet
-    // implemented. The no-filter case is supported.
-    if (joinPlanNode->joinType() == core::JoinType::kLeftSemiProject &&
-        joinPlanNode->isNullAware() && joinPlanNode->filter()) {
       return false;
     }
 
@@ -428,24 +433,58 @@ class HashJoinProbeAdapter : public CudfHashJoinBaseAdapter {
   }
 };
 
-/// NestedLoopJoinBuildAdapter - Replaces with CudfNestedLoopJoinBuild (cross
-/// join only)
-class NestedLoopJoinBuildAdapter : public OperatorAdapter {
+class CudfNestedLoopJoinBaseAdapter : public OperatorAdapter {
  public:
-  NestedLoopJoinBuildAdapter() : OperatorAdapter("NestedLoopJoinBuild") {}
+  using OperatorAdapter::OperatorAdapter;
+
+  bool canRunOnGPU(
+      const exec::Operator* op,
+      const core::PlanNodePtr& planNode,
+      exec::DriverCtx* ctx) const override {
+    if (!canHandle(op)) {
+      return false;
+    }
+
+    auto joinPlanNode =
+        std::dynamic_pointer_cast<const core::NestedLoopJoinNode>(planNode);
+    if (!joinPlanNode) {
+      LOG_FALLBACK(
+          "NestedLoopJoin planNode is not NestedLoopJoinNode, PlanNode id: {}",
+          planNode->id());
+      return false;
+    }
+
+    if (!CudfNestedLoopJoinProbe::isSupportedJoinType(
+            joinPlanNode->joinType())) {
+      LOG_FALLBACK(
+          "NestedLoopJoin unsupported join type: {}, PlanNode id: {}",
+          static_cast<int>(joinPlanNode->joinType()),
+          planNode->id());
+      return false;
+    }
+
+    // Check if join condition can be evaluated on GPU
+    if (joinPlanNode->joinCondition()) {
+      if (!canBeEvaluatedByCudf(
+              {joinPlanNode->joinCondition()}, ctx->task->queryCtx().get())) {
+        LOG_FALLBACK(
+            "NestedLoopJoin filter cannot be evaluated by cuDF, PlanNode id: {}",
+            planNode->id());
+        return false;
+      }
+    }
+    return true;
+  }
+};
+
+/// NestedLoopJoinBuildAdapter - Replaces with CudfNestedLoopJoinBuild
+class NestedLoopJoinBuildAdapter : public CudfNestedLoopJoinBaseAdapter {
+ public:
+  NestedLoopJoinBuildAdapter()
+      : CudfNestedLoopJoinBaseAdapter("NestedLoopJoinBuild") {}
 
   bool canHandle(const exec::Operator* op) const override {
     return dynamic_cast<const exec::NestedLoopJoinBuild*>(op) != nullptr;
-  }
-
-  bool canRunOnGPU(
-      const exec::Operator* /*op*/,
-      const core::PlanNodePtr& planNode,
-      exec::DriverCtx* /*ctx*/) const override {
-    auto nljNode =
-        std::dynamic_pointer_cast<const core::NestedLoopJoinNode>(planNode);
-    return nljNode != nullptr &&
-        CudfNestedLoopJoinProbe::isSupported(nljNode.get());
   }
 
   bool acceptsGpuInput() const override {
@@ -461,33 +500,25 @@ class NestedLoopJoinBuildAdapter : public OperatorAdapter {
       const core::PlanNodePtr& planNode,
       exec::DriverCtx* ctx,
       int32_t operatorId) const override {
-    auto nljNode =
+    auto joinPlanNode =
         std::dynamic_pointer_cast<const core::NestedLoopJoinNode>(planNode);
+
     std::vector<std::unique_ptr<exec::Operator>> result;
     result.push_back(
-        std::make_unique<CudfNestedLoopJoinBuild>(operatorId, ctx, nljNode));
+        std::make_unique<CudfNestedLoopJoinBuild>(
+            operatorId, ctx, joinPlanNode));
     return result;
   }
 };
 
-/// NestedLoopJoinProbeAdapter - Replaces with CudfNestedLoopJoinProbe (cross
-/// join only)
-class NestedLoopJoinProbeAdapter : public OperatorAdapter {
+/// NestedLoopJoinProbeAdapter - Replaces with CudfNestedLoopJoinProbe
+class NestedLoopJoinProbeAdapter : public CudfNestedLoopJoinBaseAdapter {
  public:
-  NestedLoopJoinProbeAdapter() : OperatorAdapter("NestedLoopJoinProbe") {}
+  NestedLoopJoinProbeAdapter()
+      : CudfNestedLoopJoinBaseAdapter("NestedLoopJoinProbe") {}
 
   bool canHandle(const exec::Operator* op) const override {
     return dynamic_cast<const exec::NestedLoopJoinProbe*>(op) != nullptr;
-  }
-
-  bool canRunOnGPU(
-      const exec::Operator* /*op*/,
-      const core::PlanNodePtr& planNode,
-      exec::DriverCtx* /*ctx*/) const override {
-    auto nljNode =
-        std::dynamic_pointer_cast<const core::NestedLoopJoinNode>(planNode);
-    return nljNode != nullptr &&
-        CudfNestedLoopJoinProbe::isSupported(nljNode.get());
   }
 
   bool acceptsGpuInput() const override {
@@ -503,11 +534,13 @@ class NestedLoopJoinProbeAdapter : public OperatorAdapter {
       const core::PlanNodePtr& planNode,
       exec::DriverCtx* ctx,
       int32_t operatorId) const override {
-    auto nljNode =
+    auto joinPlanNode =
         std::dynamic_pointer_cast<const core::NestedLoopJoinNode>(planNode);
+
     std::vector<std::unique_ptr<exec::Operator>> result;
     result.push_back(
-        std::make_unique<CudfNestedLoopJoinProbe>(operatorId, ctx, nljNode));
+        std::make_unique<CudfNestedLoopJoinProbe>(
+            operatorId, ctx, joinPlanNode));
     return result;
   }
 };

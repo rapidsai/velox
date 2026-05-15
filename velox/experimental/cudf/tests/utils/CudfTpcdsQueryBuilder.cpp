@@ -52,7 +52,7 @@ void CudfTpcdsQueryBuilder::registerHiveConnector(
 
   connector::hive::CudfHiveConnectorFactory factory;
   auto c = factory.newConnector(connectorId, properties, ioExecutor_);
-  facebook::velox::connector::ConnectorRegistry::global().insert(
+  ::facebook::velox::connector::ConnectorRegistry::global().insert(
       c->connectorId(), c);
 
   LOG(INFO) << "CudfTpcdsQueryBuilder: registered CudfHiveConnector under ID '"

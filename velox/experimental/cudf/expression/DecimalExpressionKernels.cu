@@ -17,6 +17,7 @@
 
 #include <cudf/binaryop.hpp>
 #include <cudf/column/column_factories.hpp>
+#include <cudf/copying.hpp>
 #include <cudf/fixed_point/fixed_point.hpp>
 #include <cudf/null_mask.hpp>
 #include <cudf/scalar/scalar.hpp>
@@ -228,33 +229,11 @@ std::unique_ptr<cudf::column> decimalDivide(
   CUDF_EXPECTS(
       aRescale >= 0, "Decimal divide requires non-negative rescale factor");
 
-  // Combine input null masks with a mask that marks zero divisors as null.
-  auto [inputNullMask, inputNullCount] =
+  // Combine input null masks (lhs and rhs nulls).
+  auto [nullMask, nullCount] =
       cudf::bitmask_and(cudf::table_view({lhs, rhs}), stream, mr);
-  auto [zeroMaskPtr, zeroNullCount] = createDivisorNullMask(rhs, stream, mr);
 
-  // AND the masks together: null if either input is null OR divisor is zero.
-  rmm::device_buffer finalMask;
-  cudf::size_type finalNullCount;
-  if (inputNullMask.size() > 0 && zeroMaskPtr && zeroMaskPtr->size() > 0) {
-    auto [combined, count] = cudf::bitmask_and(
-        std::vector<cudf::bitmask_type const*>{
-            static_cast<cudf::bitmask_type const*>(inputNullMask.data()),
-            static_cast<cudf::bitmask_type const*>(zeroMaskPtr->data())},
-        std::vector<cudf::size_type>{0, 0},
-        lhs.size(),
-        stream,
-        mr);
-    finalMask = std::move(combined);
-    finalNullCount = count;
-  } else if (zeroMaskPtr && zeroMaskPtr->size() > 0) {
-    finalMask = std::move(*zeroMaskPtr);
-    finalNullCount = zeroNullCount;
-  } else {
-    finalMask = std::move(inputNullMask);
-    finalNullCount = inputNullCount;
-  }
-
+  // Create output column with input null mask and perform division.
   auto out = cudf::make_fixed_width_column(
       outputType, lhs.size(), std::move(finalMask), finalNullCount, stream, mr);
 
@@ -280,7 +259,8 @@ std::unique_ptr<cudf::column> decimalDivide(
         lhs, rhs, out->mutable_view(), aRescale, stream);
   }
 
-  return out;
+  // Scatter nulls where divisor is zero.
+  return scatterNullsAtZeroDivisor(std::move(out), rhs, stream, mr);
 }
 
 std::unique_ptr<cudf::column> decimalDivide(
@@ -343,33 +323,11 @@ std::unique_ptr<cudf::column> decimalDivide(
     return makeAllNullDecimalColumn(outputType, rhs.size(), stream, mr);
   }
 
-  // Combine rhs null mask with a mask that marks zero divisors as null.
-  auto inputNullMask = cudf::copy_bitmask(rhs, stream, mr);
-  auto inputNullCount = rhs.null_count();
-  auto [zeroMaskPtr, zeroNullCount] = createDivisorNullMask(rhs, stream, mr);
+  // Copy rhs null mask.
+  auto nullMask = cudf::copy_bitmask(rhs, stream, mr);
+  auto nullCount = rhs.null_count();
 
-  // AND the masks together: null if rhs is null OR divisor is zero.
-  rmm::device_buffer finalMask;
-  cudf::size_type finalNullCount;
-  if (inputNullMask.size() > 0 && zeroMaskPtr && zeroMaskPtr->size() > 0) {
-    auto [combined, count] = cudf::bitmask_and(
-        std::vector<cudf::bitmask_type const*>{
-            static_cast<cudf::bitmask_type const*>(inputNullMask.data()),
-            static_cast<cudf::bitmask_type const*>(zeroMaskPtr->data())},
-        std::vector<cudf::size_type>{0, 0},
-        rhs.size(),
-        stream,
-        mr);
-    finalMask = std::move(combined);
-    finalNullCount = count;
-  } else if (zeroMaskPtr && zeroMaskPtr->size() > 0) {
-    finalMask = std::move(*zeroMaskPtr);
-    finalNullCount = zeroNullCount;
-  } else {
-    finalMask = std::move(inputNullMask);
-    finalNullCount = inputNullCount;
-  }
-
+  // Create output column and perform division.
   auto out = cudf::make_fixed_width_column(
       outputType, rhs.size(), std::move(finalMask), finalNullCount, stream, mr);
 
@@ -397,7 +355,8 @@ std::unique_ptr<cudf::column> decimalDivide(
         lhsValue, rhs, out->mutable_view(), aRescale, stream);
   }
 
-  return out;
+  // Scatter nulls where divisor is zero.
+  return scatterNullsAtZeroDivisor(std::move(out), rhs, stream, mr);
 }
 
 } // namespace facebook::velox::cudf_velox

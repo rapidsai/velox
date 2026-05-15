@@ -52,7 +52,12 @@ cudf::ast::literal createLiteral(
   variant value =
       VELOX_DYNAMIC_TYPE_DISPATCH(getVariant, kind, vector, atIndex);
   return VELOX_DYNAMIC_TYPE_DISPATCH_ALL(
-      makeScalarAndLiteral, kind, type, value, scalars);
+      makeScalarAndLiteral,
+      kind,
+      type,
+      value,
+      vector->isNullAt(atIndex),
+      scalars);
 }
 
 // Helper function to extract literals from array elements based on type
@@ -432,7 +437,7 @@ struct AstContext {
 /// 1. Cannot be represented natively in cuDF AST (need precomputation)
 /// 2. AND reference fields from both sides of a join
 /// Returns true only if such problematic sub-expressions exist.
-inline bool expressionSpansBothSides(
+inline bool hasNonAstSubexprSpanningBothSides(
     const std::shared_ptr<velox::exec::Expr>& expr,
     const RowTypePtr& leftSchema,
     const RowTypePtr& rightSchema) {
@@ -441,7 +446,7 @@ inline bool expressionSpansBothSides(
   if (detail::isAstExprSupported(expr)) {
     // Recursively check children
     for (const auto& child : expr->inputs()) {
-      if (expressionSpansBothSides(child, leftSchema, rightSchema)) {
+      if (hasNonAstSubexprSpanningBothSides(child, leftSchema, rightSchema)) {
         return true;
       }
     }
@@ -449,20 +454,12 @@ inline bool expressionSpansBothSides(
   }
 
   // Expression needs precomputation - check if it spans both sides
-  int foundSide = -1;
+  bool hasLeft = false, hasRight = false;
   for (const auto* field : expr->distinctFields()) {
-    int fieldSide = -1;
-    if (leftSchema->containsChild(field->field())) {
-      fieldSide = 0;
-    } else if (rightSchema->containsChild(field->field())) {
-      fieldSide = 1;
-    }
-    if (fieldSide >= 0) {
-      if (foundSide == -1) {
-        foundSide = fieldSide;
-      } else if (foundSide != fieldSide) {
-        return true; // Non-AST expression spans both sides
-      }
+    hasLeft |= leftSchema->containsChild(field->field());
+    hasRight |= rightSchema->containsChild(field->field());
+    if (hasLeft && hasRight) {
+      return true;
     }
   }
   return false;
@@ -566,6 +563,13 @@ cudf::ast::expression const& AstContext::pushExprToTree(
       // Children will be recursively handled by createCudfExpression
       // Determine which side this expression references
       int sideIdx = findExpressionSide(expr);
+      if (sideIdx == -2) {
+        // Expression spans both sides of the join - cannot precompute on one
+        // side
+        VELOX_FAIL(
+            "Expression spans both join sides and cannot be precomputed: " +
+            name);
+      }
       if (sideIdx < 0) {
         sideIdx = 0; // Default to left side if no fields found
       }
@@ -584,11 +588,17 @@ cudf::ast::expression const& AstContext::pushExprToTree(
     auto value = c->value();
     VELOX_CHECK(value->isConstantEncoding());
 
+    // Materialize NULL literals via make_column_from_scalar so the output
+    // column preserves nullness for downstream operators like count(column).
+    //
+    // Also keep the standalone literal workaround: cudf::compute_column can
+    // produce spurious nulls for root literal expressions. See comment below.
+    //
     // TODO: There is a scalar stream synchronization bug that causes
     // cudf::compute_column to produce spurious nulls for standalone
     // literal expressions.  Work around it by materialising via
     // make_column_from_scalar instead.
-    if (expr == rootExpr) {
+    if (value->isNullAt(0) || expr == rootExpr) {
       // convert to cudf scalar and store it
       createLiteral(value, scalars);
       // The scalar index is scalars.size() - 1 since we just added it

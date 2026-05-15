@@ -16,6 +16,7 @@
 
 #include "velox/experimental/cudf/CudfConfig.h"
 #include "velox/experimental/cudf/benchmarks/CudfTpcdsBenchmark.h"
+#include "velox/experimental/cudf/benchmarks/CudfTpchBenchmark.h"
 #include "velox/experimental/cudf/connectors/hive/CudfHiveConfig.h"
 #include "velox/experimental/cudf/connectors/hive/CudfHiveConnector.h"
 #include "velox/experimental/cudf/exec/CudfConversion.h"
@@ -37,8 +38,6 @@ using namespace facebook::velox::exec;
 using namespace facebook::velox::exec::test;
 using namespace facebook::velox::dwio::common;
 
-DEFINE_bool(cudf_enabled, false, "Enable CuDF GPU acceleration for TPC-DS");
-
 DEFINE_uint64(
     cudf_chunk_read_limit,
     0,
@@ -54,19 +53,13 @@ DEFINE_int32(
     100000,
     "Preferred output batch size in rows for cudf operators.");
 
-DEFINE_string(
-    cudf_memory_resource,
-    "async",
-    "Memory resource for cudf operators.");
-
-DEFINE_int32(
-    cudf_memory_percent,
-    50,
-    "Percentage of GPU memory to allocate for cudf operators.");
-
 DEFINE_bool(velox_cudf_table_scan, true, "Enable cuDF table scan");
 
-DEFINE_bool(cudf_debug_enabled, false, "Enable debug printing");
+DEFINE_string(
+    cudf_properties,
+    "",
+    "Path to a properties file for CudfConfig. Each line should be key=value "
+    "(e.g. cudf.memory_resource=async). See CudfConfig for available keys.");
 
 void CudfTpcdsBenchmark::initQueryBuilder() {
   auto cudfBuilder =
@@ -81,17 +74,22 @@ void CudfTpcdsBenchmark::initialize() {
   // Must be set before TpcdsBenchmark::initialize(), which calls
   // initQueryBuilder() -> registerCudf(), which bakes the prefix into the
   // step-aware aggregation registry.
-  cudf_velox::CudfConfig::getInstance().functionNamePrefix = "presto.default.";
+  auto& config = cudf_velox::CudfConfig::getInstance();
+  config.functionNamePrefix = kPrestoFunctionNamespacePrefix;
+
+  if (!FLAGS_cudf_properties.empty()) {
+    config.initialize(cudf_velox::loadPropertiesFile(FLAGS_cudf_properties));
+  }
 
   TpcdsBenchmark::initialize();
 
+  const std::string prestoConnectorId{kPrestoHiveConnectorId};
   if (FLAGS_velox_cudf_table_scan) {
-    // The base class registered a standard HiveConnector under "hive".
-    // Unregister it and re-register CudfHiveConnector under the same ID
-    // so that TableScanAdapter::canRunOnGPU() returns true.
-    const std::string prestoConnectorId = "hive";
-    if (connector::ConnectorRegistry::tryGet(prestoConnectorId)) {
-      LOG(INFO) << "Unregistering existing connector: " << prestoConnectorId;
+    // The base class registered a HiveConnector. Unregister it so the
+    // CudfTpcdsQueryBuilder can register CudfHiveConnector under the plan's
+    // connector ID instead. The query builder handles this when getQueryPlan()
+    // is called.
+    if (connector::ConnectorRegistry::tryGet(prestoConnectorId) != nullptr) {
       connector::ConnectorRegistry::global().erase(prestoConnectorId);
     }
 
@@ -102,18 +100,8 @@ void CudfTpcdsBenchmark::initialize() {
         prestoConnectorId, properties, ioExecutor_.get());
     connector::ConnectorRegistry::global().insert(
         cudfHiveConnector->connectorId(), cudfHiveConnector);
-    LOG(INFO) << "Registered CudfHiveConnector under ID: " << prestoConnectorId;
-  } else {
-    LOG(INFO) << "velox_cudf_table_scan is disabled, using standard HiveConnector";
   }
 
-  cudf_velox::CudfConfig::getInstance().memoryResource =
-      FLAGS_cudf_memory_resource;
-  cudf_velox::CudfConfig::getInstance().memoryPercent =
-      FLAGS_cudf_memory_percent;
-  cudf_velox::CudfConfig::getInstance().debugEnabled = FLAGS_cudf_debug_enabled;
-
-  // Add custom configs.
   queryConfigs_[cudf_velox::CudfFromVelox::kGpuBatchSizeRows] =
       std::to_string(FLAGS_cudf_gpu_batch_size_rows);
 }
@@ -141,19 +129,12 @@ void CudfTpcdsBenchmark::shutdown() {
 
 int main(int argc, char** argv) {
   std::string kUsage(
-      "This program benchmarks TPC-DS queries. Run with "
-      "'--helpon=TpcdsBenchmark' or '--helpon=CudfTpcdsBenchmark' for "
-      "available options.\n"
-      "  --data_path     Path to TPC-DS data directory\n"
-      "  --plan_path     Path to plan JSON directory\n"
-      "  --cudf_enabled  Enable CuDF GPU acceleration\n");
+      "This program benchmarks TPC-DS queries with CuDF GPU acceleration.\n"
+      "  --data_path        Path to TPC-DS data directory\n"
+      "  --plan_path        Path to plan JSON directory\n"
+      "  --cudf_properties  Path to CudfConfig properties file\n");
   gflags::SetUsageMessage(kUsage);
   folly::Init init{&argc, &argv, false};
-
-  if (FLAGS_cudf_enabled) {
-    tpcdsBenchmark = std::make_unique<CudfTpcdsBenchmark>();
-  } else {
-    tpcdsBenchmark = std::make_unique<TpcdsBenchmark>();
-  }
+  tpcdsBenchmark = std::make_unique<CudfTpcdsBenchmark>();
   tpcdsBenchmarkMain();
 }

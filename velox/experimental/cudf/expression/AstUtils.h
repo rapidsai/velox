@@ -223,6 +223,7 @@ template <TypeKind kind>
 cudf::ast::literal makeScalarAndLiteral(
     const TypePtr& type,
     const variant& var,
+    bool isNull,
     std::vector<std::unique_ptr<cudf::scalar>>& scalars) {
   using T = typename TypeTraits<kind>::NativeType;
   if constexpr (
@@ -234,6 +235,14 @@ cudf::ast::literal makeScalarAndLiteral(
     return makeLiteralFromScalar<T>(*(scalars.back()), type);
   }
   VELOX_NYI("Scalar creation not implemented for type {}", type->toString());
+}
+
+template <TypeKind kind>
+cudf::ast::literal makeScalarAndLiteral(
+    const TypePtr& type,
+    const variant& var,
+    std::vector<std::unique_ptr<cudf::scalar>>& scalars) {
+  return makeScalarAndLiteral<kind>(type, var, false, scalars);
 }
 
 } // namespace facebook::velox::cudf_velox

@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include "velox/experimental/cudf/benchmarks/TpcdsBenchmark.h"
+#include "velox/benchmarks/tpcds/TpcdsBenchmark.h"
 
 #include <memory>
 #include <string>

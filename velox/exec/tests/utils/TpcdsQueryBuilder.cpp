@@ -20,15 +20,35 @@
 #include "velox/connectors/hive/HiveConnector.h"
 #include "velox/exec/tests/utils/HiveConnectorTestBase.h"
 
-#if __has_include("filesystem")
 #include <filesystem>
 namespace fs = std::filesystem;
-#else
-#include <experimental/filesystem>
-namespace fs = std::experimental::filesystem;
-#endif
 
-#include <algorithm>
+namespace {
+
+/// Try to find data files for a table name. First tries exact match,
+/// then strips any schema prefix (e.g. "tpcds.store_sales" ->
+/// "store_sales").
+const std::vector<std::string>* findDataFiles(
+    const std::unordered_map<std::string, std::vector<std::string>>&
+        tableDataFiles,
+    const std::string& tableName) {
+  auto it = tableDataFiles.find(tableName);
+  if (it != tableDataFiles.end() && !it->second.empty()) {
+    return &it->second;
+  }
+
+  auto dotPos = tableName.rfind('.');
+  if (dotPos != std::string::npos) {
+    it = tableDataFiles.find(tableName.substr(dotPos + 1));
+    if (it != tableDataFiles.end() && !it->second.empty()) {
+      return &it->second;
+    }
+  }
+
+  return nullptr;
+}
+
+} // namespace
 
 namespace facebook::velox::exec::test {
 
@@ -44,7 +64,7 @@ void TpcdsQueryBuilder::initialize(const std::string& dataPath) {
     if (!tableEntry.is_directory()) {
       continue;
     }
-    const std::string tableName = tableEntry.path().filename().string();
+    const auto tableName = tableEntry.path().filename().string();
 
     // Skip hidden directories.
     if (tableName.empty() || tableName[0] == '.') {
@@ -70,32 +90,10 @@ void TpcdsQueryBuilder::initialize(const std::string& dataPath) {
     std::sort(files.begin(), files.end());
   }
 
-  VELOX_CHECK(
+  VELOX_USER_CHECK(
       !tableDataFiles_.empty(),
       "No table subdirectories found in data path: {}",
       dataPath);
-}
-
-const std::vector<std::string>* TpcdsQueryBuilder::findDataFiles(
-    const std::string& tableName) const {
-  // Try exact match first.
-  auto it = tableDataFiles_.find(tableName);
-  if (it != tableDataFiles_.end() && !it->second.empty()) {
-    return &it->second;
-  }
-
-  // Try stripping schema/catalog prefix.
-  // E.g. "tpcds.store_sales" -> "store_sales",
-  //      "hive.tpcds.store_sales" -> "store_sales".
-  auto dotPos = tableName.rfind('.');
-  if (dotPos != std::string::npos) {
-    it = tableDataFiles_.find(tableName.substr(dotPos + 1));
-    if (it != tableDataFiles_.end() && !it->second.empty()) {
-      return &it->second;
-    }
-  }
-
-  return nullptr;
 }
 
 void TpcdsQueryBuilder::registerHiveConnector(
@@ -127,7 +125,7 @@ VeloxPlan TpcdsQueryBuilder::getQueryPlan(
     LOG(INFO) << "TpcdsQueryBuilder: detected connector ID '" << connectorId_
               << "' from plan";
 
-    if (!connector::ConnectorRegistry::tryGet(connectorId_)) {
+    if (connector::ConnectorRegistry::tryGet(connectorId_) == nullptr) {
       registerHiveConnector(connectorId_);
       ownedConnector_ = true;
       LOG(INFO) << "TpcdsQueryBuilder: registered connector under ID '"
@@ -139,7 +137,7 @@ VeloxPlan TpcdsQueryBuilder::getQueryPlan(
   for (const auto& scanNode : scanNodes) {
     const auto& tableName = scanNode->tableHandle()->name();
 
-    const auto* files = findDataFiles(tableName);
+    const auto* files = findDataFiles(tableDataFiles_, tableName);
     if (files) {
       veloxPlan.dataFiles[scanNode->id()] = *files;
     } else {

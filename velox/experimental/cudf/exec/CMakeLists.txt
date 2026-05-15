@@ -21,9 +21,13 @@ add_library(
   CudfEnforceSingleRow.cpp
   CudfFilterProject.cpp
   CudfGroupId.cpp
-  CudfHashAggregation.cpp
   DecimalAggregationKernels.cu
+  CudfDistinct.cpp
+  CudfGroupby.cpp
+  CudfAggregation.cpp
   CudfHashJoin.cpp
+  CudfNestedLoopJoin.cpp
+  CudfReduce.cpp
   CudfLimit.cpp
   CudfLocalMerge.cpp
   CudfLocalPartition.cpp

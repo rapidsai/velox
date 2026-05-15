@@ -23,16 +23,13 @@
 namespace facebook::velox::exec::test {
 
 /// Contains a deserialized Velox query plan and optional data files keyed on
-/// source plan node ID. Structurally identical to TpchPlan; works with
-/// AssertQueryBuilder (plan + optional splits).
+/// source plan node ID. TpchPlan (in TpchQueryBuilder.h) is a type alias for
+/// this struct.
 struct VeloxPlan {
   core::PlanNodePtr plan;
   std::unordered_map<core::PlanNodeId, std::vector<std::string>> dataFiles;
   dwio::common::FileFormat dataFileFormat{dwio::common::FileFormat::PARQUET};
 };
-
-/// Backward-compatible alias.
-using TpcdsPlan = VeloxPlan;
 
 /// Generic loader for Velox plan JSON files (e.g. dumped from a Presto
 /// worker's plan-dump-dir). Not specific to any benchmark suite -- works for
@@ -48,8 +45,9 @@ using TpcdsPlan = VeloxPlan;
 class VeloxPlanLoader {
  public:
   /// @param planDirectory  Directory containing plan JSON files.
-  /// @param pool           Memory pool for plan deserialization (creates one
-  ///                       if nullptr).
+  /// @param pool           Memory pool for plan deserialization. If nullptr,
+  ///                       a leaf pool is created from the global
+  ///                       MemoryManager (which must already be initialized).
   /// @param stripPartitionedOutput  If true, strip PartitionedOutput root.
   VeloxPlanLoader(
       const std::string& planDirectory,
@@ -85,8 +83,5 @@ class VeloxPlanLoader {
   /// PartitionedOutputNode, replace it with its single child.
   void maybeStripPartitionedOutput(core::PlanNodePtr& plan) const;
 };
-
-/// Backward-compatible alias.
-using TpcdsPlanFromJson = VeloxPlanLoader;
 
 } // namespace facebook::velox::exec::test
