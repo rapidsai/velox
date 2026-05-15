@@ -15,47 +15,96 @@
  */
 #pragma once
 
-#include "velox/experimental/cudf/exec/NvtxHelper.h"
+#include "velox/experimental/cudf/exec/CudfOperator.h"
 #include "velox/experimental/cudf/vector/CudfVector.h"
 
 #include "velox/exec/Operator.h"
+#include "velox/type/Type.h"
 
 #include <cudf/table/table.hpp>
 #include <cudf/types.hpp>
+
+#include <rmm/cuda_stream_view.hpp>
 
 namespace facebook::velox::cudf_velox {
 
 /// GPU-accelerated Window operator using cuDF.
 ///
-/// Each incoming batch is immediately concatenated into an accumulated cudf
-/// table on the GPU in addInput(). Once all input has arrived, getOutput()
-/// sorts (if needed), evaluates the window functions, and returns the result.
+/// Incoming GPU batches are stored in addInput(). When noMoreInput() is called,
+/// batches are concatenated and sorted. getOutput() then evaluates window
+/// functions and returns one output batch.
+///
+/// inputsSorted fast path: when WindowNode::inputsSorted() is true, this
+/// operator skips stable_sorted_order and the full-table gather (see
+/// WindowNode::inputsSorted() for the ordering contract). The flag is taken
+/// from the plan as-is; Velox does not infer it here. Connectors / optimizers
+/// must only set it when a Sort or ordered exchange actually guarantees
+/// partition keys then ORDER BY keys across concatenated input batches.
+///
+/// Memory: the sorted path peaks at roughly concat output plus gather copy plus
+/// window result columns. Batch-wise / streaming evaluation would require a
+/// larger redesign.
 ///
 /// Rank-like functions (row_number, rank, dense_rank) use
 /// cudf::groupby::scan with cudf::make_rank_aggregation.
 /// Aggregate windows and lag/lead use cudf::grouped_rolling_window.
-class CudfWindow : public exec::Operator, public NvtxHelper {
+class CudfWindow : public CudfOperatorBase {
  public:
   CudfWindow(
       int32_t operatorId,
       exec::DriverCtx* driverCtx,
       const std::shared_ptr<const core::WindowNode>& windowNode);
 
+  /// Returns true if the window function is supported by CudfWindow.
+  /// Supported functions:
+  /// - Ranking: row_number, rank, dense_rank
+  /// - Value: lag, lead (with up to 2 arguments), first_value, last_value
+  /// - Aggregate: sum, min, max, count, avg
+  /// Unsupported functions:
+  /// - nth_value, ntile, cume_dist, percent_rank
+  /// - lag/lead with default value (3rd argument)
+  static bool isSupportedWindowFunction(
+      const std::string& baseName,
+      size_t numArgs) {
+    static const std::unordered_set<std::string> kSupportedFuncs = {
+        "lag",
+        "lead",
+        "row_number",
+        "rank",
+        "dense_rank",
+        "first_value",
+        "last_value",
+        "sum",
+        "min",
+        "max",
+        "count",
+        "avg"};
+    if (kSupportedFuncs.find(baseName) == kSupportedFuncs.end()) {
+      return false;
+    }
+    // lag/lead only support up to 2 arguments (value, offset)
+    if ((baseName == "lag" || baseName == "lead") && numArgs > 2) {
+      return false;
+    }
+    return true;
+  }
+
   bool needsInput() const override {
     return !noMoreInput_;
   }
-
-  void addInput(RowVectorPtr input) override;
-
-  RowVectorPtr getOutput() override;
-
-  void noMoreInput() override;
 
   exec::BlockingReason isBlocked(ContinueFuture* /*future*/) override {
     return exec::BlockingReason::kNotBlocked;
   }
 
   bool isFinished() override;
+
+ protected:
+  void doAddInput(RowVectorPtr input) override;
+
+  RowVectorPtr doGetOutput() override;
+
+  void doNoMoreInput() override;
 
  private:
   // Resolve the input column index for a window function's first argument.
@@ -86,29 +135,28 @@ class CudfWindow : public exec::Operator, public NvtxHelper {
 
   // Compute aggregate window functions (sum, min, max, count, avg)
   // with frame bounds from the WindowNode.
+  // isCountStar: true for count(*), false for count(col).
   std::unique_ptr<cudf::column> computeAggregateColumn(
       cudf::table_view const& partKeys,
       cudf::column_view inputCol,
       const core::WindowNode::Function& func,
       const std::string& baseName,
+      bool isCountStar,
       rmm::cuda_stream_view stream) const;
 
-  // Build a zero-copy STRUCT column_view over multiple sort key columns
-  // for composite-key tie detection in rank functions.
-  cudf::column_view multiSortKeyStructView(
-      cudf::table_view const& sortedInput) const;
-
   std::shared_ptr<const core::WindowNode> windowNode_;
+  const RowTypePtr inputRowType_;
 
   std::vector<cudf::size_type> partitionKeyIndices_;
   std::vector<cudf::size_type> sortKeyIndices_;
   std::vector<cudf::order> sortOrders_;
   std::vector<cudf::null_order> nullOrders_;
 
-  std::vector<std::shared_ptr<CudfVector>> inputBatches_;
+  std::vector<CudfVectorPtr> inputBatches_;
 
-  // Scratch storage for multiSortKeyStructView children.
-  mutable std::vector<cudf::column_view> sortKeyStructChildren_;
+  // Sorted and concatenated input data, prepared in doNoMoreInput().
+  std::unique_ptr<cudf::table> sortedData_;
+  rmm::cuda_stream_view stream_{};
 
   bool finished_ = false;
 };

@@ -1000,7 +1000,7 @@ class PartitionedOutputAdapter : public OperatorAdapter {
   }
 };
 
-/// WindowAdapter - Replaces with CudfWindow
+// WindowAdapter - Replaces with CudfWindow
 class WindowAdapter : public OperatorAdapter {
  public:
   WindowAdapter() : OperatorAdapter("Window") {}
@@ -1018,34 +1018,78 @@ class WindowAdapter : public OperatorAdapter {
     if (!windowNode) {
       return false;
     }
-    static const std::unordered_set<std::string> kSupportedFuncs = {
-        "lag",
-        "lead",
-        "row_number",
-        "rank",
-        "dense_rank",
-        "first_value",
-        "last_value",
-        "sum",
-        "min",
-        "max",
-        "count",
-        "avg"};
     const auto& prefix = CudfConfig::getInstance().functionNamePrefix;
     for (const auto& func : windowNode->windowFunctions()) {
-      auto name = func.functionCall->name();
-      auto pos = name.rfind('.');
-      auto baseName = pos == std::string::npos ? name : name.substr(pos + 1);
-      if (!prefix.empty() && baseName.find(prefix) == 0) {
-        baseName = baseName.substr(prefix.size());
-      }
-      if (kSupportedFuncs.find(baseName) == kSupportedFuncs.end()) {
+      const auto baseName =
+          stripFunctionPrefix(func.functionCall->name(), prefix);
+      if (!CudfWindow::isSupportedWindowFunction(
+              baseName, func.functionCall->inputs().size())) {
+        LOG_FALLBACK(
+            "Unsupported window function: {}, PlanNode id: {}",
+            func.functionCall->name(),
+            planNode->id());
         return false;
       }
-      // Reject LAG/LEAD with default value (3rd argument).
+
+      // Check for non-constant lag/lead offset (2nd argument).
       if ((baseName == "lag" || baseName == "lead") &&
-          func.functionCall->inputs().size() > 2) {
-        return false;
+          func.functionCall->inputs().size() >= 2) {
+        if (!std::dynamic_pointer_cast<const core::ConstantTypedExpr>(
+                func.functionCall->inputs()[1])) {
+          LOG_FALLBACK(
+              "Non-constant offset for {} not supported, PlanNode id: {}",
+              baseName,
+              planNode->id());
+          return false;
+        }
+      }
+
+      // Functions that use frame bounds: first_value, last_value, and
+      // aggregates (sum, min, max, count, avg).
+      // Rank functions (row_number, rank, dense_rank) and lag/lead ignore
+      // frames.
+      bool usesFrame = baseName == "first_value" || baseName == "last_value" ||
+          baseName == "sum" || baseName == "min" || baseName == "max" ||
+          baseName == "count" || baseName == "avg";
+
+      if (usesFrame) {
+        // Check frame type - RANGE with non-trivial bounds is not supported.
+        // Only these RANGE combinations are supported (equivalent to ROWS):
+        // - UNBOUNDED PRECEDING to CURRENT ROW
+        // - UNBOUNDED PRECEDING to UNBOUNDED FOLLOWING
+        if (func.frame.type == core::WindowNode::WindowType::kRange) {
+          bool startOk = func.frame.startType ==
+              core::WindowNode::BoundType::kUnboundedPreceding;
+          bool endOk = func.frame.endType ==
+                  core::WindowNode::BoundType::kUnboundedFollowing ||
+              func.frame.endType == core::WindowNode::BoundType::kCurrentRow;
+          if (!startOk || !endOk) {
+            LOG_FALLBACK(
+                "RANGE frame with non-unbounded/current bounds not supported, PlanNode id: {}",
+                planNode->id());
+            return false;
+          }
+        }
+
+        // Check for non-constant frame bounds (column references).
+        auto isConstantBound = [](core::WindowNode::BoundType type,
+                                  const core::TypedExprPtr& value) {
+          if (type == core::WindowNode::BoundType::kPreceding ||
+              type == core::WindowNode::BoundType::kFollowing) {
+            return !value ||
+                std::dynamic_pointer_cast<const core::ConstantTypedExpr>(
+                    value) != nullptr;
+          }
+          return true;
+        };
+        if (!isConstantBound(func.frame.startType, func.frame.startValue) ||
+            !isConstantBound(func.frame.endType, func.frame.endValue)) {
+          LOG_FALLBACK(
+              "Non-constant frame bound not supported, PlanNode id: {}",
+              planNode->id());
+          return false;
+        }
+>>>>>>> cudf-window-operator
       }
     }
     return true;

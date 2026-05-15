@@ -239,12 +239,11 @@ set_tests_properties(
 set_tests_properties(velox_cudf_decimal_expression_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
 set_tests_properties(velox_cudf_decimal_aggregation_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
 set_tests_properties(velox_cudf_filter_project_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
-set_tests_properties(velox_cudf_function_registry_test PROPERTIES LABELS cuda_driver TIMEOUT 300)
-set_tests_properties(velox_cudf_hash_join_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
-set_tests_properties(velox_cudf_nested_loop_join_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
 set_tests_properties(velox_cudf_limit_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
 set_tests_properties(velox_cudf_local_merge_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
 set_tests_properties(velox_cudf_local_partition_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
+set_tests_properties(velox_cudf_function_registry_test PROPERTIES LABELS cuda_driver TIMEOUT 300)
+set_tests_properties(velox_cudf_hash_join_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
 set_tests_properties(velox_cudf_order_by_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
 set_tests_properties(velox_cudf_interop_test PROPERTIES LABELS cuda_driver TIMEOUT 3000)
 if(VELOX_ENABLE_S3)
@@ -563,6 +562,17 @@ target_link_libraries(
 )
 
 target_link_libraries(
+  velox_cudf_string_function_test
+  velox_cudf_exec
+  velox_exec
+  velox_exec_test_lib
+  velox_functions_test_lib
+  velox_test_util
+  gtest
+  gtest_main
+)
+
+target_link_libraries(
   velox_cudf_window_test
   velox_cudf_exec
   velox_exec
@@ -573,17 +583,6 @@ target_link_libraries(
   gtest
   gtest_main
   fmt::fmt
-)
-
-target_link_libraries(
-  velox_cudf_string_function_test
-  velox_cudf_exec
-  velox_exec
-  velox_exec_test_lib
-  velox_functions_test_lib
-  velox_test_util
-  gtest
-  gtest_main
 )
 
 add_subdirectory(utils)
