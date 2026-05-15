@@ -1089,7 +1089,6 @@ class WindowAdapter : public OperatorAdapter {
               planNode->id());
           return false;
         }
->>>>>>> cudf-window-operator
       }
     }
     return true;
