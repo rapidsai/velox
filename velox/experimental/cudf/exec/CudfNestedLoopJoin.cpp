@@ -727,9 +727,9 @@ std::unique_ptr<cudf::table> CudfNestedLoopJoinProbe::emitProbeMismatchRows(
   for (size_t i = 0; i < buildColumnOutputIndices_.size(); ++i) {
     auto outIdx = buildColumnOutputIndices_[i];
     auto buildChannel = buildColumnIndicesToGather_[i];
-    auto buildCudfType = veloxToCudfTypeId(buildType_->childAt(buildChannel));
+    auto buildCudfType = veloxToCudfDataType(buildType_->childAt(buildChannel));
     auto nullScalar = cudf::make_default_constructed_scalar(
-        cudf::data_type{buildCudfType}, stream, get_temp_mr());
+        buildCudfType, stream, get_temp_mr());
     outCols[outIdx] = cudf::make_column_from_scalar(
         *nullScalar, numUnmatched, stream, get_output_mr());
   }
@@ -772,9 +772,9 @@ RowVectorPtr CudfNestedLoopJoinProbe::emitBuildMismatchRows(
   for (size_t li = 0; li < probeColumnOutputIndices_.size(); ++li) {
     auto outIdx = probeColumnOutputIndices_[li];
     auto probeChannel = probeColumnIndicesToGather_[li];
-    auto probeCudfType = veloxToCudfTypeId(probeType_->childAt(probeChannel));
+    auto probeCudfType = veloxToCudfDataType(probeType_->childAt(probeChannel));
     auto nullScalar = cudf::make_default_constructed_scalar(
-        cudf::data_type{probeCudfType}, stream, get_temp_mr());
+        probeCudfType, stream, get_temp_mr());
     outCols[outIdx] = cudf::make_column_from_scalar(
         *nullScalar, numUnmatched, stream, get_output_mr());
   }

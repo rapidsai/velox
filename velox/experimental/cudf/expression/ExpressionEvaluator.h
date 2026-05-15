@@ -74,33 +74,22 @@ using CudfFunctionFactory = std::function<std::shared_ptr<CudfFunction>(
     const std::string& name,
     const std::shared_ptr<velox::exec::Expr>& expr)>;
 
-using CudfCanEvaluate =
-    std::function<bool(const std::shared_ptr<velox::exec::Expr>&)>;
-
-// Single signature entry with its factory and optional evaluator.
-// A function name can have multiple entries with different signatures.
-struct CudfFunctionEntry {
+struct CudfFunctionSpec {
   CudfFunctionFactory factory;
   std::vector<exec::FunctionSignaturePtr> signatures;
-  CudfCanEvaluate canEvaluate;
-};
-
-// A function name maps to multiple entries (one per registration).
-// Later registrations are checked first (higher priority for overrides).
-struct CudfFunctionSpec {
-  std::vector<CudfFunctionEntry> entries;
 };
 
 bool registerCudfFunction(
     const std::string& name,
     CudfFunctionFactory factory,
     const std::vector<exec::FunctionSignaturePtr>& signatures,
-    CudfCanEvaluate canEvaluate = nullptr);
+    bool overwrite = true);
 
 void registerCudfFunctions(
     const std::vector<std::string>& aliases,
     CudfFunctionFactory factory,
-    const std::vector<exec::FunctionSignaturePtr>& signatures);
+    const std::vector<exec::FunctionSignaturePtr>& signatures,
+    bool overwrite = true);
 
 /// Create a CudfFunction for the given name and expression.
 /// Returns nullptr if no registered function matches the expression's

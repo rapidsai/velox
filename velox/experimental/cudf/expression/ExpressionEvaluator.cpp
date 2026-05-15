@@ -56,10 +56,7 @@
 #include <cudf/strings/replace.hpp>
 #include <cudf/strings/slice.hpp>
 #include <cudf/strings/split/split.hpp>
-<<<<<<< HEAD
-=======
 #include <cudf/strings/string_view.hpp>
->>>>>>> main
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/transform.hpp>
@@ -67,15 +64,9 @@
 #include <cudf/unary.hpp>
 #include <cudf/utilities/traits.hpp>
 
-<<<<<<< HEAD
-#include <folly/String.h>
-
-#include <cctype>
-=======
 #include <rmm/device_uvector.hpp>
 
-#include <memory>
->>>>>>> main
+#include <cctype>
 
 namespace facebook::velox::cudf_velox {
 namespace {
@@ -740,143 +731,6 @@ class BinaryFunction : public CudfFunction {
   const cudf::data_type type_;
   std::unique_ptr<cudf::scalar> left_;
   std::unique_ptr<cudf::scalar> right_;
-};
-
-// @TODO 4/22/26
-// Simplify or remove the logic in this class that handles constant-folding or
-// short-circuiting of logical operations, once the cuDF expression optimizer
-// enhancements land (Velox PR #17108, see also Velox Issue #17307).
-class LogicalFunction : public CudfFunction {
- public:
-  LogicalFunction(
-      const std::shared_ptr<velox::exec::Expr>& expr,
-      cudf::binary_operator op)
-      : op_(op) {
-    VELOX_CHECK_GE(
-        expr->inputs().size(), 2, "Logical function expects at least 2 inputs");
-    literals_.reserve(expr->inputs().size());
-    for (const auto& input : expr->inputs()) {
-      auto constExpr =
-          std::dynamic_pointer_cast<velox::exec::ConstantExpr>(input);
-      if (constExpr) {
-        VELOX_CHECK_EQ(
-            constExpr->value()->typeKind(),
-            TypeKind::BOOLEAN,
-            "Logical function only supports boolean literals");
-        auto boolConst = constExpr->value()->as<ConstantVector<bool>>();
-        VELOX_CHECK_NOT_NULL(boolConst);
-        if (!shortCircuitScalar_ && !boolConst->isNullAt(0)) {
-          const bool v = boolConst->valueAt(0);
-          if ((op_ == cudf::binary_operator::NULL_LOGICAL_AND && !v) ||
-              (op_ == cudf::binary_operator::NULL_LOGICAL_OR && v)) {
-            // If we encounter non-null false (for AND) or true (for OR), we
-            // know what the final result must be, although it will still need
-            // to be expanded to a column the same size as the input columns. No
-            // need to continue capturing literals in that case.
-            shortCircuitScalar_ =
-                createCudfScalar<TypeKind::BOOLEAN>(constExpr->value());
-            break;
-          }
-        }
-        literals_.push_back(
-            createCudfScalar<TypeKind::BOOLEAN>(constExpr->value()));
-      } else {
-        literals_.push_back(nullptr);
-      }
-    }
-  }
-
-  ColumnOrView eval(
-      std::vector<ColumnOrView>& inputColumns,
-      rmm::cuda_stream_view stream,
-      rmm::device_async_resource_ref mr) const override {
-    // If there are no input columns, the result is a scalar.
-    const size_t rowCount =
-        inputColumns.empty() ? 1 : asView(inputColumns[0]).size();
-
-    // If we determined a short-circuit result in the constructor, we
-    // return it directly here, expanded to the size of the input
-    // columns if not all the inputs are literals.
-    if (shortCircuitScalar_) {
-      return cudf::make_column_from_scalar(
-          *shortCircuitScalar_, rowCount, stream, mr);
-    }
-
-    // Now build the vector of actual operands, each of which is either a
-    // pre-computed literal or an input column.
-    struct Operand {
-      const cudf::scalar* scalar;
-      cudf::column_view column;
-    };
-    std::vector<Operand> operands;
-    operands.reserve(literals_.size());
-    size_t columnIndex = 0;
-    for (const auto& literal : literals_) {
-      if (literal) {
-        operands.push_back(Operand{literal.get(), {}});
-      } else {
-        VELOX_CHECK_LT(columnIndex, inputColumns.size());
-        operands.push_back(
-            Operand{nullptr, asView(inputColumns[columnIndex++])});
-      }
-    }
-
-    // There must be at least one operand.
-    VELOX_CHECK(!operands.empty());
-
-    // If there is only one operand, we can return it directly,
-    // again expanded to the size of the input columns if needed.
-    if (operands.size() == 1) {
-      const auto& only = operands[0];
-      if (only.scalar) {
-        return cudf::make_column_from_scalar(
-            *only.scalar, rowCount, stream, mr);
-      }
-      return ColumnOrView(only.column);
-    }
-
-    // If we get this far, we have at least two operands. We can
-    // now compute the result by iterating over the operands and
-    // applying the binary operator to each pair of operands.
-    const auto& left = operands[0];
-    const auto& right = operands[1];
-    std::unique_ptr<cudf::column> result;
-    if (left.scalar && right.scalar) {
-      // This case may still happen even in the case where a short-circuit
-      // result was not determined in the constructor, for example, if the
-      // inputs are 'true OR true' or 'false AND false'.
-      auto tmp =
-          cudf::make_column_from_scalar(*left.scalar, rowCount, stream, mr);
-      result = cudf::binary_operation(
-          tmp->view(), *right.scalar, op_, kBoolType, stream, mr);
-    } else if (left.scalar) {
-      result = cudf::binary_operation(
-          *left.scalar, right.column, op_, kBoolType, stream, mr);
-    } else if (right.scalar) {
-      result = cudf::binary_operation(
-          left.column, *right.scalar, op_, kBoolType, stream, mr);
-    } else {
-      result = cudf::binary_operation(
-          left.column, right.column, op_, kBoolType, stream, mr);
-    }
-    for (size_t i = 2; i < operands.size(); ++i) {
-      const auto& next = operands[i];
-      if (next.scalar) {
-        result = cudf::binary_operation(
-            result->view(), *next.scalar, op_, kBoolType, stream, mr);
-      } else {
-        result = cudf::binary_operation(
-            result->view(), next.column, op_, kBoolType, stream, mr);
-      }
-    }
-    return result;
-  }
-
- private:
-  static constexpr cudf::data_type kBoolType{cudf::type_id::BOOL8};
-  const cudf::binary_operator op_;
-  std::unique_ptr<cudf::scalar> shortCircuitScalar_;
-  std::vector<std::unique_ptr<cudf::scalar>> literals_;
 };
 
 class UnaryFunction : public CudfFunction {
@@ -2087,34 +1941,22 @@ bool registerCudfFunction(
     const std::string& name,
     CudfFunctionFactory factory,
     const std::vector<exec::FunctionSignaturePtr>& signatures,
-    CudfCanEvaluate canEvaluate) {
+    bool overwrite) {
   auto& registry = getCudfFunctionRegistry();
-<<<<<<< HEAD
-  CudfFunctionEntry newEntry{std::move(factory), signatures, std::move(canEvaluate)};
-
-  auto it = registry.find(name);
-  if (it == registry.end()) {
-    // First registration for this name
-    registry[name] = CudfFunctionSpec{{std::move(newEntry)}};
-  } else {
-    // Add new entry at the beginning - later registrations have higher priority
-    it->second.entries.insert(it->second.entries.begin(), std::move(newEntry));
-  }
-=======
   if (!overwrite && !registry[name].empty()) {
     return false;
   }
   registry[name].push_back(CudfFunctionSpec{std::move(factory), signatures});
->>>>>>> main
   return true;
 }
 
 void registerCudfFunctions(
     const std::vector<std::string>& aliases,
     CudfFunctionFactory factory,
-    const std::vector<exec::FunctionSignaturePtr>& signatures) {
+    const std::vector<exec::FunctionSignaturePtr>& signatures,
+    bool overwrite) {
   for (const auto& name : aliases) {
-    registerCudfFunction(name, factory, signatures);
+    registerCudfFunction(name, factory, signatures, overwrite);
   }
 }
 
@@ -2126,21 +1968,12 @@ std::shared_ptr<CudfFunction> createCudfFunction(
   if (it == registry.end()) {
     return nullptr;
   }
-<<<<<<< HEAD
-  // Iterate through entries and find one whose signature matches.
-  // Empty signatures means "matches any" (special forms like cast).
-  for (const auto& entry : it->second.entries) {
-    if (entry.signatures.empty() ||
-        matchCallAgainstSignatures(*expr, entry.signatures)) {
-      return entry.factory(name, expr);
-=======
   for (const auto& spec : it->second) {
     // Empty signatures matching must be allowed to handle
     // the special case of cast
     if (spec.signatures.empty() ||
         matchCallAgainstSignatures(*expr, spec.signatures)) {
       return spec.factory(name, expr);
->>>>>>> main
     }
   }
   return nullptr;
@@ -2190,8 +2023,7 @@ void registerSparkFunctions(const std::string& prefix) {
            .returnType("timestamp")
            .constantArgumentType("varchar")
            .argumentType("timestamp")
-           .build()},
-      DateTruncFunction::canEvaluate);
+           .build()});
 }
 
 void registerPrestoFunctions(const std::string& prefix) {
@@ -2222,8 +2054,7 @@ void registerPrestoFunctions(const std::string& prefix) {
            .returnType("date")
             .constantArgumentType("varchar")
             .argumentType("date")
-            .build()},
-      DateTruncFunction::canEvaluate);
+            .build()});
 }
 
 bool registerBuiltinFunctions(const std::string& prefix) {
@@ -2294,37 +2125,24 @@ bool registerBuiltinFunctions(const std::string& prefix) {
       "and",
       [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
         return std::make_shared<LogicalFunction>(
-<<<<<<< HEAD
-            expr, cudf::binary_operator::LOGICAL_AND);
-=======
             expr, cudf::binary_operator::NULL_LOGICAL_AND);
->>>>>>> main
       },
       {FunctionSignatureBuilder()
            .returnType("boolean")
            .argumentType("boolean")
-<<<<<<< HEAD
-           .argumentType("boolean")
-=======
            .variableArity("boolean")
->>>>>>> main
            .build()});
 
   registerCudfFunction(
       "or",
       [](const std::string&, const std::shared_ptr<velox::exec::Expr>& expr) {
         return std::make_shared<LogicalFunction>(
-<<<<<<< HEAD
-            expr, cudf::binary_operator::LOGICAL_OR);
-=======
             expr, cudf::binary_operator::NULL_LOGICAL_OR);
->>>>>>> main
       },
       {FunctionSignatureBuilder()
            .returnType("boolean")
            .argumentType("boolean")
-<<<<<<< HEAD
-           .argumentType("boolean")
+           .variableArity("boolean")
            .build()});
 
   registerCudfFunction(
@@ -2357,9 +2175,6 @@ bool registerBuiltinFunctions(const std::string& prefix) {
            .typeVariable("T")
            .returnType("boolean")
            .argumentType("T")
-=======
-           .variableArity("boolean")
->>>>>>> main
            .build()});
 
   registerCudfFunction(
@@ -2992,25 +2807,11 @@ bool FunctionExpression::canEvaluate(std::shared_ptr<velox::exec::Expr> expr) {
   if (it == registry.end()) {
     return false;
   }
-<<<<<<< HEAD
-  // Iterate through entries and find one whose signature matches.
-  // Empty signatures means "matches any" (special forms like cast).
-  for (const auto& entry : it->second.entries) {
-    if (!entry.signatures.empty() &&
-        !matchCallAgainstSignatures(*expr, entry.signatures)) {
-      continue;
-    }
-    if (entry.canEvaluate) {
-      return entry.canEvaluate(expr);
-    }
-    return true;
-=======
   for (const auto& spec : it->second) {
     if (spec.signatures.empty() ||
         matchCallAgainstSignatures(*expr, spec.signatures)) {
       return true;
     }
->>>>>>> main
   }
   return false;
 }

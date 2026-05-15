@@ -450,16 +450,6 @@ void CudfHashJoinProbe::initialize() {
   // Check if the filter expression spans both join sides (e.g., switch
   // expressions referencing columns from both probe and build). If so, we
   // cannot use AST-based filtering and must fall back to filterEvaluator_.
-  if (expressionSpansBothSides(exprs.exprs()[0], probeType_, buildType_)) {
-    LOG(INFO) << "Filter expression spans both join sides, using "
-                 "filterEvaluator_ instead of AST";
-    useAstFilter_ = false;
-    return;
-  }
-
-  // Check if the filter expression spans both join sides (e.g., switch
-  // expressions referencing columns from both probe and build). If so, we
-  // cannot use AST-based filtering and must fall back to filterEvaluator_.
   if (hasNonAstSubexprSpanningBothSides(
           exprs.exprs()[0], probeType_, buildType_)) {
     VLOG(1) << "Filter expression spans both join sides, using "

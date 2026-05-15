@@ -235,7 +235,7 @@ std::unique_ptr<cudf::column> decimalDivide(
 
   // Create output column with input null mask and perform division.
   auto out = cudf::make_fixed_width_column(
-      outputType, lhs.size(), std::move(finalMask), finalNullCount, stream, mr);
+      outputType, lhs.size(), std::move(nullMask), nullCount, stream, mr);
 
   if (lhs.type().id() == cudf::type_id::DECIMAL64) {
     if (outputType.id() == cudf::type_id::DECIMAL64) {
@@ -329,7 +329,7 @@ std::unique_ptr<cudf::column> decimalDivide(
 
   // Create output column and perform division.
   auto out = cudf::make_fixed_width_column(
-      outputType, rhs.size(), std::move(finalMask), finalNullCount, stream, mr);
+      outputType, rhs.size(), std::move(nullMask), nullCount, stream, mr);
 
   auto lhsValue = getDecimalScalarValue(lhs, stream);
 

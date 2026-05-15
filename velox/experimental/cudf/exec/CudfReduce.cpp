@@ -62,7 +62,7 @@ using facebook::velox::cudf_velox::ResolvedAggregateInfo;
       auto const aggRequest =                                          \
           cudf::make_##name##_aggregation<cudf::reduce_aggregation>(); \
       auto const cudfOutputType =                                      \
-          cudf::data_type(cudf_velox::veloxToCudfTypeId(outputType));  \
+          cudf_velox::veloxToCudfDataType(outputType);                 \
       auto const resultScalar = cudf::reduce(                          \
           input.column(inputIndex),                                    \
           *aggRequest,                                                 \
@@ -158,7 +158,7 @@ struct ReduceMeanAggregator : ReduceAggregator {
         auto const aggRequest =
             cudf::make_mean_aggregation<cudf::reduce_aggregation>();
         auto const cudfOutputType =
-            cudf::data_type(cudf_velox::veloxToCudfTypeId(outputType));
+            cudf_velox::veloxToCudfDataType(outputType);
         auto const resultScalar = cudf::reduce(
             input.column(inputIndex),
             *aggRequest,
@@ -174,9 +174,9 @@ struct ReduceMeanAggregator : ReduceAggregator {
         auto const sumType = rowType.childAt(0);
         auto const countType = rowType.childAt(1);
         auto const cudfSumType =
-            cudf::data_type(cudf_velox::veloxToCudfTypeId(sumType));
+            cudf_velox::veloxToCudfDataType(sumType);
         auto const cudfCountType =
-            cudf::data_type(cudf_velox::veloxToCudfTypeId(countType));
+            cudf_velox::veloxToCudfDataType(countType);
 
         // sum
         auto const aggRequest =
@@ -236,7 +236,7 @@ struct ReduceMeanAggregator : ReduceAggregator {
 
         // divide the sums by the counts
         auto const cudfOutputType =
-            cudf::data_type(cudf_velox::veloxToCudfTypeId(outputType));
+            cudf_velox::veloxToCudfDataType(outputType);
         return cudf::binary_operation(
             *sumResultCol,
             *countResultScalar,
