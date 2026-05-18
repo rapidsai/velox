@@ -20,3 +20,5 @@ updates:
       interval: weekly
     commit-message:
       prefix: 'build(ci): '
+    cooldown:
+      default-days: 7
