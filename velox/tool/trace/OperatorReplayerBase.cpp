@@ -18,26 +18,28 @@
 
 #include <utility>
 
+#include "velox/common/testutil/TempDirectoryPath.h"
 #include "velox/core/PlanNode.h"
 #include "velox/exec/PlanNodeStats.h"
 #include "velox/exec/TaskTraceReader.h"
-#include "velox/exec/TraceUtil.h"
 #include "velox/exec/tests/utils/AssertQueryBuilder.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
-#include "velox/exec/tests/utils/TempDirectoryPath.h"
+#include "velox/exec/trace/TraceUtil.h"
 #include "velox/tool/trace/OperatorReplayerBase.h"
 
 #include "velox/tool/trace/TraceReplayTaskRunner.h"
 
 using namespace facebook::velox;
+using namespace facebook::velox::common::testutil;
 
 namespace facebook::velox::tool::trace {
 OperatorReplayerBase::OperatorReplayerBase(
-    std::string traceDir,
-    std::string queryId,
-    std::string taskId,
-    std::string nodeId,
-    std::string nodeName,
+    const std::string& traceDir,
+    const std::string& queryId,
+    const std::string& taskId,
+    const std::string& nodeId,
+    const std::string& nodeName,
+    const std::string& spillBaseDir,
     const std::string& driverIds,
     uint64_t queryCapacity,
     folly::Executor* executor)
@@ -48,6 +50,7 @@ OperatorReplayerBase::OperatorReplayerBase(
       taskTraceDir_(
           exec::trace::getTaskTraceDirectory(traceDir, queryId_, taskId_)),
       nodeTraceDir_(exec::trace::getNodeTraceDirectory(taskTraceDir_, nodeId_)),
+      spillBaseDir_(spillBaseDir),
       fs_(filesystems::getFileSystem(taskTraceDir_, nullptr)),
       pipelineIds_(exec::trace::listPipelineIds(nodeTraceDir_, fs_)),
       driverIds_(
@@ -62,7 +65,7 @@ OperatorReplayerBase::OperatorReplayerBase(
   VELOX_USER_CHECK(!taskId_.empty());
   VELOX_USER_CHECK(!nodeId_.empty());
   VELOX_USER_CHECK(!nodeName_.empty());
-  if (nodeName_ == "HashJoin") {
+  if (nodeName_ == "HashJoin" || nodeName_ == "MergeJoin") {
     VELOX_USER_CHECK_EQ(pipelineIds_.size(), 2);
   } else {
     VELOX_USER_CHECK_EQ(pipelineIds_.size(), 1);
@@ -72,31 +75,39 @@ OperatorReplayerBase::OperatorReplayerBase(
   const auto taskMetaReader = exec::trace::TaskTraceMetadataReader(
       taskTraceDir_, memory::MemoryManager::getInstance()->tracePool());
   queryConfigs_ = taskMetaReader.queryConfigs();
+  LOG(INFO) << "Query configs:\n";
+  for (const auto& [key, value] : queryConfigs_) {
+    LOG(INFO) << fmt::format("\t{}: {}", key, value);
+  }
   connectorConfigs_ = taskMetaReader.connectorProperties();
   planFragment_ = taskMetaReader.queryPlan();
   queryConfigs_[core::QueryConfig::kQueryTraceEnabled] = "false";
 }
 
-RowVectorPtr OperatorReplayerBase::run(bool copyResults) {
+RowVectorPtr OperatorReplayerBase::run(
+    bool copyResults,
+    bool cursorCopyResult) {
   auto queryCtx = createQueryCtx();
-  std::shared_ptr<exec::test::TempDirectoryPath> spillDirectory;
-  if (queryCtx->queryConfig().spillEnabled()) {
-    spillDirectory = exec::test::TempDirectoryPath::create();
+  std::shared_ptr<TempDirectoryPath> localSpillDirectory;
+  if (queryCtx->queryConfig().spillEnabled() && spillBaseDir_.empty()) {
+    localSpillDirectory = TempDirectoryPath::create();
   }
 
   TraceReplayTaskRunner traceTaskRunner(createPlan(), std::move(queryCtx));
   auto [task, result] =
       traceTaskRunner.maxDrivers(driverIds_.size())
-          .spillDirectory(spillDirectory ? spillDirectory->getPath() : "")
+          .spillDirectory(
+              localSpillDirectory != nullptr ? localSpillDirectory->getPath()
+                                             : spillBaseDir_)
+          .cursorCopyResult(cursorCopyResult)
           .run(copyResults);
   printStats(task);
   return result;
 }
 
 core::PlanNodePtr OperatorReplayerBase::createPlan() {
-  const auto* replayNode = core::PlanNode::findFirstNode(
-      planFragment_.get(),
-      [this](const core::PlanNode* node) { return node->id() == nodeId_; });
+  const auto* replayNode =
+      core::PlanNode::findNodeById(planFragment_.get(), nodeId_);
 
   if (replayNode->sources().empty()) {
     return exec::test::PlanBuilder()
@@ -147,12 +158,12 @@ OperatorReplayerBase::replayNodeFactory(const core::PlanNode* node) const {
 
 void OperatorReplayerBase::printStats(
     const std::shared_ptr<exec::Task>& task) const {
-  const auto planStats = exec::toPlanStats(task->taskStats());
-  const auto& stats = planStats.at(replayPlanNodeId_);
-  for (const auto& [name, operatorStats] : stats.operatorStats) {
-    LOG(INFO) << "Stats of replaying operator " << name << " : "
-              << operatorStats->toString();
-  }
+  const auto taskStats = exec::toPlanStats(task->taskStats());
+  const auto& nodeStats = taskStats.at(replayPlanNodeId_);
+  LOG(INFO) << "Stats of replaying execution:";
+  LOG(INFO) << nodeStats.toString(
+      /*includeInputStats=*/true,
+      /*includeRuntimeStats=*/true);
   LOG(INFO) << "Memory usage: " << task->pool()->treeMemoryUsage(false);
 }
 } // namespace facebook::velox::tool::trace

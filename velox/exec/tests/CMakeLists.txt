@@ -19,6 +19,11 @@ add_executable(
   AggregateCompanionSignaturesTest.cpp
   DummyAggregateFunction.cpp
 )
+velox_add_test_headers(
+  aggregate_companion_functions_test
+  DummyAggregateFunction.h
+  PrestoQueryRunnerIntermediateTypeTransformTestBase.h
+)
 
 add_test(
   NAME aggregate_companion_functions_test
@@ -36,81 +41,175 @@ target_link_libraries(
   GTest::gtest_main
 )
 
-add_executable(
-  velox_exec_test
-  AddressableNonNullValueListTest.cpp
-  AggregationTest.cpp
-  AggregateFunctionRegistryTest.cpp
-  ArrowStreamTest.cpp
-  AssignUniqueIdTest.cpp
-  AsyncConnectorTest.cpp
-  ConcatFilesSpillMergeStreamTest.cpp
-  ContainerRowSerdeTest.cpp
-  ColumnStatsCollectorTest.cpp
-  CustomJoinTest.cpp
-  EnforceSingleRowTest.cpp
-  ExchangeClientTest.cpp
-  ExpandTest.cpp
-  FilterProjectTest.cpp
-  FilterToExpressionTest.cpp
-  FunctionResolutionTest.cpp
-  HashBitRangeTest.cpp
-  HashJoinBridgeTest.cpp
-  HashJoinTest.cpp
-  HashPartitionFunctionTest.cpp
-  HashTableTest.cpp
+# Sources are ordered via greedy bin-packing by measured EC2 execution time.
+# With VELOX_TESTS_PER_GROUP=10, CMake takes files positionally in batches of
+# 10 (files 1-10 = group0, 11-20 = group1, etc.).
+#
+# Measured per-file EC2 timings (sequential, 8-core, 30GB):
+#   IndexLookupJoinTest 783s, MultiFragmentTest 599s,
+#   HashJoinTestExtra ~585s, SpillerTest 584s, HashJoinTest ~575s,
+#   TableWriterTest 225s, TableScanTest 189s, IndexLookupJoinTestExtra 188s,
+#   MergeJoinTest 111s, AggregationTest 105s, OutputBufferManagerTest 98s,
+#   ScaleWriterLocalPartitionTest 96s, OrderByTest 71s, TopNRowNumberTest 64s,
+#   HashTableTest 60s, StreamingAggregationTest 58s, ExchangeClientTest 54s,
+#   RowNumberTest 42s.
+#
+# Max group ~784s (bounded by IndexLookupJoinTest.cpp).
+set(
+  VELOX_EXEC_TEST_SOURCES
+  # group0 (~784s): IndexLookupJoinTest 783 + 9 lightweight
   IndexLookupJoinTest.cpp
-  LimitTest.cpp
-  LocalPartitionTest.cpp
-  Main.cpp
-  MarkDistinctTest.cpp
+  ConcatFilesSpillMergeStreamTest.cpp
+  MixedUnionWithTableScanTest.cpp
   MemoryReclaimerTest.cpp
-  MergeJoinTest.cpp
-  MergeTest.cpp
-  MergerTest.cpp
-  MultiFragmentTest.cpp
-  NestedLoopJoinTest.cpp
-  OrderByTest.cpp
-  OperatorTraceTest.cpp
-  OutputBufferManagerTest.cpp
-  ParallelProjectTest.cpp
-  PartitionedOutputTest.cpp
-  PlanNodeSerdeTest.cpp
-  PlanNodeToStringTest.cpp
-  PlanNodeToSummaryStringTest.cpp
-  PrefixSortTest.cpp
-  PrintPlanWithStatsTest.cpp
-  ProbeOperatorStateTest.cpp
+  EnforceDistinctTest.cpp
   TraceUtilTest.cpp
-  RoundRobinPartitionFunctionTest.cpp
-  RowContainerTest.cpp
-  RowNumberTest.cpp
+  HashPartitionFunctionTest.cpp
+  SpatialIndexTest.cpp
+  ValuesTest.cpp
+  ParallelProjectTest.cpp
+  # group1 (~599s): MultiFragmentTest 599 + 9 lightweight
+  MultiFragmentTest.cpp
+  EnforceSingleRowTest.cpp
+  FilterToExpressionTest.cpp
   ScaledScanControllerTest.cpp
-  ScaleWriterLocalPartitionTest.cpp
-  SortBufferTest.cpp
-  SpillerTest.cpp
-  SpillTest.cpp
+  HilbertIndexTest.cpp
+  OperatorTraceTest.cpp
+  LimitTest.cpp
   SplitListenerTest.cpp
+  AddressableNonNullValueListTest.cpp
+  ArrowStreamTest.cpp
+  # group2 (~585s): HashJoinTestExtra ~585 + 9 lightweight
+  HashJoinTestExtra.cpp
+  AggregateFunctionRegistryTest.cpp
+  RoundRobinPartitionFunctionTest.cpp
+  ColumnStatsCollectorTest.cpp
+  MixedUnionTest.cpp
+  ExpandTest.cpp
+  FunctionResolutionTest.cpp
+  SpillStatsTest.cpp
+  MarkSortedTest.cpp
+  PartitionedOutputTest.cpp
+  # group3 (~584s): SpillerTest 584 + 9 lightweight
+  SpillerTest.cpp
+  PlanNodeToSummaryStringTest.cpp
+  CountingJoinTest.cpp
+  CustomJoinTest.cpp
+  TaskListenerTest.cpp
   SplitTest.cpp
   SqlTest.cpp
-  StreamingAggregationTest.cpp
-  TableScanTest.cpp
-  TableWriterTest.cpp
-  TaskListenerTest.cpp
-  ThreadDebugInfoTest.cpp
-  TopNRowNumberTest.cpp
-  TopNTest.cpp
-  UnnestTest.cpp
-  UnorderedStreamReaderTest.cpp
-  ValuesTest.cpp
-  VectorHasherTest.cpp
   WindowFunctionRegistryTest.cpp
+  StreamingEnforceDistinctTest.cpp
+  HashBitRangeTest.cpp
+  # group4 (~575s): HashJoinTest ~575 + 9 lightweight
+  HashJoinTest.cpp
+  SpillTest.cpp
   WindowTest.cpp
+  PrefixSortTest.cpp
+  MergerTest.cpp
+  LocalPartitionTest.cpp
+  PrintPlanWithStatsTest.cpp
+  ProbeOperatorStateTest.cpp
+  MarkDistinctTest.cpp
+  MergeTest.cpp
+  # group5 (~445s): TableWriterTest 225 + OutputBufMgr 98
+  # + TopNRowNumber 64 + StreamingAgg 58
+  TableWriterTest.cpp
+  OutputBufferManagerTest.cpp
+  TopNRowNumberTest.cpp
+  StreamingAggregationTest.cpp
+  ContainerRowSerdeTest.cpp
+  RowContainerTest.cpp
+  TopNTest.cpp
   WriterFuzzerUtilTest.cpp
+  PlanNodeStatsTest.cpp
+  ThreadDebugInfoTest.cpp
+  # group6 (~467s): TableScanTest 189 + AggregationTest 105
+  # + OrderBy 71 + HashTable 60 + RowNumber 42
+  TableScanTest.cpp
+  AggregationTest.cpp
+  OrderByTest.cpp
+  HashTableCacheTest.cpp
+  HashTableTest.cpp
+  RowNumberTest.cpp
+  UnnestTest.cpp
+  PlanNodeSerdeTest.cpp
+  HashJoinBridgeTest.cpp
+  SortBufferTest.cpp
+  VectorHasherTest.cpp
+  # group7 (~449s): IndexLookupJoinTestExtra 188
+  # + MergeJoin 111 + ScaleWriter 96 + Exchange 54
+  IndexLookupJoinTestExtra.cpp
+  MergeJoinTest.cpp
+  ScaleWriterLocalPartitionTest.cpp
+  ExchangeClientTest.cpp
+  NestedLoopJoinTest.cpp
+  UnorderedStreamReaderTest.cpp
+  PlanNodeToStringTest.cpp
+  AssignUniqueIdTest.cpp
+  FilterProjectTest.cpp
+  AsyncConnectorTest.cpp
+)
+
+set(
+  VELOX_EXEC_TEST_DEPS
+  velox_aggregates
+  velox_dwio_common
+  velox_dwio_common_exception
+  velox_dwio_common_test_utils
+  velox_dwio_orc_reader
+  velox_dwio_parquet_reader
+  velox_dwio_parquet_writer
+  velox_exec
+  velox_exec_test_lib
+  velox_file_test_utils
+  velox_functions_json
+  velox_functions_lib
+  velox_functions_prestosql
+  velox_functions_test_lib
+  velox_hive_connector
+  velox_memory
+  velox_serialization
+  velox_test_util
+  velox_type
+  velox_type_test_lib
+  velox_trace
+  velox_vector
+  velox_vector_fuzzer
+  velox_writer_fuzzer
+  velox_window
+  Boost::atomic
+  Boost::context
+  Boost::date_time
+  Boost::filesystem
+  Boost::program_options
+  Boost::thread
+  Boost::system
+  GTest::gtest
+  GTest::gtest_main
+  GTest::gmock
+  Folly::folly
+  gflags::gflags
+  glog::glog
+  fmt::fmt
+)
+
+velox_add_grouped_tests(
+  PREFIX velox_exec_test
+  SOURCES ${VELOX_EXEC_TEST_SOURCES}
+  DEPS ${VELOX_EXEC_TEST_DEPS}
+  EXTRA_SOURCES Main.cpp
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 if(VELOX_ENABLE_GEO)
-  target_sources(velox_exec_test PRIVATE SpatialJoinTest.cpp)
+  add_executable(velox_exec_SpatialJoinTest SpatialJoinTest.cpp Main.cpp)
+  add_test(
+    NAME velox_exec_SpatialJoinTest
+    COMMAND velox_exec_SpatialJoinTest
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  )
+  target_link_libraries(velox_exec_SpatialJoinTest ${VELOX_EXEC_TEST_DEPS})
 endif()
 
 add_executable(
@@ -128,58 +227,10 @@ add_executable(
   TreeOfLosersTest.cpp
 )
 
-add_test(NAME velox_exec_test COMMAND velox_exec_test WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-
-# TODO: Revert back to 3000 once is fixed.
-# https://github.com/facebookincubator/velox/issues/13879
-set_tests_properties(velox_exec_test PROPERTIES TIMEOUT 6000)
-
 add_test(
   NAME velox_exec_infra_test
   COMMAND velox_exec_infra_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-target_link_libraries(
-  velox_exec_test
-  velox_aggregates
-  velox_dwio_common
-  velox_dwio_common_exception
-  velox_dwio_common_test_utils
-  velox_dwio_parquet_reader
-  velox_dwio_parquet_writer
-  velox_exec
-  velox_exec_test_lib
-  velox_file_test_utils
-  velox_functions_json
-  velox_functions_lib
-  velox_functions_prestosql
-  velox_functions_test_lib
-  velox_hive_connector
-  velox_memory
-  velox_serialization
-  velox_test_util
-  velox_type
-  velox_type_test_lib
-  velox_vector
-  velox_vector_fuzzer
-  velox_writer_fuzzer
-  velox_window
-  Boost::atomic
-  Boost::context
-  Boost::date_time
-  Boost::filesystem
-  Boost::program_options
-  Boost::regex
-  Boost::thread
-  Boost::system
-  GTest::gtest
-  GTest::gtest_main
-  GTest::gmock
-  Folly::folly
-  gflags::gflags
-  glog::glog
-  fmt::fmt
 )
 
 target_link_libraries(
@@ -208,7 +259,6 @@ target_link_libraries(
   Boost::date_time
   Boost::filesystem
   Boost::program_options
-  Boost::regex
   Boost::thread
   Boost::system
   GTest::gtest
@@ -220,22 +270,23 @@ target_link_libraries(
   fmt::fmt
 )
 
-add_executable(
-  velox_exec_util_test
-  Main.cpp
+# Split velox_exec_util_test into individual test binaries for parallel execution.
+# Each test depends on the shared base class PrestoQueryRunnerIntermediateTypeTransformTestBase.cpp.
+set(
+  VELOX_EXEC_UTIL_TEST_SOURCES
   PrestoQueryRunnerHyperLogLogTransformTest.cpp
-  PrestoQueryRunnerIntermediateTypeTransformTestBase.cpp
   PrestoQueryRunnerTDigestTransformTest.cpp
   PrestoQueryRunnerQDigestTransformTest.cpp
+  PrestoQueryRunnerKHyperLogLogTransformTest.cpp
+  PrestoQueryRunnerSetDigestTransformTest.cpp
   PrestoQueryRunnerJsonTransformTest.cpp
   PrestoQueryRunnerIntervalTransformTest.cpp
+  PrestoQueryRunnerTimeTransformTest.cpp
   PrestoQueryRunnerTimestampWithTimeZoneTransformTest.cpp
 )
 
-add_test(velox_exec_util_test velox_exec_util_test)
-
-target_link_libraries(
-  velox_exec_util_test
+set(
+  VELOX_EXEC_UTIL_TEST_DEPS
   velox_fuzzer_util
   velox_exec_test_lib
   velox_functions_test_lib
@@ -243,6 +294,13 @@ target_link_libraries(
   velox_presto_types_fuzzer_utils
   GTest::gtest
   GTest::gtest_main
+)
+
+velox_add_grouped_tests(
+  PREFIX velox_exec_util_test
+  SOURCES ${VELOX_EXEC_UTIL_TEST_SOURCES}
+  DEPS ${VELOX_EXEC_UTIL_TEST_DEPS}
+  EXTRA_SOURCES PrestoQueryRunnerIntermediateTypeTransformTestBase.cpp Main.cpp
 )
 
 add_executable(velox_in_10_min_demo VeloxIn10MinDemo.cpp)
@@ -264,6 +322,7 @@ add_executable(
   TableEvolutionFuzzerTest.cpp
   TableEvolutionFuzzer.cpp
 )
+velox_add_test_headers(velox_table_evolution_fuzzer_test TableEvolutionFuzzer.h)
 
 target_link_libraries(
   velox_table_evolution_fuzzer_test
@@ -273,7 +332,7 @@ target_link_libraries(
   velox_fuzzer_util
   velox_functions_prestosql
   velox_exec_test_lib
-  velox_temp_path
+  velox_test_util
   velox_vector_fuzzer
   GTest::gtest
   GTest::gtest_main
@@ -297,7 +356,14 @@ target_link_libraries(
   GTest::gtest_main
 )
 
-add_library(velox_simple_aggregate SimpleAverageAggregate.cpp SimpleArrayAggAggregate.cpp)
+add_library(
+  velox_simple_aggregate
+  SimpleAverageAggregate.cpp
+  SimpleArrayAggAggregate.cpp
+  SimpleVariadicArrayAggAggregate.cpp
+  SimpleVariadicSumAggregate.cpp
+)
+velox_add_test_headers(velox_simple_aggregate SimpleAggregateFunctionsRegistration.h)
 
 target_link_libraries(
   velox_simple_aggregate
@@ -324,6 +390,12 @@ if(VELOX_ENABLE_BENCHMARKS)
     velox_spiller_join_benchmark_base
     JoinSpillInputBenchmarkBase.cpp
     SpillerBenchmarkBase.cpp
+  )
+  velox_add_test_headers(
+    velox_spiller_join_benchmark_base
+    AggregateSpillBenchmarkBase.h
+    JoinSpillInputBenchmarkBase.h
+    SpillerBenchmarkBase.h
   )
   target_link_libraries(
     velox_spiller_join_benchmark_base
@@ -371,14 +443,6 @@ if(VELOX_ENABLE_BENCHMARKS)
   )
 endif()
 
-add_executable(cpr_http_client_test CprHttpClientTest.cpp)
-add_test(
-  NAME cpr_http_client_test
-  COMMAND cpr_http_client_test
-  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-)
-target_link_libraries(cpr_http_client_test cpr::cpr GTest::gtest GTest::gtest_main)
-
 add_executable(velox_driver_test OperatorReplacementTest.cpp Main.cpp)
 add_test(
   NAME velox_driver_test
@@ -387,3 +451,13 @@ add_test(
 )
 
 target_link_libraries(velox_driver_test velox_exec velox_exec_test_lib GTest::gtest)
+
+add_executable(velox_adaptive_prefetch_test AdaptivePrefetchTest.cpp)
+add_test(
+  NAME velox_adaptive_prefetch_test
+  COMMAND velox_adaptive_prefetch_test
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(velox_adaptive_prefetch_test GTest::gtest GTest::gtest_main)
+
+velox_add_library(velox_aggregate_registry_util INTERFACE HEADERS AggregateRegistryTestUtil.h)

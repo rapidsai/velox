@@ -216,7 +216,7 @@ void PrestoQueryRunnerToSqlPlanNodeVisitor::visit(
   // )
   // AS SELECT * FROM t_<id>
   std::stringstream sql;
-  sql << "CREATE TABLE tmp_write";
+  sql << "CREATE TABLE " << ReferenceQueryRunner::getWriteTableName();
   std::vector<std::string> partitionKeys;
   for (auto i = 0; i < node.columnNames().size(); ++i) {
     if (insertTableHandle->inputColumns()[i]->isPartitionKey()) {
@@ -291,7 +291,8 @@ void PrestoQueryRunnerToSqlPlanNodeVisitor::visit(
     sql << inputType->nameOf(i);
   }
 
-  sql << ", row_number() OVER (";
+  sql << ", " << core::TopNRowNumberNode::rankFunctionName(node.rankFunction())
+      << "() OVER (";
 
   const auto& partitionKeys = node.partitionKeys();
   if (!partitionKeys.empty()) {

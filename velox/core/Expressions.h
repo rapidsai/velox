@@ -15,6 +15,8 @@
  */
 #pragma once
 
+#include <folly/hash/Hash.h>
+
 #include "velox/common/Casts.h"
 #include "velox/common/base/Exceptions.h"
 #include "velox/core/ITypedExpr.h"
@@ -28,7 +30,7 @@ class InputTypedExpr : public ITypedExpr {
       : ITypedExpr{ExprKind::kInput, std::move(type)} {}
 
   bool operator==(const ITypedExpr& other) const final {
-    return is_instance_of<InputTypedExpr>(&other);
+    return other.isInputKind();
   }
 
   std::string toString() const override {
@@ -36,7 +38,8 @@ class InputTypedExpr : public ITypedExpr {
   }
 
   size_t localHash() const override {
-    static const size_t kBaseHash = std::hash<const char*>()("InputTypedExpr");
+    static const size_t kBaseHash =
+        folly::hasher<std::string_view>()("InputTypedExpr");
     return kBaseHash;
   }
 
@@ -61,7 +64,13 @@ class ConstantTypedExpr : public ITypedExpr {
   // Variant::null() value is supported.
   ConstantTypedExpr(TypePtr type, Variant value)
       : ITypedExpr{ExprKind::kConstant, std::move(type)},
-        value_{std::move(value)} {}
+        value_{std::move(value)} {
+    VELOX_CHECK(
+        value_.isTypeCompatible(ITypedExpr::type()),
+        "Expression type {} does not match variant type {}",
+        ITypedExpr::type()->toString(),
+        value_.inferType()->toString());
+  }
 
   // Creates constant expression of scalar or complex type. The value comes from
   // index zero.
@@ -108,6 +117,10 @@ class ConstantTypedExpr : public ITypedExpr {
     return BaseVector::createConstant(type(), value_, 1, pool);
   }
 
+  /// Returns value of boolean expression, std::nullopt for null booleans.
+  /// Throws an error if expression is not of boolean type.
+  std::optional<bool> toBool() const;
+
   const std::vector<TypedExprPtr>& inputs() const {
     static const std::vector<TypedExprPtr> kEmpty{};
     return kEmpty;
@@ -140,6 +153,9 @@ class ConstantTypedExpr : public ITypedExpr {
   folly::dynamic serialize() const override;
 
   static TypedExprPtr create(const folly::dynamic& obj, void* context);
+
+  /// Returns a NULL constant expression of given type.
+  static TypedExprPtr makeNull(const TypePtr& type);
 
  private:
   const Variant value_;
@@ -213,8 +229,9 @@ class CallTypedExpr : public ITypedExpr {
   std::string toString() const override;
 
   size_t localHash() const override {
-    static const size_t kBaseHash = std::hash<const char*>()("CallTypedExpr");
-    return bits::hashMix(kBaseHash, std::hash<std::string>()(name_));
+    static const size_t kBaseHash =
+        folly::hasher<std::string_view>()("CallTypedExpr");
+    return bits::hashMix(kBaseHash, folly::hasher<std::string_view>()(name_));
   }
 
   void accept(
@@ -237,10 +254,10 @@ class CallTypedExpr : public ITypedExpr {
       return false;
     }
     return std::equal(
-        this->inputs().begin(),
-        this->inputs().end(),
-        other.inputs().begin(),
-        other.inputs().end(),
+        this->inputs().cbegin(),
+        this->inputs().cend(),
+        other.inputs().cbegin(),
+        other.inputs().cend(),
         [](const auto& p1, const auto& p2) { return *p1 == *p2; });
   }
 
@@ -268,7 +285,7 @@ class FieldAccessTypedExpr : public ITypedExpr {
   FieldAccessTypedExpr(TypePtr type, TypedExprPtr input, std::string name)
       : ITypedExpr{ExprKind::kFieldAccess, std::move(type), {std::move(input)}},
         name_(std::move(name)),
-        isInputColumn_(is_instance_of<InputTypedExpr>(inputs()[0].get())) {}
+        isInputColumn_(inputs()[0]->isInputKind()) {}
 
   const std::string& name() const {
     return name_;
@@ -282,8 +299,8 @@ class FieldAccessTypedExpr : public ITypedExpr {
 
   size_t localHash() const override {
     static const size_t kBaseHash =
-        std::hash<const char*>()("FieldAccessTypedExpr");
-    return bits::hashMix(kBaseHash, std::hash<std::string>()(name_));
+        folly::hasher<std::string_view>()("FieldAccessTypedExpr");
+    return bits::hashMix(kBaseHash, folly::hasher<std::string_view>()(name_));
   }
 
   void accept(
@@ -306,10 +323,10 @@ class FieldAccessTypedExpr : public ITypedExpr {
       return false;
     }
     return std::equal(
-        this->inputs().begin(),
-        this->inputs().end(),
-        other.inputs().begin(),
-        other.inputs().end(),
+        this->inputs().cbegin(),
+        this->inputs().cend(),
+        other.inputs().cbegin(),
+        other.inputs().cend(),
         [](const auto& p1, const auto& p2) { return *p1 == *p2; });
   }
 
@@ -338,7 +355,7 @@ class DereferenceTypedExpr : public ITypedExpr {
         index_(index) {
     // Make sure this isn't being used to access a top level column.
     VELOX_USER_CHECK(
-        !is_instance_of<InputTypedExpr>(inputs()[0]),
+        !inputs()[0]->isInputKind(),
         "DereferenceTypedExpr select a subfeild cannot be used to access a top level column");
   }
 
@@ -360,12 +377,16 @@ class DereferenceTypedExpr : public ITypedExpr {
   }
 
   std::string toString() const override {
-    return fmt::format("{}[{}]", inputs()[0]->toString(), name());
+    const auto& fieldName = name();
+    if (fieldName.empty()) {
+      return fmt::format("{}[{}]", inputs()[0]->toString(), index_);
+    }
+    return fmt::format("{}[{}]", inputs()[0]->toString(), fieldName);
   }
 
   size_t localHash() const override {
     static const size_t kBaseHash =
-        std::hash<const char*>()("DereferenceTypedExpr");
+        folly::hasher<std::string_view>()("DereferenceTypedExpr");
     return bits::hashMix(kBaseHash, index_);
   }
 
@@ -386,10 +407,10 @@ class DereferenceTypedExpr : public ITypedExpr {
       return false;
     }
     return std::equal(
-        this->inputs().begin(),
-        this->inputs().end(),
-        other.inputs().begin(),
-        other.inputs().end(),
+        this->inputs().cbegin(),
+        this->inputs().cend(),
+        other.inputs().cbegin(),
+        other.inputs().cend(),
         [](const auto& p1, const auto& p2) { return *p1 == *p2; });
   }
 
@@ -420,7 +441,8 @@ class ConcatTypedExpr : public ITypedExpr {
   std::string toString() const override;
 
   size_t localHash() const override {
-    static const size_t kBaseHash = std::hash<const char*>()("ConcatTypedExpr");
+    static const size_t kBaseHash =
+        folly::hasher<std::string_view>()("ConcatTypedExpr");
     return kBaseHash;
   }
 
@@ -441,10 +463,10 @@ class ConcatTypedExpr : public ITypedExpr {
       return false;
     }
     return std::equal(
-        this->inputs().begin(),
-        this->inputs().end(),
-        other.inputs().begin(),
-        other.inputs().end(),
+        this->inputs().cbegin(),
+        this->inputs().cend(),
+        other.inputs().cbegin(),
+        other.inputs().cend(),
         [](const auto& p1, const auto& p2) { return *p1 == *p2; });
   }
 
@@ -484,7 +506,8 @@ class LambdaTypedExpr : public ITypedExpr {
   }
 
   size_t localHash() const override {
-    static const size_t kBaseHash = std::hash<const char*>()("LambdaTypedExpr");
+    static const size_t kBaseHash =
+        folly::hasher<std::string_view>()("LambdaTypedExpr");
     return bits::hashMix(kBaseHash, body_->hash());
   }
 
@@ -522,7 +545,7 @@ using LambdaTypedExprPtr = std::shared_ptr<const LambdaTypedExpr>;
 class CastTypedExpr : public ITypedExpr {
  public:
   /// @param type Type to convert to. This is the return type of the CAST
-  /// expresion.
+  /// expression.
   /// @param input Single input. The type of input is referred to as from-type
   /// and expected to be different from to-type.
   /// @param isTryCast Whether this expression is used for `try_cast`.
@@ -548,7 +571,8 @@ class CastTypedExpr : public ITypedExpr {
   std::string toString() const override;
 
   size_t localHash() const override {
-    static const size_t kBaseHash = std::hash<const char*>()("CastTypedExpr");
+    static const size_t kBaseHash =
+        folly::hasher<std::string_view>()("CastTypedExpr");
     return bits::hashMix(kBaseHash, std::hash<bool>()(isTryCast_));
   }
 
@@ -586,12 +610,58 @@ class CastTypedExpr : public ITypedExpr {
 
 using CastTypedExprPtr = std::shared_ptr<const CastTypedExpr>;
 
+/// NULLIF(a, b) expression. Returns NULL if a equals b, otherwise returns a.
+///
+/// The comparison uses the common supertype of a and b, but the return type is
+/// a's original type. The common type is stored as metadata and used internally
+/// to cast both inputs for comparison only.
+class NullIfTypedExpr : public ITypedExpr {
+ public:
+  /// @param value The first argument. Its type determines the return type.
+  /// @param comparand The second argument to compare against.
+  /// @param commonType The common supertype used to cast both inputs for
+  /// comparison.
+  NullIfTypedExpr(
+      TypedExprPtr value,
+      TypedExprPtr comparand,
+      TypePtr commonType);
+
+  /// Returns the common supertype used for comparison.
+  const TypePtr& commonType() const {
+    return commonType_;
+  }
+
+  TypedExprPtr rewriteInputNames(
+      const std::unordered_map<std::string, TypedExprPtr>& mapping)
+      const override;
+
+  std::string toString() const override;
+
+  size_t localHash() const override;
+
+  void accept(
+      const ITypedExprVisitor& visitor,
+      ITypedExprVisitorContext& context) const override;
+
+  bool operator==(const ITypedExpr& other) const override;
+
+  folly::dynamic serialize() const override;
+
+  static TypedExprPtr create(const folly::dynamic& obj, void* context);
+
+ private:
+  // The common supertype used to cast both inputs for comparison.
+  const TypePtr commonType_;
+};
+
+using NullIfTypedExprPtr = std::shared_ptr<const NullIfTypedExpr>;
+
 /// A collection of convenience methods for working with expressions.
 class TypedExprs {
  public:
   /// Returns true if 'expr' is a field access expression.
   static bool isFieldAccess(const TypedExprPtr& expr) {
-    return is_instance_of<FieldAccessTypedExpr>(expr);
+    return expr->isFieldAccessKind();
   }
 
   /// Returns 'expr' as FieldAccessTypedExprPtr or null if not field access
@@ -602,7 +672,7 @@ class TypedExprs {
 
   /// Returns true if 'expr' is a constant expression.
   static bool isConstant(const TypedExprPtr& expr) {
-    return is_instance_of<ConstantTypedExpr>(expr);
+    return expr->isConstantKind();
   }
 
   /// Returns 'expr' as ConstantTypedExprPtr or null if not a constant
@@ -613,7 +683,7 @@ class TypedExprs {
 
   /// Returns true if 'expr' is a lambda expression.
   static bool isLambda(const TypedExprPtr& expr) {
-    return is_instance_of<LambdaTypedExpr>(expr);
+    return expr->isLambdaKind();
   }
 
   /// Returns 'expr' as LambdaTypedExprPtr or null if not a lambda expression.
@@ -656,6 +726,9 @@ class ITypedExprVisitor {
       const = 0;
 
   virtual void visit(const LambdaTypedExpr& expr, ITypedExprVisitorContext& ctx)
+      const = 0;
+
+  virtual void visit(const NullIfTypedExpr& expr, ITypedExprVisitorContext& ctx)
       const = 0;
 
  protected:
@@ -707,6 +780,11 @@ class DefaultTypedExprVisitor : public ITypedExprVisitor {
   }
 
   void visit(const LambdaTypedExpr& expr, ITypedExprVisitorContext& ctx)
+      const override {
+    visitInputs(expr, ctx);
+  }
+
+  void visit(const NullIfTypedExpr& expr, ITypedExprVisitorContext& ctx)
       const override {
     visitInputs(expr, ctx);
   }

@@ -16,6 +16,7 @@
 #include <string>
 #include "velox/functions/prestosql/IPAddressFunctions.h"
 #include "velox/functions/prestosql/UuidFunctions.h"
+#include "velox/functions/prestosql/types/P4HyperLogLogRegistration.h"
 
 namespace facebook::velox::functions {
 
@@ -29,8 +30,10 @@ extern void registerComparisonFunctions(const std::string& prefix);
 extern void registerDateTimeFunctions(const std::string& prefix);
 extern void registerGeneralFunctions(const std::string& prefix);
 extern void registerHyperLogFunctions(const std::string& prefix);
+extern void registerKHyperLogLogFunctions(const std::string& prefix);
 extern void registerTDigestFunctions(const std::string& prefix);
 extern void registerQDigestFunctions(const std::string& prefix);
+extern void registerSetDigestFunctions(const std::string& prefix);
 extern void registerSfmSketchFunctions(const std::string& prefix);
 extern void registerEnumFunctions(const std::string& prefix);
 extern void registerIntegerFunctions(const std::string& prefix);
@@ -47,6 +50,10 @@ extern void registerMapAllowingDuplicates(
 extern void registerBingTileFunctions(const std::string& prefix);
 #ifdef VELOX_ENABLE_GEO
 extern void registerGeometryFunctions(const std::string& prefix);
+extern void registerSphericalGeographyFunctions();
+#endif
+#ifdef VELOX_ENABLE_GEO
+extern void registerS2Functions(const std::string& prefix);
 #endif
 extern void registerInternalArrayFunctions();
 
@@ -113,6 +120,14 @@ void registerBingTileFunctions(const std::string& prefix) {
 void registerGeometryFunctions(const std::string& prefix) {
   functions::registerGeometryFunctions(prefix);
 }
+
+void registerSphericalGeographyFunctions() {
+  functions::registerSphericalGeographyFunctions();
+}
+
+void registerS2Functions(const std::string& prefix) {
+  functions::registerS2Functions(prefix);
+}
 #endif
 
 void registerGeneralFunctions(const std::string& prefix) {
@@ -140,6 +155,7 @@ void registerBitwiseFunctions(const std::string& prefix) {
 }
 
 void registerAllScalarFunctions(const std::string& prefix) {
+  registerP4HyperLogLogType();
   registerArithmeticFunctions(prefix);
   registerCheckedArithmeticFunctions(prefix);
   registerComparisonFunctions(prefix);
@@ -147,15 +163,19 @@ void registerAllScalarFunctions(const std::string& prefix) {
   registerArrayFunctions(prefix);
   registerJsonFunctions(prefix);
   registerHyperLogFunctions(prefix);
+  registerKHyperLogLogFunctions(prefix);
   registerTDigestFunctions(prefix);
   registerQDigestFunctions(prefix);
   registerSfmSketchFunctions(prefix);
+  registerSetDigestFunctions(prefix);
   registerEnumFunctions(prefix);
   registerIntegerFunctions(prefix);
   registerFloatingPointFunctions(prefix);
   registerBingTileFunctions(prefix);
 #ifdef VELOX_ENABLE_GEO
   registerGeometryFunctions(prefix);
+  registerSphericalGeographyFunctions();
+  registerS2Functions(prefix);
 #endif
   registerGeneralFunctions(prefix);
   registerDateTimeFunctions(prefix);

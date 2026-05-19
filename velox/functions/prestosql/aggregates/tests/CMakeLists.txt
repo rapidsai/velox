@@ -12,14 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-add_executable(
-  velox_aggregates_test
+# Split velox_aggregates_test into individual test binaries for parallel execution.
+set(
+  VELOX_AGGREGATES_TEST_SOURCES
   AggregationFunctionRegTest.cpp
   ApproxDistinctTest.cpp
   ApproxMostFrequentTest.cpp
   ApproxPercentileTest.cpp
+  ApproxWinsorizedMeanAggregateTest.cpp
   ArbitraryTest.cpp
   ArrayAggTest.cpp
+  VectorSumTest.cpp
   AverageAggregationTest.cpp
   BitwiseAggregationTest.cpp
   BoolAndOrTest.cpp
@@ -33,7 +36,7 @@ add_executable(
   EntropyAggregationTest.cpp
   GeometricMeanTest.cpp
   HistogramTest.cpp
-  Main.cpp
+  KHyperLogLogAggregateTest.cpp
   MapAccumulatorTest.cpp
   MapAggTest.cpp
   MapUnionAggregationTest.cpp
@@ -50,17 +53,17 @@ add_executable(
   PrestoHasherTest.cpp
   QDigestAggTest.cpp
   ReduceAggTest.cpp
+  ReservoirSampleTest.cpp
   SetAggTest.cpp
+  SetDigestAggregateTest.cpp
   SetUnionTest.cpp
   SumDataSizeForStatsTest.cpp
   SumTest.cpp
   VarianceAggregationTest.cpp
 )
 
-add_test(NAME velox_aggregates_test COMMAND velox_aggregates_test WORKING_DIRECTORY .)
-
-target_link_libraries(
-  velox_aggregates_test
+set(
+  VELOX_AGGREGATES_TEST_DEPS
   velox_aggregates
   velox_core
   velox_dwio_common_test_utils
@@ -77,8 +80,30 @@ target_link_libraries(
   velox_simple_aggregate
   velox_type
   velox_vector_fuzzer
-  velox_temp_path
+  velox_test_util
   gflags::gflags
   GTest::gtest
   GTest::gtest_main
 )
+
+velox_add_grouped_tests(
+  PREFIX velox_aggregates_test
+  SOURCES ${VELOX_AGGREGATES_TEST_SOURCES}
+  DEPS ${VELOX_AGGREGATES_TEST_DEPS}
+  EXTRA_SOURCES Main.cpp
+  WORKING_DIRECTORY .
+)
+
+if(${VELOX_ENABLE_GEO})
+  add_executable(velox_aggregates_GeometryAggregateTest GeometryAggregateTest.cpp Main.cpp)
+  add_test(
+    NAME velox_aggregates_GeometryAggregateTest
+    COMMAND velox_aggregates_GeometryAggregateTest
+    WORKING_DIRECTORY .
+  )
+  target_link_libraries(
+    velox_aggregates_GeometryAggregateTest
+    ${VELOX_AGGREGATES_TEST_DEPS}
+    velox_functions_geo
+  )
+endif()

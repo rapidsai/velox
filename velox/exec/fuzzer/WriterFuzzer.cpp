@@ -16,6 +16,7 @@
 #include "velox/exec/fuzzer/WriterFuzzer.h"
 
 #include <boost/random/uniform_int_distribution.hpp>
+#include <fmt/ranges.h>
 
 #include <re2/re2.h>
 #include <algorithm>
@@ -24,6 +25,7 @@
 #include "velox/common/encode/Base64.h"
 #include "velox/common/file/FileSystems.h"
 #include "velox/common/file/tests/FaultyFileSystem.h"
+#include "velox/common/testutil/TempDirectoryPath.h"
 #include "velox/connectors/hive/HiveConnector.h"
 #include "velox/connectors/hive/HiveConnectorSplit.h"
 #include "velox/connectors/hive/TableHandle.h"
@@ -32,7 +34,6 @@
 #include "velox/exec/fuzzer/PrestoQueryRunner.h"
 #include "velox/exec/tests/utils/AssertQueryBuilder.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
-#include "velox/exec/tests/utils/TempDirectoryPath.h"
 #include "velox/expression/fuzzer/FuzzerToolkit.h"
 #include "velox/functions/prestosql/tests/utils/FunctionBaseTest.h"
 #include "velox/vector/VectorSaver.h"
@@ -58,6 +59,13 @@ DEFINE_int32(
 
 DEFINE_int32(num_batches, 10, "The number of generated vectors.");
 
+DEFINE_string(
+    max_target_file_size,
+    "",
+    "Maximum target file size for testing file rotation. "
+    "If empty, randomly selects from various sizes (10KB-5MB) to test edge cases. "
+    "Set to a specific value like '1MB' to use a fixed size.");
+
 DEFINE_double(
     null_ratio,
     0.1,
@@ -68,6 +76,7 @@ using namespace facebook::velox::connector::hive;
 using namespace facebook::velox::test;
 
 namespace facebook::velox::exec::test {
+using namespace facebook::velox::common::testutil;
 
 namespace {
 using facebook::velox::filesystems::FileSystem;
@@ -148,6 +157,17 @@ class WriterFuzzer {
       const std::vector<std::shared_ptr<const HiveSortingColumn>>& sortBy,
       const std::shared_ptr<TempDirectoryPath>& outputDirectoryPath);
 
+  // Verifies file rotation by writing with a small max target file size.
+  // This specifically tests the file split logic for non-bucketed,
+  // non-sorted tables.
+  void verifyFileRotation(
+      const std::vector<RowVectorPtr>& input,
+      const std::vector<std::string>& names,
+      const std::vector<TypePtr>& types,
+      int32_t partitionOffset,
+      const std::vector<std::string>& partitionKeys,
+      const std::shared_ptr<TempDirectoryPath>& outputDirectoryPath);
+
   // Generates table column handles based on table column properties
   connector::ColumnHandleMap getTableColumnHandles(
       const std::vector<std::string>& names,
@@ -159,7 +179,8 @@ class WriterFuzzer {
   RowVectorPtr execute(
       const core::PlanNodePtr& plan,
       const int32_t maxDrivers = 2,
-      const std::vector<exec::Split>& splits = {});
+      const std::vector<exec::Split>& splits = {},
+      const std::string& maxTargetFileSizeBytes = "0B");
 
   RowVectorPtr veloxToPrestoResult(const RowVectorPtr& result);
 
@@ -247,7 +268,7 @@ class WriterFuzzer {
   };
 
   // Supported partition key column types
-  // According to VectorHasher::typeKindSupportsValueIds and
+  // According to VectorHasher::typeSupportsValueIds and
   // https://github.com/prestodb/presto/blob/10143be627beb2c61aba5b3d36af473d2a8ef65e/presto-hive/src/main/java/com/facebook/presto/hive/HiveUtil.java#L593
   const std::vector<TypePtr> kPartitionKeyTypes_{
       BOOLEAN(),
@@ -263,6 +284,10 @@ class WriterFuzzer {
           filesystems::getFileSystem("faulty:/tmp", {}));
   const std::string injectedErrorMsg_{"Injected Faulty File Error"};
   std::atomic<uint64_t> injectedErrorCount_{0};
+
+  // Current max target file size for file rotation testing.
+  // Randomized per iteration to test various file split scenarios.
+  std::string currentMaxTargetFileSize_;
 
   FuzzerGenerator rng_;
   size_t currentSeed_{0};
@@ -332,8 +357,20 @@ void WriterFuzzer::go() {
   }
 
   while (!isDone(iteration, startTime)) {
+    // Randomize max target file size for file rotation testing.
+    // Use small sizes to trigger file splits. Include very small sizes
+    // (10KB, 50KB) to force many splits and test edge cases.
+    const std::vector<std::string> fileSizes = {
+        "10KB", "50KB", "100KB", "500KB", "1MB", "2MB", "5MB"};
+    auto fileSizeIdx = boost::random::uniform_int_distribution<size_t>(
+        0, fileSizes.size() - 1)(rng_);
+    currentMaxTargetFileSize_ = FLAGS_max_target_file_size.empty()
+        ? fileSizes[fileSizeIdx]
+        : FLAGS_max_target_file_size;
+
     LOG(INFO) << "==============================> Started iteration "
-              << iteration << " (seed: " << currentSeed_ << ")";
+              << iteration << " (seed: " << currentSeed_
+              << ", maxTargetFileSize: " << currentMaxTargetFileSize_ << ")";
 
     std::vector<std::string> names;
     std::vector<TypePtr> types;
@@ -364,11 +401,12 @@ void WriterFuzzer::go() {
           sortColumnOffset -= offset;
           sortBy.reserve(sortColumns.size());
           for (const auto& sortByColumn : sortColumns) {
-            sortBy.push_back(std::make_shared<const HiveSortingColumn>(
-                sortByColumn,
-                kSortOrderTypes_.at(
-                    boost::random::uniform_int_distribution<uint32_t>(
-                        0, 1)(rng_))));
+            sortBy.push_back(
+                std::make_shared<const HiveSortingColumn>(
+                    sortByColumn,
+                    kSortOrderTypes_.at(
+                        boost::random::uniform_int_distribution<uint32_t>(
+                            0, 1)(rng_))));
           }
         }
       }
@@ -379,8 +417,8 @@ void WriterFuzzer::go() {
     }
     auto input = generateInputData(names, types, partitionOffset);
 
-    const auto outputDirPath = exec::test::TempDirectoryPath::create(
-        FLAGS_file_system_error_injection);
+    const auto outputDirPath =
+        TempDirectoryPath::create(FLAGS_file_system_error_injection);
 
     verifyWriter(
         input,
@@ -393,6 +431,20 @@ void WriterFuzzer::go() {
         sortColumnOffset,
         sortBy,
         outputDirPath);
+
+    // Test file rotation for non-bucketed, non-sorted tables.
+    // File rotation only works when bucketCount == 0 and sortBy is empty.
+    if (bucketCount == 0 && sortBy.empty()) {
+      const auto fileRotationOutputDirPath =
+          TempDirectoryPath::create(FLAGS_file_system_error_injection);
+      verifyFileRotation(
+          input,
+          names,
+          types,
+          partitionOffset,
+          partitionKeys,
+          fileRotationOutputDirPath);
+    }
 
     LOG(INFO) << "==============================> Done with iteration "
               << iteration++;
@@ -483,8 +535,9 @@ std::vector<RowVectorPtr> WriterFuzzer::generateInputData(
             partitionValues.at(j - partitionOffset), size));
       }
     }
-    input.push_back(std::make_shared<RowVector>(
-        pool_.get(), inputType, nullptr, size, std::move(children)));
+    input.push_back(
+        std::make_shared<RowVector>(
+            pool_.get(), inputType, nullptr, size, std::move(children)));
   }
 
   return input;
@@ -532,7 +585,8 @@ void WriterFuzzer::verifyWriter(
   }
 
   try {
-    referenceQueryRunner_->execute("DROP TABLE IF EXISTS tmp_write");
+    referenceQueryRunner_->execute(
+        "DROP TABLE IF EXISTS " + ReferenceQueryRunner::getWriteTableName());
   } catch (...) {
     LOG(WARNING) << "Drop table query failed in the reference DB";
     return;
@@ -578,7 +632,8 @@ void WriterFuzzer::verifyWriter(
   }
   try {
     auto referenceData = referenceQueryRunner_->execute(
-        "SELECT *" + bucketSql + " FROM tmp_write");
+        "SELECT *" + bucketSql + " FROM " +
+        ReferenceQueryRunner::getWriteTableName());
     VELOX_CHECK(
         assertEqualResults(referenceData, {actual}),
         "Velox and reference DB results don't match");
@@ -635,6 +690,134 @@ void WriterFuzzer::verifyWriter(
   LOG(INFO) << "Verified results against reference DB";
 }
 
+void WriterFuzzer::verifyFileRotation(
+    const std::vector<RowVectorPtr>& input,
+    const std::vector<std::string>& names,
+    const std::vector<TypePtr>& types,
+    const int32_t partitionOffset,
+    const std::vector<std::string>& partitionKeys,
+    const std::shared_ptr<TempDirectoryPath>& outputDirectoryPath) {
+  // Create a non-bucketed, non-sorted table write plan.
+  // File rotation only works for non-bucketed, non-sorted tables.
+  const auto plan = PlanBuilder()
+                        .values(input)
+                        .tableWrite(
+                            outputDirectoryPath->getPath(),
+                            partitionKeys,
+                            dwio::common::FileFormat::DWRF)
+                        .planNode();
+
+  const auto maxDrivers =
+      boost::random::uniform_int_distribution<int32_t>(1, 16)(rng_);
+  RowVectorPtr result;
+  const uint64_t prevInjectedErrorCount = injectedErrorCount_;
+  try {
+    result = veloxToPrestoResult(
+        execute(plan, maxDrivers, {}, currentMaxTargetFileSize_));
+  } catch (VeloxRuntimeError& error) {
+    if (injectedErrorCount_ == prevInjectedErrorCount) {
+      throw error;
+    }
+    VELOX_CHECK_GT(
+        injectedErrorCount_,
+        prevInjectedErrorCount,
+        "Unexpected writer fuzzer failure: {}",
+        error.message());
+    VELOX_CHECK_EQ(
+        error.message(), injectedErrorMsg_, "Unexpected writer fuzzer failure");
+    return;
+  }
+
+  const auto outputPath = outputDirectoryPath->getDelegatePath();
+
+  // 1. Count the number of files created to verify file rotation occurred.
+  const auto partitionNameAndFileCount =
+      getPartitionNameAndFilecount(outputPath);
+  int32_t totalFileCount = 0;
+  for (const auto& [partitionName, fileCount] : partitionNameAndFileCount) {
+    totalFileCount += fileCount;
+  }
+  LOG(INFO) << "File rotation: " << totalFileCount
+            << " files created with max target file size "
+            << currentMaxTargetFileSize_;
+
+  // 2. Verify the written data by reading it back.
+  auto splits = makeSplits(outputPath);
+  auto columnHandles =
+      getTableColumnHandles(names, types, partitionOffset, /*bucketCount=*/0);
+  const auto rowType = generateOutputType(names, types, /*bucketCount=*/0);
+
+  auto readPlan = PlanBuilder()
+                      .tableScan(rowType, {}, "", rowType, columnHandles)
+                      .planNode();
+  auto actual = execute(readPlan, maxDrivers, splits);
+
+  // 3. Compare row count with input.
+  int64_t expectedRowCount = 0;
+  for (const auto& batch : input) {
+    expectedRowCount += batch->size();
+  }
+  VELOX_CHECK_EQ(
+      actual->size(),
+      expectedRowCount,
+      "File rotation: Row count mismatch. Expected {}, got {}",
+      expectedRowCount,
+      actual->size());
+
+  // 4. Verify the actual data content matches the input.
+  std::vector<RowVectorPtr> expectedBatches;
+  expectedBatches.reserve(input.size());
+  for (const auto& batch : input) {
+    std::vector<VectorPtr> children;
+    children.reserve(batch->childrenSize());
+    for (int32_t i = 0; i < partitionOffset; ++i) {
+      children.push_back(batch->childAt(i));
+    }
+    for (int32_t i = partitionOffset; i < batch->childrenSize(); ++i) {
+      children.push_back(batch->childAt(i));
+    }
+    expectedBatches.push_back(
+        std::make_shared<RowVector>(
+            pool_.get(), rowType, nullptr, batch->size(), std::move(children)));
+  }
+
+  VELOX_CHECK(
+      assertEqualResults(expectedBatches, {actual}),
+      "File rotation: Data content mismatch between written and read-back data");
+
+  // 5. Compare with Presto as the source of truth.
+  try {
+    referenceQueryRunner_->execute(
+        "DROP TABLE IF EXISTS " + ReferenceQueryRunner::getWriteTableName());
+  } catch (...) {
+    LOG(WARNING) << "Drop table query failed in the reference DB";
+    return;
+  }
+
+  auto prestoResult = referenceQueryRunner_->execute(plan);
+  if (!prestoResult.first.has_value()) {
+    LOG(WARNING) << "Presto write query failed, skipping comparison";
+    return;
+  }
+
+  VELOX_CHECK(
+      assertEqualResults(*prestoResult.first, plan->outputType(), {result}),
+      "File rotation: Velox and Presto row counts don't match");
+
+  try {
+    auto prestoData = referenceQueryRunner_->execute(
+        "SELECT * FROM " + ReferenceQueryRunner::getWriteTableName());
+    VELOX_CHECK(
+        assertEqualResults(prestoData, {actual}),
+        "File rotation: Velox and Presto data don't match");
+  } catch (...) {
+    LOG(WARNING) << "Query failed in the reference DB";
+    return;
+  }
+
+  LOG(INFO) << "File rotation verification succeeded";
+}
+
 connector::ColumnHandleMap WriterFuzzer::getTableColumnHandles(
     const std::vector<std::string>& names,
     const std::vector<TypePtr>& types,
@@ -642,11 +825,11 @@ connector::ColumnHandleMap WriterFuzzer::getTableColumnHandles(
     const int32_t bucketCount) {
   connector::ColumnHandleMap columnHandle;
   for (int i = 0; i < names.size(); ++i) {
-    HiveColumnHandle::ColumnType columnType;
+    FileColumnHandle::ColumnType columnType;
     if (i < partitionOffset) {
-      columnType = HiveColumnHandle::ColumnType::kRegular;
+      columnType = FileColumnHandle::ColumnType::kRegular;
     } else {
-      columnType = HiveColumnHandle::ColumnType::kPartitionKey;
+      columnType = FileColumnHandle::ColumnType::kPartitionKey;
     }
     columnHandle.insert(
         {names.at(i),
@@ -659,7 +842,7 @@ connector::ColumnHandleMap WriterFuzzer::getTableColumnHandles(
         {"$bucket",
          std::make_shared<HiveColumnHandle>(
              "$bucket",
-             HiveColumnHandle::ColumnType::kSynthesized,
+             FileColumnHandle::ColumnType::kSynthesized,
              INTEGER(),
              INTEGER())});
   }
@@ -669,7 +852,8 @@ connector::ColumnHandleMap WriterFuzzer::getTableColumnHandles(
 RowVectorPtr WriterFuzzer::execute(
     const core::PlanNodePtr& plan,
     const int32_t maxDrivers,
-    const std::vector<exec::Split>& splits) {
+    const std::vector<exec::Split>& splits,
+    const std::string& maxTargetFileSizeBytes) {
   LOG(INFO) << "Executing query plan: " << std::endl
             << plan->toString(true, true);
   fuzzer::ResultOrError resultOrError;
@@ -682,6 +866,10 @@ RowVectorPtr WriterFuzzer::execute(
           kHiveConnectorId,
           connector::hive::HiveConfig::kMaxPartitionsPerWritersSession,
           "400")
+      .connectorSessionProperty(
+          kHiveConnectorId,
+          connector::hive::HiveConfig::kMaxTargetFileSizeSession,
+          maxTargetFileSizeBytes)
       .copyResults(pool_.get());
 }
 
@@ -702,10 +890,11 @@ RowVectorPtr WriterFuzzer::veloxToPrestoResult(const RowVectorPtr& result) {
 }
 
 std::string WriterFuzzer::getReferenceOutputDirectoryPath(int32_t layers) {
-  auto filePath =
-      referenceQueryRunner_->execute("SELECT \"$path\" FROM tmp_write");
+  auto filePath = referenceQueryRunner_->execute(
+      "SELECT \"$path\" FROM " + ReferenceQueryRunner::getWriteTableName());
+  auto stringView = extractSingleValue<StringView>(filePath);
   auto tableDirectoryPath =
-      fs::path(extractSingleValue<StringView>(filePath)).parent_path();
+      fs::path(std::string_view(stringView)).parent_path();
   while (layers-- > 0) {
     tableDirectoryPath = tableDirectoryPath.parent_path();
   }
@@ -853,8 +1042,8 @@ std::string WriterFuzzer::sortSql(
     }
     selectedColumns << sortBy.at(i)->sortColumn();
   }
-  return "SELECT " + selectedColumns.str() + " FROM tmp_write " +
-      whereSql.str();
+  return "SELECT " + selectedColumns.str() + " FROM " +
+      ReferenceQueryRunner::getWriteTableName() + " " + whereSql.str();
 }
 
 std::string WriterFuzzer::partitionToSql(

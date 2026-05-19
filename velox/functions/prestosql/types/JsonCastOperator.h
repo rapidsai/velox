@@ -23,10 +23,6 @@ namespace facebook::velox {
 /// Custom operator for casts from and to Json type.
 class JsonCastOperator : public exec::CastOperator {
  public:
-  bool isSupportedFromType(const TypePtr& other) const override;
-
-  bool isSupportedToType(const TypePtr& other) const override;
-
   void castTo(
       const BaseVector& input,
       exec::EvalCtx& context,
@@ -57,8 +53,8 @@ class JsonCastOperator : public exec::CastOperator {
       const SelectivityVector& rows,
       BaseVector& result) const;
 
-  inline static folly::once_flag initializeErrors_;
-  inline static std::exception_ptr errors_[simdjson::NUM_ERROR_CODES];
+  mutable folly::once_flag initializeErrors_;
+  mutable std::exception_ptr errors_[simdjson::NUM_ERROR_CODES];
   mutable std::string paddedInput_;
 };
 } // namespace facebook::velox

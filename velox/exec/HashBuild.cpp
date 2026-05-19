@@ -18,6 +18,8 @@
 #include "velox/common/base/Counters.h"
 #include "velox/common/base/StatsReporter.h"
 #include "velox/common/testutil/TestValue.h"
+#include "velox/exec/HashTableCache.h"
+#include "velox/exec/OperatorType.h"
 #include "velox/exec/OperatorUtils.h"
 #include "velox/exec/Task.h"
 #include "velox/exec/VectorHasher.h"
@@ -55,14 +57,22 @@ HashBuild::HashBuild(
           nullptr,
           operatorId,
           joinNode->id(),
-          "HashBuild",
+          OperatorType::kHashBuild,
           joinNode->canSpill(driverCtx->queryConfig())
-              ? driverCtx->makeSpillConfig(operatorId)
+              ? driverCtx->makeSpillConfig(operatorId, OperatorType::kHashBuild)
               : std::nullopt),
       joinNode_(std::move(joinNode)),
       joinType_{joinNode_->joinType()},
       nullAware_{joinNode_->isNullAware()},
+      nullAsValue_{joinNode_->isNullAsValue()},
       needProbedFlagSpill_{needRightSideJoin(joinType_)},
+      dropDuplicates_(joinNode_->canDropDuplicates()),
+      vectorHasherMaxNumDistinct_(
+          driverCtx->queryConfig().joinBuildVectorHasherMaxNumDistinct()),
+      abandonHashBuildDedupMinRows_(
+          driverCtx->queryConfig().abandonHashBuildDedupMinRows()),
+      abandonHashBuildDedupMinPct_(
+          driverCtx->queryConfig().abandonHashBuildDedupMinPct()),
       joinBridge_(operatorCtx_->task()->getHashJoinBridgeLocked(
           operatorCtx_->driverCtx()->splitGroupId,
           planNodeId())),
@@ -86,34 +96,134 @@ HashBuild::HashBuild(
 
   // Identify the non-key build side columns and make a decoder for each.
   const int32_t numDependents = inputType->size() - numKeys;
-  if (numDependents > 0) {
-    // Number of join keys (numKeys) may be less then number of input columns
-    // (inputType->size()). In this case numDependents is negative and cannot be
-    // used to call 'reserve'. This happens when we join different probe side
-    // keys with the same build side key: SELECT * FROM t LEFT JOIN u ON t.k1 =
-    // u.k AND t.k2 = u.k.
-    dependentChannels_.reserve(numDependents);
-    decoders_.reserve(numDependents);
-  }
-  for (auto i = 0; i < inputType->size(); ++i) {
-    if (keyChannelMap_.find(i) == keyChannelMap_.end()) {
-      dependentChannels_.emplace_back(i);
-      decoders_.emplace_back(std::make_unique<DecodedVector>());
+  if (!dropDuplicates_) {
+    if (numDependents > 0) {
+      // Number of join keys (numKeys) may be less then number of input columns
+      // (inputType->size()). In this case numDependents is negative and cannot
+      // be used to call 'reserve'. This happens when we join different probe
+      // side keys with the same build side key: SELECT * FROM t LEFT JOIN u ON
+      // t.k1 = u.k AND t.k2 = u.k.
+      dependentChannels_.reserve(numDependents);
+      decoders_.reserve(numDependents);
+    }
+
+    for (auto i = 0; i < inputType->size(); ++i) {
+      if (keyChannelMap_.find(i) == keyChannelMap_.end()) {
+        dependentChannels_.emplace_back(i);
+        decoders_.emplace_back(std::make_unique<DecodedVector>());
+      }
     }
   }
 
   tableType_ = hashJoinTableType(joinNode_);
-  setupTable();
-  setupSpiller();
+
   stateCleared_ = false;
 }
 
 void HashBuild::initialize() {
   Operator::initialize();
 
+  if (setupCachedHashTable()) {
+    return;
+  }
+
+  // Set up table and spiller now that cache state is initialized.
+  // This ensures tableMemoryPool() returns the cache's tablePool when enabled.
+  setupTable();
+  setupSpiller();
+
   if (isAntiJoin(joinType_) && joinNode_->filter()) {
     setupFilterForAntiJoins(keyChannelMap_);
   }
+}
+
+bool HashBuild::setupCachedHashTable() {
+  if (!joinNode_->useHashTableCache()) {
+    return false;
+  }
+
+  const auto& queryId = operatorCtx_->task()->queryCtx()->queryId();
+  cacheKey_ = fmt::format("{}:{}", queryId, planNodeId());
+
+  // Get or create the cache entry (which includes the pool).
+  // If another task is already building, future_ will be set.
+  auto* cache = HashTableCache::instance();
+  auto* queryCtx = operatorCtx_->task()->queryCtx().get();
+  cacheEntry_ = cache->get(cacheKey_, taskId(), queryCtx, &future_);
+  VELOX_CHECK_NOT_NULL(cacheEntry_);
+  VELOX_CHECK_NOT_NULL(cacheEntry_->tablePool);
+
+  // Check if table is already built.
+  if (cacheEntry_->buildComplete) {
+    noMoreInput();
+    return true;
+  }
+
+  // Check if we're a waiter task (future was set by get).
+  if (future_.valid()) {
+    setState(State::kWaitForBuild);
+    return true;
+  }
+
+  // This is the builder task - proceed with building.
+  return false;
+}
+
+bool HashBuild::getHashTableFromCache() {
+  if (!useHashTableCache()) {
+    return false;
+  }
+
+  if (!cacheEntry_->buildComplete) {
+    // Cache miss - we need to build the table.
+    stats_.wlock()->addRuntimeStat(
+        std::string(BaseHashTable::kHashTableCacheMiss), RuntimeCounter(1));
+    return false;
+  }
+
+  // Table already built by a previous task! Use it directly.
+  // Notify the bridge with the cached table.
+  // We pass a shared_ptr copy (not std::move) since the cache retains
+  // ownership.
+  joinBridge_->setHashTable(
+      cacheEntry_->table, {}, cacheEntry_->hasNullKeys, nullptr);
+  // Record cache hit metric.
+  stats_.wlock()->addRuntimeStat(
+      std::string(BaseHashTable::kHashTableCacheHit), RuntimeCounter(1));
+  return true;
+}
+
+void HashBuild::maybeSetHashTableInCache(
+    const std::shared_ptr<BaseHashTable>& table) {
+  if (!useHashTableCache()) {
+    return;
+  }
+  auto* cache = HashTableCache::instance();
+  cache->put(cacheKey(), table, joinHasNullKeys_);
+}
+
+bool HashBuild::receivedCachedHashTable() {
+  if (!useHashTableCache() || future_.valid()) {
+    return false;
+  }
+  // Builder task drivers coordinate via allPeersFinished and should fall
+  // through to the kWaitForProbe path in isBlocked(). Only waiter task
+  // drivers (different taskId than the builder) should enter here.
+  VELOX_CHECK_NOT_NULL(cacheEntry_);
+  if (hashTableCacheBuilderTask()) {
+    return false;
+  }
+  // We were waiting on cached table from another task.
+  // Ensure that table is ready.
+  VELOX_CHECK(
+      cacheEntry_->buildComplete,
+      "Hash table cache build failed for key '{}'. "
+      "The builder task may have encountered an error (e.g., OOM).",
+      cacheKey_);
+  // Proceed through normal noMoreInput flow which will use the cache.
+  setRunning();
+  noMoreInput();
+  return true;
 }
 
 void HashBuild::setupTable() {
@@ -133,6 +243,7 @@ void HashBuild::setupTable() {
   for (int i = numKeys; i < tableType_->size(); ++i) {
     dependentTypes.emplace_back(tableType_->childAt(i));
   }
+  auto& queryConfig = operatorCtx_->driverCtx()->queryConfig();
   if (joinNode_->isRightJoin() || joinNode_->isFullJoin() ||
       joinNode_->isRightSemiProjectJoin()) {
     // Do not ignore null keys.
@@ -141,44 +252,47 @@ void HashBuild::setupTable() {
         dependentTypes,
         true, // allowDuplicates
         true, // hasProbedFlag
-        operatorCtx_->driverCtx()
-            ->queryConfig()
-            .minTableRowsForParallelJoinBuild(),
-        pool());
+        false, // hasCountFlag
+        queryConfig.minTableRowsForParallelJoinBuild(),
+        tableMemoryPool());
   } else {
-    // (Left) semi and anti join with no extra filter only needs to know whether
-    // there is a match. Hence, no need to store entries with duplicate keys.
-    const bool dropDuplicates = !joinNode_->filter() &&
-        (joinNode_->isLeftSemiFilterJoin() ||
-         joinNode_->isLeftSemiProjectJoin() || isAntiJoin(joinType_));
     // Right semi join needs to tag build rows that were probed.
     const bool needProbedFlag = joinNode_->isRightSemiFilterJoin();
-    if (isLeftNullAwareJoinWithFilter(joinNode_)) {
+    const bool hasCountFlag = joinNode_->isCountingJoin();
+    if (nullAsValue_ || isLeftNullAwareJoinWithFilter(joinNode_)) {
       // We need to check null key rows in build side in case of null-aware anti
       // or left semi project join with filter set.
       table_ = HashTable<false>::createForJoin(
           std::move(keyHashers),
           dependentTypes,
-          !dropDuplicates, // allowDuplicates
+          !dropDuplicates_, // allowDuplicates
           needProbedFlag, // hasProbedFlag
-          operatorCtx_->driverCtx()
-              ->queryConfig()
-              .minTableRowsForParallelJoinBuild(),
-          pool());
+          hasCountFlag,
+          queryConfig.minTableRowsForParallelJoinBuild(),
+          tableMemoryPool());
     } else {
       // Ignore null keys
       table_ = HashTable<true>::createForJoin(
           std::move(keyHashers),
           dependentTypes,
-          !dropDuplicates, // allowDuplicates
+          !dropDuplicates_, // allowDuplicates
           needProbedFlag, // hasProbedFlag
-          operatorCtx_->driverCtx()
-              ->queryConfig()
-              .minTableRowsForParallelJoinBuild(),
-          pool());
+          hasCountFlag,
+          queryConfig.minTableRowsForParallelJoinBuild(),
+          tableMemoryPool(),
+          queryConfig.hashProbeBloomFilterPushdownMaxSize());
     }
   }
   analyzeKeys_ = table_->hashMode() != BaseHashTable::HashMode::kHash;
+  if (abandonHashBuildDedupMinPct_ == 0 && !joinNode_->isCountingJoin()) {
+    // Building a HashTable without duplicates is disabled if
+    // abandonBuildNoDupHashMinPct_ is 0. Counting joins always require dedup.
+    abandonHashBuildDedup_ = true;
+    table_->setAllowDuplicates(true);
+    return;
+  }
+  // Only create HashLookup when dedup is enabled.
+  lookup_ = std::make_unique<HashLookup>(table_->hashers(), pool());
 }
 
 void HashBuild::setupSpiller(SpillPartition* spillPartition) {
@@ -214,12 +328,19 @@ void HashBuild::setupSpiller(SpillPartition* spillPartition) {
         numPartitionBits;
     // Disable spilling if exceeding the max spill level and the query might run
     // out of memory if the restored partition still can't fit in memory.
-    if (config->exceedSpillLevelLimit(startPartitionBit)) {
+    if (FOLLY_UNLIKELY(config->exceedSpillLevelLimit(startPartitionBit))) {
       RECORD_METRIC_VALUE(kMetricMaxSpillLevelExceededCount);
       LOG(WARNING) << "Exceeded spill level limit: " << config->maxSpillLevel
                    << ", and disable spilling for memory pool: "
-                   << pool()->name();
-      ++spillStats_->wlock()->spillMaxLevelExceededCount;
+                   << pool()->name()
+                   << ", root pool: " << pool()->root()->name()
+                   << ", used: " << succinctBytes(pool()->usedBytes())
+                   << ", reservation: "
+                   << succinctBytes(pool()->reservedBytes())
+                   << ", root pool reservation: "
+                   << succinctBytes(pool()->root()->reservedBytes());
+      spillStats_->spillMaxLevelExceededCount.fetch_add(
+          1, std::memory_order_relaxed);
       exceededMaxSpillLevelLimit_ = true;
       return;
     }
@@ -309,6 +430,11 @@ void HashBuild::removeInputRowsForAntiJoinFilter() {
 
 void HashBuild::addInput(RowVectorPtr input) {
   checkRunning();
+
+  VELOX_CHECK(
+      !useHashTableCache() ||
+      (cacheEntry_->builderTaskId == taskId() && !cacheEntry_->buildComplete));
+
   ensureInputFits(input);
 
   TestValue::adjust("facebook::velox::exec::HashBuild::addInput", this);
@@ -336,7 +462,7 @@ void HashBuild::addInput(RowVectorPtr input) {
   }
 
   if (!isRightJoin(joinType_) && !isFullJoin(joinType_) &&
-      !isRightSemiProjectJoin(joinType_) &&
+      !isRightSemiProjectJoin(joinType_) && !nullAsValue_ &&
       !isLeftNullAwareJoinWithFilter(joinNode_)) {
     deselectRowsWithNulls(hashers, activeRows_);
     if (nullAware_ && !joinHasNullKeys_ &&
@@ -375,6 +501,41 @@ void HashBuild::addInput(RowVectorPtr input) {
   spillInput(input);
   if (!activeRows_.hasSelections()) {
     return;
+  }
+
+  if (dropDuplicates_ && !abandonHashBuildDedup_) {
+    // Counting joins must not abandon dedup — accurate counts are required.
+    const bool abandonEarly = !joinNode_->isCountingJoin() &&
+        abandonHashBuildDedupEarly(table_->numDistinct());
+    if (!abandonEarly) {
+      numHashInputRows_ += activeRows_.countSelected();
+      table_->prepareForGroupProbe(
+          *lookup_,
+          input,
+          activeRows_,
+          BaseHashTable::kNoSpillInputStartPartitionBit);
+      if (lookup_->rows.empty()) {
+        return;
+      }
+      table_->groupProbe(
+          *lookup_, BaseHashTable::kNoSpillInputStartPartitionBit);
+
+      // For counting joins, increment the count for duplicate rows.
+      // New rows are initialized with count = 1 by initializeRow.
+      // Increment count for all rows, then decrement for new rows to
+      // correct the over-counting.
+      if (joinNode_->isCountingJoin()) {
+        auto* rows = table_->rows();
+        for (auto row : lookup_->rows) {
+          rows->incrementCount(lookup_->hits[row]);
+        }
+        for (auto newRow : lookup_->newGroups) {
+          rows->decrementCount(lookup_->hits[newRow]);
+        }
+      }
+      return;
+    }
+    abandonHashBuildDedup();
   }
 
   if (analyzeKeys_ && hashes_.size() < activeRows_.end()) {
@@ -506,8 +667,11 @@ void HashBuild::ensureInputFits(RowVectorPtr& input) {
   }
   LOG(WARNING) << "Failed to reserve " << succinctBytes(targetIncrementBytes)
                << " for memory pool " << pool()->name()
-               << ", usage: " << succinctBytes(pool()->usedBytes())
-               << ", reservation: " << succinctBytes(pool()->reservedBytes());
+               << ", root pool: " << pool()->root()->name()
+               << ", used: " << succinctBytes(pool()->usedBytes())
+               << ", reservation: " << succinctBytes(pool()->reservedBytes())
+               << ", root pool reservation: "
+               << succinctBytes(pool()->root()->reservedBytes());
 }
 
 void HashBuild::spillInput(const RowVectorPtr& input) {
@@ -627,6 +791,7 @@ void HashBuild::noMoreInput() {
   if (noMoreInput_) {
     return;
   }
+
   Operator::noMoreInput();
 
   noMoreInputInternal();
@@ -656,7 +821,19 @@ bool HashBuild::finishHashBuild() {
   // build pipeline.
   if (!operatorCtx_->task()->allPeersFinished(
           planNodeId(), operatorCtx_->driver(), &future_, promises, peers)) {
-    setState(State::kWaitForBuild);
+    if (useHashTableCache() && !hashTableCacheBuilderTask()) {
+      // Waiter task non-last driver: no partial table was built (we used the
+      // cached table). Nothing to contribute — finish immediately. Clear the
+      // future since allPeersFinished() set it but we don't need to wait.
+      VELOX_CHECK_NULL(
+          table_, "Waiter task should not have built a partial hash table");
+      future_ = folly::SemiFuture<folly::Unit>::makeEmpty();
+      setState(State::kFinish);
+    } else {
+      // Builder task non-last driver: the last driver needs our partial
+      // table. Wait in kWaitForBuild until it has moved our table out.
+      setState(State::kWaitForBuild);
+    }
     return false;
   }
 
@@ -670,6 +847,10 @@ bool HashBuild::finishHashBuild() {
       promise.setValue();
     }
   };
+
+  if (getHashTableFromCache()) {
+    return true;
+  }
 
   if (joinHasNullKeys_ && isAntiJoin(joinType_) && nullAware_ &&
       !joinNode_->filter()) {
@@ -746,8 +927,6 @@ bool HashBuild::finishHashBuild() {
     pool()->release();
   };
 
-  // TODO: Re-enable parallel join build with spilling triggered after
-  //  https://github.com/facebookincubator/velox/issues/3567 is fixed.
   CpuWallTiming timing;
   {
     CpuWallTimer cpuWallTimer{timing};
@@ -755,11 +934,13 @@ bool HashBuild::finishHashBuild() {
         std::move(otherTables),
         isInputFromSpill() ? spillConfig()->startPartitionBit
                            : BaseHashTable::kNoSpillInputStartPartitionBit,
+        vectorHasherMaxNumDistinct_,
+        dropDuplicates_,
         allowParallelJoinBuild ? operatorCtx_->task()->queryCtx()->executor()
                                : nullptr);
   }
   stats_.wlock()->addRuntimeStat(
-      BaseHashTable::kBuildWallNanos,
+      std::string(BaseHashTable::kBuildWallNanos),
       RuntimeCounter(timing.wallNanos, RuntimeCounter::Unit::kNanos));
 
   addRuntimeStats();
@@ -784,11 +965,16 @@ bool HashBuild::finishHashBuild() {
               spillStats);
         };
   }
+
+  // For hash table caching: the last driver caches the merged table.
+  std::shared_ptr<BaseHashTable> table = std::move(table_);
+  maybeSetHashTableInCache(table);
   joinBridge_->setHashTable(
-      std::move(table_),
+      table,
       std::move(spillPartitions),
       joinHasNullKeys_,
       std::move(tableSpillFunc));
+
   if (canSpill()) {
     stateCleared_ = true;
   }
@@ -833,14 +1019,15 @@ void HashBuild::ensureTableFits(uint64_t numRows) {
 
   LOG(WARNING) << "Failed to reserve " << succinctBytes(memoryBytesToReserve)
                << " for join table build from last hash build operator "
-               << pool()->name()
-               << ", usage: " << succinctBytes(pool()->usedBytes())
-               << ", reservation: " << succinctBytes(pool()->reservedBytes());
+               << pool()->name() << ", root pool: " << pool()->root()->name()
+               << ", used: " << succinctBytes(pool()->usedBytes())
+               << ", reservation: " << succinctBytes(pool()->reservedBytes())
+               << ", root pool reservation: "
+               << succinctBytes(pool()->root()->reservedBytes());
 }
 
 void HashBuild::postHashBuildProcess() {
   checkRunning();
-
   if (!canSpill()) {
     setState(State::kFinish);
     return;
@@ -879,6 +1066,7 @@ void HashBuild::setupSpillInput(HashJoinBridge::SpillInput spillInput) {
   setupTable();
   setupSpiller(spillInput.spillPartition.get());
   stateCleared_ = false;
+  numHashInputRows_ = 0;
 
   // Start to process spill input.
   processSpillInput();
@@ -904,7 +1092,6 @@ void HashBuild::processSpillInput() {
 void HashBuild::addRuntimeStats() {
   // Report range sizes and number of distinct values for the join keys.
   const auto& hashers = table_->hashers();
-  const auto hashTableStats = table_->stats();
   uint64_t asRange{0};
   uint64_t asDistinct{0};
   auto lockedStats = stats_.wlock();
@@ -912,21 +1099,52 @@ void HashBuild::addRuntimeStats() {
   for (const auto& timing : table_->parallelJoinBuildStats().partitionTimings) {
     lockedStats->getOutputTiming.add(timing);
     lockedStats->addRuntimeStat(
-        BaseHashTable::kParallelJoinPartitionWallNanos,
+        std::string(BaseHashTable::kParallelJoinPartitionWallNanos),
         RuntimeCounter(timing.wallNanos, RuntimeCounter::Unit::kNanos));
     lockedStats->addRuntimeStat(
-        BaseHashTable::kParallelJoinPartitionCpuNanos,
+        std::string(BaseHashTable::kParallelJoinPartitionCpuNanos),
         RuntimeCounter(timing.cpuNanos, RuntimeCounter::Unit::kNanos));
   }
 
   for (const auto& timing : table_->parallelJoinBuildStats().buildTimings) {
     lockedStats->getOutputTiming.add(timing);
     lockedStats->addRuntimeStat(
-        BaseHashTable::kParallelJoinBuildWallNanos,
+        std::string(BaseHashTable::kParallelJoinBuildWallNanos),
         RuntimeCounter(timing.wallNanos, RuntimeCounter::Unit::kNanos));
     lockedStats->addRuntimeStat(
-        BaseHashTable::kParallelJoinBuildCpuNanos,
+        std::string(BaseHashTable::kParallelJoinBuildCpuNanos),
         RuntimeCounter(timing.cpuNanos, RuntimeCounter::Unit::kNanos));
+  }
+
+  for (const auto& timing :
+       table_->parallelJoinBuildStats().bloomFilterPartitionTimings) {
+    lockedStats->getOutputTiming.add(timing);
+    if (timing.wallNanos > 0) {
+      lockedStats->addRuntimeStat(
+          std::string(
+              BaseHashTable::kParallelJoinBloomFilterPartitionWallNanos),
+          RuntimeCounter(timing.wallNanos, RuntimeCounter::Unit::kNanos));
+    }
+    if (timing.cpuNanos > 0) {
+      lockedStats->addRuntimeStat(
+          std::string(BaseHashTable::kParallelJoinBloomFilterPartitionCpuNanos),
+          RuntimeCounter(timing.cpuNanos, RuntimeCounter::Unit::kNanos));
+    }
+  }
+
+  for (const auto& timing :
+       table_->parallelJoinBuildStats().bloomFilterBuildTimings) {
+    lockedStats->getOutputTiming.add(timing);
+    if (timing.wallNanos > 0) {
+      lockedStats->addRuntimeStat(
+          std::string(BaseHashTable::kParallelJoinBloomFilterBuildWallNanos),
+          RuntimeCounter(timing.wallNanos, RuntimeCounter::Unit::kNanos));
+    }
+    if (timing.cpuNanos > 0) {
+      lockedStats->addRuntimeStat(
+          std::string(BaseHashTable::kParallelJoinBloomFilterBuildCpuNanos),
+          RuntimeCounter(timing.cpuNanos, RuntimeCounter::Unit::kNanos));
+    }
   }
 
   for (auto i = 0; i < hashers.size(); i++) {
@@ -941,24 +1159,21 @@ void HashBuild::addRuntimeStats() {
     }
   }
 
-  lockedStats->runtimeStats[BaseHashTable::kCapacity] =
-      RuntimeMetric(hashTableStats.capacity);
-  lockedStats->runtimeStats[BaseHashTable::kNumRehashes] =
-      RuntimeMetric(hashTableStats.numRehashes);
-  lockedStats->runtimeStats[BaseHashTable::kNumDistinct] =
-      RuntimeMetric(hashTableStats.numDistinct);
-  if (hashTableStats.numTombstones != 0) {
-    lockedStats->runtimeStats[BaseHashTable::kNumTombstones] =
-        RuntimeMetric(hashTableStats.numTombstones);
-  }
+  table_->addRuntimeStats(lockedStats->runtimeStats);
 
   // Add max spilling level stats if spilling has been triggered.
   if (spiller_ != nullptr && spiller_->spillTriggered()) {
     lockedStats->addRuntimeStat(
-        "maxSpillLevel",
+        std::string(HashBuild::kMaxSpillLevel),
         RuntimeCounter(
             spillConfig()->spillLevel(spiller_->hashBits().begin())));
   }
+
+  lockedStats->addRuntimeStat(
+      std::string(BaseHashTable::kVectorHasherMergeCpuNanos),
+      RuntimeCounter(
+          table_->vectorHasherMergeTiming().cpuNanos,
+          RuntimeCounter::Unit::kNanos));
 }
 
 BlockingReason HashBuild::isBlocked(ContinueFuture* future) {
@@ -976,6 +1191,11 @@ BlockingReason HashBuild::isBlocked(ContinueFuture* future) {
     case State::kFinish:
       break;
     case State::kWaitForBuild:
+      if (receivedCachedHashTable()) {
+        break;
+      }
+      // We were waiting for peer drivers to finish - fall through to
+      // kWaitForProbe which has the same logic.
       [[fallthrough]];
     case State::kWaitForProbe:
       if (!future_.valid()) {
@@ -1059,6 +1279,14 @@ bool HashBuild::canSpill() const {
   if (!Operator::canSpill()) {
     return false;
   }
+  // For Cached hash table, we don't support spill either by the
+  // task thats building or by the task that is re-using it
+  if (useHashTableCache()) {
+    return false;
+  }
+  if (joinNode_->isCountingJoin()) {
+    return false;
+  }
   if (operatorCtx_->task()->hasMixedExecutionGroupJoin(joinNode_.get())) {
     return operatorCtx_->driverCtx()
                ->queryConfig()
@@ -1091,8 +1319,12 @@ void HashBuild::reclaim(
     LOG(WARNING)
         << "Can't reclaim from hash build operator, exceeded maximum spill "
            "level of "
-        << config->maxSpillLevel << ", " << pool()->name() << ", usage "
-        << succinctBytes(pool()->usedBytes());
+        << config->maxSpillLevel << ", " << pool()->name()
+        << ", root pool: " << pool()->root()->name()
+        << ", used: " << succinctBytes(pool()->usedBytes())
+        << ", reservation: " << succinctBytes(pool()->reservedBytes())
+        << ", root pool reservation: "
+        << succinctBytes(pool()->root()->reservedBytes());
     return;
   }
 
@@ -1105,11 +1337,16 @@ void HashBuild::reclaim(
     LOG(WARNING) << "Can't reclaim from hash build operator, state_["
                  << stateName(state_) << "], nonReclaimableSection_["
                  << nonReclaimableSection_ << "], spiller_["
-                 << (stateCleared_ ? "cleared"
-                                   : (spiller_->finalized() ? "finalized"
-                                                            : "non-finalized"))
+                 << (stateCleared_               ? "cleared"
+                         : spiller_ == nullptr   ? "null"
+                         : spiller_->finalized() ? "finalized"
+                                                 : "non-finalized")
                  << "] " << pool()->name()
-                 << ", usage: " << succinctBytes(pool()->usedBytes());
+                 << ", root pool: " << pool()->root()->name()
+                 << ", used: " << succinctBytes(pool()->usedBytes())
+                 << ", reservation: " << succinctBytes(pool()->reservedBytes())
+                 << ", root pool reservation: "
+                 << succinctBytes(pool()->root()->reservedBytes());
     return;
   }
 
@@ -1128,9 +1365,18 @@ void HashBuild::reclaim(
       ++stats.numNonReclaimableAttempts;
       LOG(WARNING) << "Can't reclaim from hash build operator, state_["
                    << stateName(buildOp->state_) << "], nonReclaimableSection_["
-                   << buildOp->nonReclaimableSection_ << "], "
-                   << buildOp->pool()->name() << ", usage: "
-                   << succinctBytes(buildOp->pool()->usedBytes());
+                   << buildOp->nonReclaimableSection_ << "], spiller_["
+                   << (buildOp->stateCleared_               ? "cleared"
+                           : buildOp->spiller_ == nullptr   ? "null"
+                           : buildOp->spiller_->finalized() ? "finalized"
+                                                            : "non-finalized")
+                   << "], " << buildOp->pool()->name()
+                   << ", root pool: " << buildOp->pool()->root()->name()
+                   << ", used: " << succinctBytes(buildOp->pool()->usedBytes())
+                   << ", reservation: "
+                   << succinctBytes(buildOp->pool()->reservedBytes())
+                   << ", root pool reservation: "
+                   << succinctBytes(buildOp->pool()->root()->reservedBytes());
       return;
     }
   }
@@ -1150,6 +1396,19 @@ void HashBuild::reclaim(
   }
 }
 
+memory::MemoryPool* HashBuild::tableMemoryPool() const {
+  if (useHashTableCache()) {
+    // Cached hash tables use a leaf pool under the query pool (from cache
+    // entry). This allows the table to outlive the task while still supporting
+    // allocations.
+    VELOX_CHECK_NOT_NULL(cacheEntry_);
+    VELOX_CHECK_NOT_NULL(cacheEntry_->tablePool);
+    return cacheEntry_->tablePool.get();
+  }
+  // Regular joins use operator pool
+  return pool();
+}
+
 bool HashBuild::nonReclaimableState() const {
   // Apart from being in the nonReclaimable section, it's also not reclaimable
   // if:
@@ -1166,6 +1425,11 @@ bool HashBuild::nonReclaimableState() const {
 
 void HashBuild::close() {
   Operator::close();
+
+  if (useHashTableCache() && cacheEntry_ != nullptr &&
+      !cacheEntry_->buildComplete && hashTableCacheBuilderTask()) {
+    HashTableCache::instance()->drop(cacheKey_);
+  }
 
   {
     // Free up major memory usage. Gate access to them as they can be accessed
@@ -1185,7 +1449,7 @@ HashBuildSpiller::HashBuildSpiller(
     RowTypePtr rowType,
     HashBitRange bits,
     const common::SpillConfig* spillConfig,
-    folly::Synchronized<common::SpillStats>* spillStats)
+    exec::SpillStats* spillStats)
     : SpillerBase(
           container,
           std::move(rowType),
@@ -1240,4 +1504,22 @@ void HashBuildSpiller::extractSpill(
         rows.data(), rows.size(), false, false, result->childAt(types.size()));
   }
 }
+
+bool HashBuild::abandonHashBuildDedupEarly(int64_t numDistinct) const {
+  VELOX_CHECK(dropDuplicates_);
+  return numHashInputRows_ > abandonHashBuildDedupMinRows_ &&
+      100 * numDistinct / numHashInputRows_ >= abandonHashBuildDedupMinPct_;
+}
+
+void HashBuild::abandonHashBuildDedup() {
+  // The hash table is no longer directly constructed in addInput. The data
+  // that was previously inserted into the hash table is already in the
+  // RowContainer.
+  addRuntimeStat(
+      std::string(HashBuild::kAbandonBuildNoDupHash), RuntimeCounter(1));
+  abandonHashBuildDedup_ = true;
+  table_->setAllowDuplicates(true);
+  lookup_.reset();
+}
+
 } // namespace facebook::velox::exec

@@ -16,10 +16,12 @@
 #include "velox/common/base/tests/GTestUtils.h"
 #include "velox/connectors/hive/HiveConnector.h"
 #include "velox/exec/PartitionFunction.h"
+#include "velox/exec/tests/utils/HiveConnectorTestBase.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
 #include "velox/functions/prestosql/aggregates/RegisterAggregateFunctions.h"
 #include "velox/functions/prestosql/registration/RegistrationFunctions.h"
 #include "velox/parse/TypeResolver.h"
+#include "velox/type/TypeSerde.h"
 #include "velox/vector/tests/utils/VectorTestBase.h"
 
 #include <gtest/gtest.h>
@@ -176,6 +178,14 @@ TEST_F(PlanNodeSerdeTest, markDistinct) {
   testSerde(plan);
 }
 
+TEST_F(PlanNodeSerdeTest, enforceDistinct) {
+  auto plan = PlanBuilder()
+                  .values({data_})
+                  .enforceDistinct({"c0", "c1", "c2"}, "Test error message")
+                  .planNode();
+  testSerde(plan);
+}
+
 TEST_F(PlanNodeSerdeTest, nestedLoopJoin) {
   auto left = makeRowVector(
       {"t0", "t1", "t2"},
@@ -223,10 +233,8 @@ TEST_F(PlanNodeSerdeTest, enforceSingleRow) {
 }
 
 TEST_F(PlanNodeSerdeTest, exchange) {
-  for (auto serdeKind : std::vector<VectorSerde::Kind>{
-           VectorSerde::Kind::kPresto,
-           VectorSerde::Kind::kCompactRow,
-           VectorSerde::Kind::kUnsafeRow}) {
+  for (auto serdeKind :
+       std::vector<std::string>{"Presto", "CompactRow", "UnsafeRow"}) {
     SCOPED_TRACE(fmt::format("serdeKind: {}", serdeKind));
     auto plan = PlanBuilder()
                     .exchange(
@@ -310,10 +318,8 @@ TEST_F(PlanNodeSerdeTest, limit) {
 }
 
 TEST_F(PlanNodeSerdeTest, mergeExchange) {
-  for (auto serdeKind : std::vector<VectorSerde::Kind>{
-           VectorSerde::Kind::kPresto,
-           VectorSerde::Kind::kCompactRow,
-           VectorSerde::Kind::kUnsafeRow}) {
+  for (auto serdeKind :
+       std::vector<std::string>{"Presto", "CompactRow", "UnsafeRow"}) {
     auto plan = PlanBuilder()
                     .mergeExchange(
                         ROW({"a", "b", "c"}, {BIGINT(), DOUBLE(), VARCHAR()}),
@@ -420,10 +426,8 @@ TEST_F(PlanNodeSerdeTest, orderBy) {
 }
 
 TEST_F(PlanNodeSerdeTest, partitionedOutput) {
-  for (auto serdeKind : std::vector<VectorSerde::Kind>{
-           VectorSerde::Kind::kPresto,
-           VectorSerde::Kind::kCompactRow,
-           VectorSerde::Kind::kUnsafeRow}) {
+  for (auto serdeKind :
+       std::vector<std::string>{"Presto", "CompactRow", "UnsafeRow"}) {
     SCOPED_TRACE(fmt::format("serdeKind: {}", serdeKind));
 
     auto plan = PlanBuilder()
@@ -531,6 +535,22 @@ TEST_F(PlanNodeSerdeTest, hashJoin) {
                  "", // no filter
                  {"t0", "t1", "u2", "t2"},
                  core::JoinType::kLeft)
+             .planNode();
+
+  testSerde(plan);
+
+  // nullAsValue join (used for EXCEPT/INTERSECT).
+  plan = PlanBuilder(planNodeIdGenerator)
+             .values({probe})
+             .hashJoin(
+                 {"t0"},
+                 {"u0"},
+                 PlanBuilder(planNodeIdGenerator).values({build}).planNode(),
+                 "",
+                 {"t0", "t1"},
+                 core::JoinType::kAnti,
+                 /*nullAware=*/false,
+                 /*nullAsValue=*/true)
              .planNode();
 
   testSerde(plan);
@@ -656,14 +676,44 @@ TEST_F(PlanNodeSerdeTest, rowNumber) {
 }
 
 TEST_F(PlanNodeSerdeTest, scan) {
-  auto plan = PlanBuilder(pool_.get())
-                  .tableScan(
-                      ROW({"a", "b", "c", "d"},
-                          {BIGINT(), BIGINT(), BOOLEAN(), DOUBLE()}),
-                      {"a < 5", "b = 7", "c = true", "d > 0.01"},
-                      "a + b < 100")
-                  .planNode();
-  testSerde(plan);
+  {
+    auto plan = PlanBuilder(pool_.get())
+                    .tableScan(
+                        ROW({"a", "b", "c", "d"},
+                            {BIGINT(), BIGINT(), BOOLEAN(), DOUBLE()}),
+                        {"a < 5", "b = 7", "c = true", "d > 0.01"},
+                        "a + b < 100")
+                    .planNode();
+    testSerde(plan);
+  }
+
+  {
+    auto plan =
+        PlanBuilder()
+            .startTableScan()
+            .outputType(ROW({"x"}, {BIGINT()}))
+            .assignments(
+                {{"x", HiveConnectorTestBase::regularColumn("a", BIGINT())}})
+            .dataColumns(ROW({"a", "b"}, {BIGINT(), BIGINT()}))
+            .filterColumnHandles({
+                HiveConnectorTestBase::partitionKey("ds", VARCHAR()),
+                HiveConnectorTestBase::regularColumn("a", BIGINT()),
+            })
+            .remainingFilter("length(ds) + a % 2 > 0")
+            .endTableScan()
+            .planNode();
+    testSerde(plan);
+  }
+
+  {
+    auto plan = PlanBuilder()
+                    .startTableScan()
+                    .outputType(ROW({"x"}, {BIGINT()}))
+                    .sampleRate(0.5)
+                    .endTableScan()
+                    .planNode();
+    testSerde(plan);
+  }
 }
 
 TEST_F(PlanNodeSerdeTest, topNRowNumber) {
@@ -961,6 +1011,29 @@ TEST_F(PlanNodeSerdeTest, columnStatsSpec) {
             std::move(aggregateNames),
             std::move(aggregates)),
         "");
+  }
+}
+
+TEST_F(PlanNodeSerdeTest, countingJoin) {
+  for (auto joinType :
+       {core::JoinType::kCountingAnti,
+        core::JoinType::kCountingLeftSemiFilter}) {
+    SCOPED_TRACE(core::JoinTypeName::toName(joinType));
+    auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+    auto plan = PlanBuilder(planNodeIdGenerator)
+                    .values({data_})
+                    .hashJoin(
+                        {"c0"},
+                        {"u_c0"},
+                        PlanBuilder(planNodeIdGenerator)
+                            .values({data_})
+                            .project({"c0 as u_c0"})
+                            .planNode(),
+                        "",
+                        {"c0", "c1"},
+                        joinType)
+                    .planNode();
+    testSerde(plan);
   }
 }
 

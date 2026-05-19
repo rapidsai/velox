@@ -16,18 +16,21 @@
 
 #include "velox/exec/fuzzer/TopNRowNumberFuzzer.h"
 
+#include <folly/String.h>
+#include <string_view>
 #include <utility>
 
+#include "velox/common/testutil/TempDirectoryPath.h"
 #include "velox/exec/fuzzer/FuzzerUtil.h"
-#include "velox/exec/fuzzer/RowNumberFuzzerBase.h"
+#include "velox/exec/fuzzer/SpillFuzzerBase.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
-#include "velox/exec/tests/utils/TempDirectoryPath.h"
 #include "velox/vector/tests/utils/VectorMaker.h"
 
 namespace facebook::velox::exec {
+using namespace facebook::velox::common::testutil;
 namespace {
 
-class TopNRowNumberFuzzer : public RowNumberFuzzerBase {
+class TopNRowNumberFuzzer : public SpillFuzzerBase {
  public:
   explicit TopNRowNumberFuzzer(
       size_t initialSeed,
@@ -41,6 +44,8 @@ class TopNRowNumberFuzzer : public RowNumberFuzzerBase {
   std::pair<std::vector<std::string>, std::vector<TypePtr>> generateKeys(
       const std::string& prefix);
 
+  std::string generateRankFunction();
+
   std::vector<RowVectorPtr> generateInput(
       const std::vector<std::string>& keyNames,
       const std::vector<TypePtr>& keyTypes,
@@ -49,24 +54,36 @@ class TopNRowNumberFuzzer : public RowNumberFuzzerBase {
 
   // Makes the query plan with default settings in TopNRowNumberFuzzer.
   std::pair<PlanWithSplits, int32_t> makeDefaultPlan(
+      std::string_view rankFunction,
       const std::vector<std::string>& partitionKeys,
       const std::vector<std::string>& sortKeys,
       const std::vector<std::string>& allKeys,
       const std::vector<RowVectorPtr>& input);
 
   PlanWithSplits makePlanWithTableScan(
+      std::string_view rankFunction,
       const std::vector<std::string>& partitionKeys,
       const std::vector<std::string>& sortKeys,
       const std::vector<std::string>& allKeys,
       int limit,
       const std::vector<RowVectorPtr>& input,
       const std::string& tableDir);
+
+  // Makes an alternate plan using WindowNode with the same rank function,
+  // then filters rows where the rank value is within the limit.
+  PlanWithSplits makeWindowPlan(
+      std::string_view rankFunction,
+      const std::vector<std::string>& partitionKeys,
+      const std::vector<std::string>& sortKeys,
+      const std::vector<std::string>& allKeys,
+      int32_t limit,
+      const std::vector<RowVectorPtr>& input);
 };
 
 TopNRowNumberFuzzer::TopNRowNumberFuzzer(
     size_t initialSeed,
     std::unique_ptr<test::ReferenceQueryRunner> referenceQueryRunner)
-    : RowNumberFuzzerBase(initialSeed, std::move(referenceQueryRunner)) {}
+    : SpillFuzzerBase(initialSeed, std::move(referenceQueryRunner)) {}
 
 std::pair<std::vector<std::string>, std::vector<TypePtr>>
 TopNRowNumberFuzzer::generateKeys(const std::string& prefix) {
@@ -91,6 +108,19 @@ TopNRowNumberFuzzer::generateKeys(const std::string& prefix) {
   }
 
   return std::make_pair(keys, types);
+}
+
+std::string TopNRowNumberFuzzer::generateRankFunction() {
+  int32_t rankFunction = randInt(0, 2);
+  switch (rankFunction) {
+    case 0:
+      return "row_number";
+    case 1:
+      return "rank";
+    case 2:
+      return "dense_rank";
+  }
+  return "row_number";
 }
 
 std::vector<RowVectorPtr> TopNRowNumberFuzzer::generateInput(
@@ -153,12 +183,14 @@ std::vector<RowVectorPtr> TopNRowNumberFuzzer::generateInput(
         // values. This is done to introduce some repetition of key values for
         // windowing.
         auto baseVector = vectorFuzzer_.fuzz(keyTypes[i], numPartitions);
-        children.push_back(BaseVector::wrapInDictionary(
-            partitionNulls, partitionIndices, size, baseVector));
+        children.push_back(
+            BaseVector::wrapInDictionary(
+                partitionNulls, partitionIndices, size, baseVector));
       } else if (sortingKeySet.find(keyNames[i]) != sortingKeySet.end()) {
         auto baseVector = vectorFuzzer_.fuzz(keyTypes[i], numPeerGroups);
-        children.push_back(BaseVector::wrapInDictionary(
-            sortingNulls, sortingIndices, size, baseVector));
+        children.push_back(
+            BaseVector::wrapInDictionary(
+                sortingNulls, sortingIndices, size, baseVector));
       } else {
         children.push_back(vectorFuzzer_.fuzz(keyTypes[i], size));
       }
@@ -171,26 +203,26 @@ std::vector<RowVectorPtr> TopNRowNumberFuzzer::generateInput(
   return input;
 }
 
-std::pair<RowNumberFuzzerBase::PlanWithSplits, int32_t>
-TopNRowNumberFuzzer::makeDefaultPlan(
+std::pair<PlanWithSplits, int32_t> TopNRowNumberFuzzer::makeDefaultPlan(
+    std::string_view rankFunction,
     const std::vector<std::string>& partitionKeys,
     const std::vector<std::string>& sortKeys,
     const std::vector<std::string>& allKeys,
     const std::vector<RowVectorPtr>& input) {
-  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
   std::vector<std::string> projectFields = allKeys;
   projectFields.emplace_back("row_number");
 
   int32_t limit = randInt(1, FLAGS_batch_size);
   auto plan = test::PlanBuilder()
                   .values(input)
-                  .topNRowNumber(partitionKeys, sortKeys, limit, true)
+                  .topNRank(rankFunction, partitionKeys, sortKeys, limit, true)
                   .project(projectFields)
                   .planNode();
   return std::make_pair(PlanWithSplits{std::move(plan)}, limit);
 }
 
-RowNumberFuzzerBase::PlanWithSplits TopNRowNumberFuzzer::makePlanWithTableScan(
+PlanWithSplits TopNRowNumberFuzzer::makePlanWithTableScan(
+    std::string_view rankFunction,
     const std::vector<std::string>& partitionKeys,
     const std::vector<std::string>& sortKeys,
     const std::vector<std::string>& allKeys,
@@ -205,13 +237,46 @@ RowNumberFuzzerBase::PlanWithSplits TopNRowNumberFuzzer::makePlanWithTableScan(
   auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
   auto plan = test::PlanBuilder(planNodeIdGenerator)
                   .tableScan(asRowType(input[0]->type()))
-                  .topNRowNumber(partitionKeys, sortKeys, limit, true)
+                  .topNRank(rankFunction, partitionKeys, sortKeys, limit, true)
                   .project(projectFields)
                   .planNode();
 
   const std::vector<Split> splits = test::makeSplits(
       input, fmt::format("{}/topn_row_number", tableDir), writerPool_);
   return PlanWithSplits{plan, splits};
+}
+
+PlanWithSplits TopNRowNumberFuzzer::makeWindowPlan(
+    std::string_view rankFunction,
+    const std::vector<std::string>& partitionKeys,
+    const std::vector<std::string>& sortKeys,
+    const std::vector<std::string>& allKeys,
+    int32_t limit,
+    const std::vector<RowVectorPtr>& input) {
+  // Build the window OVER clause with optional PARTITION BY and ORDER BY.
+  std::string overClause;
+  if (!partitionKeys.empty()) {
+    overClause =
+        fmt::format("partition by {} ", folly::join(", ", partitionKeys));
+  }
+  overClause += fmt::format("order by {}", folly::join(", ", sortKeys));
+
+  // Alias the window output to "row_number" to match the default plan's output
+  // schema, regardless of which rank function (row_number, rank, dense_rank)
+  // is used.
+  auto windowExpr =
+      fmt::format("{}() over ({}) AS row_number", rankFunction, overClause);
+
+  std::vector<std::string> projectFields = allKeys;
+  projectFields.emplace_back("row_number");
+
+  auto plan = test::PlanBuilder()
+                  .values(input)
+                  .window({windowExpr})
+                  .filter(fmt::format("row_number <= {}", limit))
+                  .project(projectFields)
+                  .planNode();
+  return PlanWithSplits{std::move(plan)};
 }
 
 void TopNRowNumberFuzzer::runSingleIteration() {
@@ -236,11 +301,12 @@ void TopNRowNumberFuzzer::runSingleIteration() {
   const auto input = generateInput(allKeys, allTypes, partitionKeys, sortKeys);
   test::logVectors(input);
 
-  auto [defaultPlan, limit] =
-      makeDefaultPlan(partitionKeys, allSortKeys, allKeys, input);
+  const auto rankFunction = generateRankFunction();
 
-  const auto expected =
-      execute(defaultPlan, pool_, /*injectSpill=*/false, false);
+  auto [defaultPlan, limit] =
+      makeDefaultPlan(rankFunction, partitionKeys, allSortKeys, allKeys, input);
+
+  const auto expected = execute(defaultPlan, /*injectSpill=*/false, false);
   if (expected != nullptr) {
     validateExpectedResults(defaultPlan.plan, input, expected);
   }
@@ -248,9 +314,13 @@ void TopNRowNumberFuzzer::runSingleIteration() {
   std::vector<PlanWithSplits> altPlans;
   altPlans.push_back(std::move(defaultPlan));
 
-  const auto tableScanDir = exec::test::TempDirectoryPath::create();
+  altPlans.push_back(makeWindowPlan(
+      rankFunction, partitionKeys, allSortKeys, allKeys, limit, input));
+
+  const auto tableScanDir = TempDirectoryPath::create();
   if (isTableScanSupported(input[0]->type())) {
     altPlans.push_back(makePlanWithTableScan(
+        rankFunction,
         partitionKeys,
         allSortKeys,
         allKeys,

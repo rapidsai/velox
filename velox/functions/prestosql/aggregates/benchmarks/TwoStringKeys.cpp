@@ -28,6 +28,7 @@ DEFINE_int64(fuzzer_seed, 99887766, "Seed for random input dataset generator");
 using namespace facebook::velox;
 using namespace facebook::velox::connector::hive;
 using namespace facebook::velox::exec::test;
+using namespace facebook::velox::common::testutil;
 
 static constexpr int32_t kNumVectors = 7'000;
 static constexpr int32_t kRowsPerVector = 4'000;
@@ -113,7 +114,8 @@ class TwoStringKeysBenchmark : public HiveConnectorTestBase {
         std::move(plan),
         0,
         core::QueryCtx::create(executor_.get()),
-        exec::Task::ExecutionMode::kSerial);
+        exec::Task::ExecutionMode::kSerial,
+        exec::Consumer{});
 
     task->addSplit(
         "0", exec::Split(makeHiveConnectorSplit((filePath_->getPath()))));

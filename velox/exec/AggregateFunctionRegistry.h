@@ -19,15 +19,43 @@
 #include <vector>
 
 #include "velox/type/Type.h"
+#include "velox/type/TypeCoercer.h"
 
 namespace facebook::velox::exec {
 
-/// Given a name of aggregate function and argument types, returns a pair of the
-/// return type and intermediate type if the function exists. Throws if function
-/// doesn't exist or doesn't support specified argument types.
+/// Given a name of aggregate function and argument types, returns the result
+/// type if the function exists. Throws if function doesn't exist or doesn't
+/// support specified argument types. Since aggregate functions can be
+/// integrated into internal steps of an aggregate operator — rather than
+/// always being used as standalone functions at the SQL level — their result
+/// types may not always be inferable from the intermediate types. As a
+/// result, an exception might be thrown during the type resolution process. In
+/// such cases, the caller should explicitly specify the result type. More
+/// details can be found in
+/// https://github.com/facebookincubator/velox/pull/11999#issuecomment-3274577979
+/// and https://github.com/facebookincubator/velox/issues/12830.
+TypePtr resolveResultType(
+    const std::string& name,
+    const std::vector<TypePtr>& argTypes);
+
+/// Like 'resolveResultType', but with support for applying type conversions if
+/// a function signature doesn't match 'argTypes' exactly.
 ///
-/// @return a pair of {finalType, intermediateType}
-std::pair<TypePtr, TypePtr> resolveAggregateFunction(
+/// @param coercions A list of optional type coercions that were applied to
+/// resolve a function successfully. Contains one entry per argument. The entry
+/// is null if no coercion is required for that argument. The entry is not null
+/// if coercion is necessary.
+/// @param coercer Coercion rule set to use when resolving type coercions.
+TypePtr resolveResultTypeWithCoercions(
+    const std::string& name,
+    const std::vector<TypePtr>& argTypes,
+    std::vector<TypePtr>& coercions,
+    const TypeCoercer& coercer);
+
+/// Given a name of aggregate function and argument types, returns the
+/// intermediate type if the function exists. Throws if function doesn't exist
+/// or doesn't support specified argument types.
+TypePtr resolveIntermediateType(
     const std::string& name,
     const std::vector<TypePtr>& argTypes);
 

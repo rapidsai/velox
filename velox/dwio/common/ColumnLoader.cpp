@@ -56,7 +56,7 @@ RowSet read(
 
   structReader->advanceFieldReader(fieldReader, offset);
   fieldReader->scanSpec()->setValueHook(hook);
-  fieldReader->read(offset, effectiveRows, incomingNulls);
+  fieldReader->readWithTiming(offset, effectiveRows, incomingNulls);
   if (fieldReader->fileType().type()->isRow() ||
       fieldReader->scanSpec()->isFlatMapAsStruct()) {
     // 'fieldReader_' may itself produce LazyVectors. For this it must have its
@@ -113,6 +113,19 @@ void ColumnLoader::loadInternal(
       // 'rows'.
       scatter(rows, resultSize, result);
     }
+  }
+}
+
+void TransformColumnLoader::loadInternal(
+    RowSet rows,
+    ValueHook* hook,
+    vector_size_t resultSize,
+    VectorPtr* result) {
+  process::TraceContext trace("TransformColumnLoader::loadInternal");
+  VectorPtr fileResult;
+  ColumnLoader::loadInternal(rows, hook, resultSize, &fileResult);
+  if (fileResult) {
+    *result = transform_(fileResult, fieldReader_->memoryPool());
   }
 }
 

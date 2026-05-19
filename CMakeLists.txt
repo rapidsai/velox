@@ -111,7 +111,7 @@ endif()
 if(VELOX_BUILD_SHARED)
   message(
     WARNING
-    "When building Velox as a shared library it's recommended to build against a shared build of folly to avoid issues with linking of gflags."
+    "When building Velox as a shared library it's recommended to build against a shared build of folly to avoid issues with linking of gflags. "
     "This is currently NOT being enforced so user discretion is advised."
   )
 endif()
@@ -156,7 +156,7 @@ option(VELOX_ENABLE_ABFS "Build Abfs Connector" OFF)
 option(VELOX_ENABLE_HDFS "Build Hdfs Connector" OFF)
 option(VELOX_ENABLE_PARQUET "Enable Parquet support" ON)
 option(VELOX_ENABLE_ARROW "Enable Arrow support" OFF)
-option(VELOX_ENABLE_GEO "Enable Geospatial support" OFF)
+option(VELOX_ENABLE_GEO "Enable Geospatial support" ON)
 option(VELOX_ENABLE_REMOTE_FUNCTIONS "Enable remote function support" OFF)
 option(VELOX_ENABLE_CCACHE "Use ccache if installed." ON)
 option(VELOX_ENABLE_COMPRESSION_LZ4 "Enable Lz4 compression support." OFF)
@@ -212,9 +212,24 @@ if(VELOX_ENABLE_BENCHMARKS_BASIC)
   set(VELOX_BUILD_TEST_UTILS ON)
 endif()
 
+if(VELOX_ENABLE_CUDF)
+  if(NOT "${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
+    message(FATAL_ERROR "cuDF requires GCC. Found ${CMAKE_CXX_COMPILER_ID}.")
+  elseif(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13.3)
+    message(FATAL_ERROR "cuDF requires GCC >= 13.3. Found GCC ${CMAKE_CXX_COMPILER_VERSION}.")
+  endif()
+  message(STATUS "Building curl from source to satisfy cuDF curl version requirement")
+  set(CURL_SOURCE BUNDLED)
+  velox_resolve_dependency(CURL)
+endif()
+
 if(VELOX_BUILD_TESTING OR VELOX_BUILD_TEST_UTILS)
-  set(cpr_SOURCE BUNDLED)
-  velox_resolve_dependency(cpr)
+  # cuDF bundles curl since it needs a specific version.
+  # Use bundled or system curl otherwise.
+  if(NOT VELOX_ENABLE_CUDF)
+    velox_set_source(CURL)
+    velox_resolve_dependency(CURL)
+  endif()
   set(VELOX_ENABLE_DUCKDB ON)
   set(VELOX_ENABLE_PARSE ON)
 endif()
@@ -300,7 +315,7 @@ if(VELOX_ENABLE_S3)
   if(AWSSDK_ROOT_DIR)
     list(APPEND CMAKE_PREFIX_PATH ${AWSSDK_ROOT_DIR})
   endif()
-  find_package(AWSSDK REQUIRED COMPONENTS s3;identity-management)
+  find_package(AWSSDK 1.11.654 REQUIRED COMPONENTS s3;identity-management)
   add_definitions(-DVELOX_ENABLE_S3)
 endif()
 
@@ -396,13 +411,6 @@ if(${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsigned-char")
 endif()
 
-# Ensure that we don't bring in headers that might have coroutines enabled. The
-# dependencies turn off coroutines in folly and the other FBOS dependencies. If
-# not explicitly turned off differences in the build using GCC cause libray
-# incompatibilities of the thrift server and the remote functions library
-# causing SEGVs in the tests.
-string(APPEND CMAKE_CXX_FLAGS " -DFOLLY_CFG_NO_COROUTINES")
-
 # Under Ninja, we are able to designate certain targets large enough to require
 # restricted parallelism.
 if("${MAX_HIGH_MEM_JOBS}")
@@ -445,7 +453,8 @@ if(ENABLE_ALL_WARNINGS)
     endif()
     if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "14.0.0")
       string(APPEND KNOWN_COMPILER_SPECIFIC_WARNINGS " -Wno-error=template-id-cdtor")
-      string(APPEND KNOWN_COMPILER_SPECIFIC_WARNINGS " -Wno-error=overloaded-virtual")
+      string(APPEND KNOWN_COMPILER_SPECIFIC_WARNINGS " -Wno-overloaded-virtual")
+      string(APPEND KNOWN_COMPILER_SPECIFIC_WARNINGS " -Wno-error=tautological-compare")
     endif()
   endif()
 
@@ -472,9 +481,16 @@ if(VELOX_ENABLE_WAVE OR VELOX_ENABLE_CUDF)
     message(FATAL_ERROR "-DCMAKE_CUDA_ARCHITECTURES= must be set")
   endif()
   if(CMAKE_BUILD_TYPE MATCHES Debug)
-    add_compile_options("$<$<COMPILE_LANGUAGE:CUDA>:-G>")
+    set(VELOX_CUDA_DEBUG_FLAGS "$<$<COMPILE_LANGUAGE:CUDA>:-G>")
   endif()
   find_package(CUDAToolkit REQUIRED)
+  # Suppress deprecated GPU targets warning for CUDA 12.8.x
+  if(
+    CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.8.0
+    AND CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 13.0.0
+  )
+    string(APPEND CMAKE_CUDA_FLAGS " -Wno-deprecated-gpu-targets")
+  endif()
   if(VELOX_ENABLE_CUDF)
     foreach(arch ${CMAKE_CUDA_ARCHITECTURES})
       if(arch LESS 70)
@@ -487,6 +503,16 @@ if(VELOX_ENABLE_WAVE OR VELOX_ENABLE_CUDF)
     set(VELOX_ENABLE_ARROW ON)
     velox_set_source(cudf)
     velox_resolve_dependency(cudf)
+    if(TARGET aws-cpp-sdk-core)
+      # Fix for AWS SDK CPP using hardcoded system curl instead of soft link to curl
+      get_target_property(override_curl_lib aws-cpp-sdk-core INTERFACE_LINK_LIBRARIES)
+      list(REMOVE_ITEM override_curl_lib "/usr/lib64/libcurl.so")
+      list(APPEND override_curl_lib "\$<LINK_ONLY:CURL::libcurl>")
+      set_target_properties(
+        aws-cpp-sdk-core
+        PROPERTIES INTERFACE_LINK_LIBRARIES "${override_curl_lib}"
+      )
+    endif()
   endif()
 endif()
 
@@ -546,15 +572,17 @@ if(NOT TARGET gflags::gflags)
   # target even when velox is built as a subproject which uses
   # `find_package(gflags)` which does not create a globally imported target that
   # we can ALIAS.
-  add_library(gflags_gflags INTERFACE)
-  target_link_libraries(gflags_gflags INTERFACE gflags)
-  add_library(gflags::gflags ALIAS gflags_gflags)
+  add_library(gflags::gflags ALIAS gflags)
 endif()
 
 if(${gflags_SOURCE} STREQUAL "BUNDLED")
-  # we force glog from source to avoid issues with a system version built
-  # against another gflags version (which is likely)
-  set(glog_SOURCE BUNDLED)
+  # Allow explicit glog_SOURCE override (e.g. when system glog is built
+  # against the same gflags version as BUNDLED).
+  if(DEFINED ENV{glog_SOURCE})
+    set(glog_SOURCE $ENV{glog_SOURCE})
+  else()
+    set(glog_SOURCE BUNDLED)
+  endif()
 else()
   set(glog_SOURCE SYSTEM)
 endif()
@@ -574,13 +602,16 @@ if(${VELOX_BUILD_MINIMAL_WITH_DWIO} OR ${VELOX_ENABLE_HIVE_CONNECTOR})
   find_package(ZLIB REQUIRED)
   find_package(zstd REQUIRED)
   find_package(Snappy REQUIRED)
+  # Ensure zstd::zstd target exists - handle different zstd package configurations
   if(NOT TARGET zstd::zstd)
     if(TARGET zstd::libzstd_static)
-      set(ZSTD_TYPE static)
+      add_library(zstd::zstd ALIAS zstd::libzstd_static)
+    elseif(TARGET zstd::libzstd_shared)
+      add_library(zstd::zstd ALIAS zstd::libzstd_shared)
     else()
-      set(ZSTD_TYPE shared)
+      # Fallback: use Findzstd.cmake to create the target
+      include(Findzstd)
     endif()
-    add_library(zstd::zstd ALIAS zstd::libzstd_${ZSTD_TYPE})
   endif()
 endif()
 
@@ -602,7 +633,10 @@ if(${VELOX_BUILD_MINIMAL_WITH_DWIO} OR ${VELOX_ENABLE_HIVE_CONNECTOR} OR VELOX_E
 endif()
 
 velox_set_source(simdjson)
-velox_resolve_dependency(simdjson 3.9.3)
+velox_resolve_dependency(simdjson 4.1.0)
+
+velox_set_source(FastFloat)
+velox_resolve_dependency(FastFloat)
 
 velox_set_source(folly)
 velox_resolve_dependency(folly)
@@ -636,9 +670,15 @@ if(VELOX_ENABLE_GCS)
 endif()
 
 # GCC needs to link a library to enable std::filesystem.
+# GCC needs to enable co-routines. We only support compiler that
+# support coroutines.
 if("${CMAKE_CXX_COMPILER_ID}" MATCHES "GNU")
   # Find Threads library
   find_package(Threads REQUIRED)
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fcoroutines>)
+  # Explicitly enable folly coroutines when compiler supports them.
+  # This is required for folly::coro::AsyncGenerator to work correctly.
+  add_compile_definitions(FOLLY_HAS_COROUTINES=1)
 endif()
 
 if(VELOX_BUILD_TESTING AND NOT VELOX_ENABLE_DUCKDB)
@@ -706,10 +746,6 @@ endif()
 
 include_directories(.)
 
-# TODO: Include all other installation files. For now just making sure this
-# generates an installable makefile.
-install(FILES velox/type/Type.h DESTINATION "include/velox")
-
 # Adding this down here prevents warnings in dependencies from stopping the
 # build
 if("${TREAT_WARNINGS_AS_ERRORS}")
@@ -726,6 +762,12 @@ endif()
 if(VELOX_ENABLE_GEO)
   velox_set_source(geos)
   velox_resolve_dependency(geos)
+endif()
+
+if(VELOX_ENABLE_GEO)
+  list(PREPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/CMake/resolve_dependency_modules/s2geometry)
+  velox_set_source(s2geometry)
+  velox_resolve_dependency(s2geometry)
 endif()
 
 add_subdirectory(velox)

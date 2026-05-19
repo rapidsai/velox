@@ -945,8 +945,9 @@ class VectorMaker {
           if (it == keysMap.end()) {
             keysMap.insert({key, keyChannel++});
             flatKeys.push_back(key);
-            values.push_back(BaseVector::create(
-                mapVector->type()->childAt(1), mapVector->size(), pool_));
+            values.push_back(
+                BaseVector::create(
+                    mapVector->type()->childAt(1), mapVector->size(), pool_));
 
             // We allocate a new inMaps buffer, setting "not in map" by default.
             // Then set the current key to in map.
@@ -1045,6 +1046,17 @@ class VectorMaker {
   /// with map at index 1 as null.
   MapVectorPtr mapVector(
       const std::vector<vector_size_t>& offsets,
+      const VectorPtr& keys,
+      const VectorPtr& values,
+      const std::vector<vector_size_t>& nulls = {});
+
+  /// Create a MapVector from explicit offsets, sizes, and key/value vectors.
+  /// Unlike the offsets-only overload above, this allows non-consecutive or
+  /// out-of-order offsets (e.g. for testing vectors produced by filters or
+  /// slices). An optional nulls vector specifies which row indices are null.
+  MapVectorPtr mapVector(
+      const std::vector<vector_size_t>& offsets,
+      const std::vector<vector_size_t>& sizes,
       const VectorPtr& keys,
       const VectorPtr& values,
       const std::vector<vector_size_t>& nulls = {});

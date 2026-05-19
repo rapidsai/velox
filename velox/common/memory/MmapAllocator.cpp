@@ -33,9 +33,11 @@ MmapAllocator::MmapAllocator(const Options& options)
           maxMallocBytes_ == 0
               ? 0
               : options.capacity * options.smallAllocationReservePct / 100),
-      capacity_(bits::roundUp(
-          AllocationTraits::numPages(options.capacity - mallocReservedBytes_),
-          64 * sizeClassSizes_.back())) {
+      capacity_(
+          bits::roundUp(
+              AllocationTraits::numPages(
+                  options.capacity - mallocReservedBytes_),
+              64 * sizeClassSizes_.back())) {
   for (const auto& size : sizeClassSizes_) {
     sizeClasses_.push_back(std::make_unique<SizeClass>(capacity_ / size, size));
   }
@@ -675,8 +677,7 @@ bool MmapAllocator::SizeClass::allocateLocked(
 
 namespace {
 bool isAllZero(xsimd::batch<uint64_t> bits) {
-  return simd::allSetBitMask<uint64_t>() ==
-      simd::toBitMask(bits == xsimd::broadcast<uint64_t>(0));
+  return simd::all(bits == xsimd::broadcast<uint64_t>(0));
 }
 } // namespace
 

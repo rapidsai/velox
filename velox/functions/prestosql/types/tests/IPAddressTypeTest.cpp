@@ -25,7 +25,7 @@ class IPAddressTypeTest : public testing::Test, public TypeTestBase {
     registerIPAddressType();
   }
 
-  int128_t getIPv6asInt128FromStringUnchecked(const std::string& ipAddr) {
+  int128_t getIPv6asInt128FromStringUnchecked(std::string_view ipAddr) {
     auto ret = ipaddress::tryGetIPv6asInt128FromString(ipAddr);
     return ret.value();
   }
@@ -123,4 +123,18 @@ TEST_F(IPAddressTypeTest, compare) {
           getIPv6asInt128FromStringUnchecked("::ffff:ffff:ffff"),
           getIPv6asInt128FromStringUnchecked("255.255.255.255")));
 }
+
+TEST_F(IPAddressTypeTest, valueToString) {
+  auto toString = [](std::string_view ip) {
+    return IPADDRESS()->valueToString(
+        ipaddress::tryGetIPv6asInt128FromString(ip).value());
+  };
+
+  EXPECT_EQ(toString("1.2.3.4"), "1.2.3.4");
+  EXPECT_EQ(toString("192.168.255.255"), "192.168.255.255");
+  EXPECT_EQ(toString("::1"), "::1");
+  EXPECT_EQ(toString("2001:db8::ff00:42:8329"), "2001:db8::ff00:42:8329");
+  EXPECT_EQ(toString("::ffff:1.2.3.4"), "1.2.3.4");
+}
+
 } // namespace facebook::velox::test

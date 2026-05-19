@@ -15,15 +15,16 @@
  */
 #include "velox/common/base/tests/GTestUtils.h"
 #include "velox/common/testutil/OptionalEmpty.h"
+#include "velox/common/testutil/TempFilePath.h"
 #include "velox/exec/PlanNodeStats.h"
 #include "velox/exec/tests/utils/AssertQueryBuilder.h"
 #include "velox/exec/tests/utils/HiveConnectorTestBase.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
-#include "velox/exec/tests/utils/TempFilePath.h"
 
 using namespace facebook::velox;
 using namespace facebook::velox::exec;
 using namespace facebook::velox::exec::test;
+using namespace facebook::velox::common::testutil;
 
 class UnnestTest : public HiveConnectorTestBase,
                    public testing::WithParamInterface<vector_size_t> {
@@ -285,7 +286,7 @@ TEST_P(UnnestTest, arrayWithOrdinality) {
   assertQuery(params, expectedInDict);
 }
 
-TEST_P(UnnestTest, arrayWithEmptyUnnestValue) {
+TEST_P(UnnestTest, arrayWithMarker) {
   const auto array = makeArrayVectorFromJson<int32_t>(
       {"[1, 2, null, 4]", "null", "[5, 6]", "[]", "[null]", "[7, 8, 9]"});
   const auto input = makeRowVector(
@@ -312,7 +313,7 @@ TEST_P(UnnestTest, arrayWithEmptyUnnestValue) {
        expected->childAt(1),
        makeNullableFlatVector<int64_t>({1, 2, 3, 4, 1, 2, 1, 1, 2, 3})});
 
-  const auto expectedWithEmptyUnnestValue = makeRowVector(
+  const auto expectedWithMarker = makeRowVector(
       {makeNullableFlatVector<double>(
            {1.1,
             1.1,
@@ -340,23 +341,23 @@ TEST_P(UnnestTest, arrayWithEmptyUnnestValue) {
             8,
             9}),
        makeNullableFlatVector<bool>(
-           {false,
-            false,
-            false,
-            false,
+           {true,
+            true,
+            true,
             true,
             false,
-            false,
+            true,
             true,
             false,
-            false,
-            false,
-            false})});
+            true,
+            true,
+            true,
+            true})});
   const auto expectedWithBoth = makeRowVector(
-      {expectedWithEmptyUnnestValue->childAt(0),
-       expectedWithEmptyUnnestValue->childAt(1),
+      {expectedWithMarker->childAt(0),
+       expectedWithMarker->childAt(1),
        makeNullableFlatVector<int64_t>({1, 2, 3, 4, 0, 1, 2, 0, 1, 1, 2, 3}),
-       expectedWithEmptyUnnestValue->childAt(2)});
+       expectedWithMarker->childAt(2)});
 
   struct {
     bool hasOrdinality;
@@ -375,7 +376,7 @@ TEST_P(UnnestTest, arrayWithEmptyUnnestValue) {
   } testSettings[] = {
       {false, false, input, expected},
       {true, false, input, expectedWithOrdinality},
-      {false, true, input, expectedWithEmptyUnnestValue},
+      {false, true, input, expectedWithMarker},
       {true, true, input, expectedWithBoth}};
 
   for (const auto& testData : testSettings) {
@@ -385,13 +386,13 @@ TEST_P(UnnestTest, arrayWithEmptyUnnestValue) {
     if (testData.hasOrdinality) {
       ordinalityName = "ordinal";
     }
-    std::optional<std::string> emptyUnnestValueName;
+    std::optional<std::string> markerName;
     if (testData.hasEmptyUnnestValue) {
-      emptyUnnestValueName = "emptyUnnestValue";
+      markerName = "emptyUnnestValue";
     }
     auto op = PlanBuilder()
                   .values({testData.input})
-                  .unnest({"c0"}, {"c1"}, ordinalityName, emptyUnnestValueName)
+                  .unnest({"c0"}, {"c1"}, ordinalityName, markerName)
                   .planNode();
     auto params = makeCursorParameters(op);
     assertQuery(params, testData.expected);
@@ -466,7 +467,7 @@ TEST_P(UnnestTest, mapWithOrdinality) {
   assertQuery(params, expectedInDict);
 }
 
-TEST_P(UnnestTest, mapWithEmptyUnnestValue) {
+TEST_P(UnnestTest, mapWithMarker) {
   const auto map = makeNullableMapVector<int32_t, double>(
       {{{{1, 1.1}, {2, std::nullopt}}},
        common::testutil::optionalEmpty,
@@ -489,7 +490,7 @@ TEST_P(UnnestTest, mapWithEmptyUnnestValue) {
        expected->childAt(2),
        makeNullableFlatVector<int64_t>({1, 2, 1, 2, 3, 1})});
 
-  const auto expectedWithEmptyUnnestValue = makeRowVector(
+  const auto expectedWithMarker = makeRowVector(
       {makeNullableFlatVector<int32_t>({1, 1, 2, 3, 3, 3, 4, 5}),
        makeNullableFlatVector<int32_t>(
            {1, 2, std::nullopt, 3, 4, 5, std::nullopt, 6}),
@@ -503,14 +504,14 @@ TEST_P(UnnestTest, mapWithEmptyUnnestValue) {
             std::nullopt,
             std::nullopt}),
        makeNullableFlatVector<bool>(
-           {false, false, true, false, false, false, true, false})});
+           {true, true, false, true, true, true, false, true})});
 
   const auto expectedWithBoth = makeRowVector(
-      {expectedWithEmptyUnnestValue->childAt(0),
-       expectedWithEmptyUnnestValue->childAt(1),
-       expectedWithEmptyUnnestValue->childAt(2),
+      {expectedWithMarker->childAt(0),
+       expectedWithMarker->childAt(1),
+       expectedWithMarker->childAt(2),
        makeNullableFlatVector<int64_t>({1, 2, 0, 1, 2, 3, 0, 1}),
-       expectedWithEmptyUnnestValue->childAt(3)});
+       expectedWithMarker->childAt(3)});
 
   struct {
     bool hasOrdinality;
@@ -529,7 +530,7 @@ TEST_P(UnnestTest, mapWithEmptyUnnestValue) {
   } testSettings[] = {
       {false, false, input, expected},
       {true, false, input, expectedWithOrdinality},
-      {false, true, input, expectedWithEmptyUnnestValue},
+      {false, true, input, expectedWithMarker},
       {true, true, input, expectedWithBoth}};
 
   for (const auto& testData : testSettings) {
@@ -539,13 +540,13 @@ TEST_P(UnnestTest, mapWithEmptyUnnestValue) {
     if (testData.hasOrdinality) {
       ordinalityName = "ordinal";
     }
-    std::optional<std::string> emptyUnnestValueName;
+    std::optional<std::string> markerName;
     if (testData.hasEmptyUnnestValue) {
-      emptyUnnestValueName = "emptyUnnestValue";
+      markerName = "emptyUnnestValue";
     }
     auto op = PlanBuilder()
                   .values({testData.input})
-                  .unnest({"c0"}, {"c1"}, ordinalityName, emptyUnnestValueName)
+                  .unnest({"c0"}, {"c1"}, ordinalityName, markerName)
                   .planNode();
     auto params = makeCursorParameters(op);
     assertQuery(params, testData.expected);
@@ -848,15 +849,16 @@ TEST_P(UnnestTest, barrier) {
   // Unnest 1K rows into 3K rows.
   auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
   core::PlanNodeId unnestPlanNodeId;
-  const auto plan = PlanBuilder(planNodeIdGenerator)
-                        .startTableScan()
-                        .outputType(std::dynamic_pointer_cast<const RowType>(
-                            vectors[0]->type()))
-                        .endTableScan()
-                        .project({"sequence(1, 3) as s"})
-                        .unnest({}, {"s"})
-                        .capturePlanNodeId(unnestPlanNodeId)
-                        .planNode();
+  const auto plan =
+      PlanBuilder(planNodeIdGenerator)
+          .startTableScan()
+          .outputType(
+              std::dynamic_pointer_cast<const RowType>(vectors[0]->type()))
+          .endTableScan()
+          .project({"sequence(1, 3) as s"})
+          .unnest({}, {"s"})
+          .capturePlanNodeId(unnestPlanNodeId)
+          .planNode();
 
   const auto expectedResult = makeRowVector({
       makeFlatVector<int64_t>(
@@ -866,15 +868,22 @@ TEST_P(UnnestTest, barrier) {
 
   struct {
     bool barrierExecution;
+    bool serialExecution;
     int numOutputRows;
 
     std::string toString() const {
       return fmt::format(
-          "barrierExecution {}, numOutputRows {}",
+          "barrierExecution {}, serialExecution {}, numOutputRows {}",
           barrierExecution,
+          serialExecution,
           numOutputRows);
     }
-  } testSettings[] = {{true, 23}, {false, 23}, {true, 200}, {false, 200}};
+  } testSettings[] = {
+      {true, true, 23},
+      {true, false, 23},
+      {false, true, 200},
+      {false, false, 200},
+  };
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.toString());
     const int numExpectedOutputVectors =
@@ -886,7 +895,8 @@ TEST_P(UnnestTest, barrier) {
                         core::QueryConfig::kMaxSplitPreloadPerDriver,
                         std::to_string(tempFiles.size()))
                     .splits(makeHiveConnectorSplits(tempFiles))
-                    .serialExecution(true)
+                    .serialExecution(testData.serialExecution)
+                    .maxDrivers(testData.serialExecution ? 1 : 3)
                     .barrierExecution(testData.barrierExecution)
                     .config(
                         core::QueryConfig::kPreferredOutputBatchRows,
@@ -936,13 +946,13 @@ TEST_P(UnnestTest, spiltOutput) {
 
   struct {
     bool produceSingleOutput;
-    int expectedNumOutputExectors;
+    int expectedNumOutputVectors;
 
     std::string toString() const {
       return fmt::format(
-          "produceSingleOutput {}, expectedNumOutputExectors {}",
+          "produceSingleOutput {}, expectedNumOutputVectors {}",
           produceSingleOutput,
-          expectedNumOutputExectors);
+          expectedNumOutputVectors);
     }
   } testSettings[] = {
       {true, numBatches},
@@ -960,7 +970,100 @@ TEST_P(UnnestTest, spiltOutput) {
     const auto taskStats = task->taskStats();
     ASSERT_EQ(
         exec::toPlanStats(taskStats).at(unnestPlanNodeId).outputVectors,
-        testData.expectedNumOutputExectors);
+        testData.expectedNumOutputVectors);
+  }
+}
+
+// Test that UnnestNode::splitOutput overrides query config.
+TEST_P(UnnestTest, splitOutputNodeOverride) {
+  const auto numBatches = 3;
+  const auto inputBatchSize = 256;
+  std::vector<RowVectorPtr> vectors;
+  vectors.reserve(numBatches);
+  for (int32_t i = 0; i < numBatches; ++i) {
+    vectors.push_back(makeRowVector({
+        makeFlatVector<int64_t>(inputBatchSize, [](auto row) { return row; }),
+    }));
+  }
+
+  const auto expectedResult = makeRowVector({
+      makeFlatVector<int64_t>(
+          numBatches * 3 * inputBatchSize,
+          [](auto row) { return 1 + row % 3; }),
+  });
+
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+
+  // Create a plan with project node to generate the sequence.
+  auto projectPlan = PlanBuilder(planNodeIdGenerator)
+                         .values(vectors)
+                         .project({"sequence(1, 3) as s"})
+                         .planNode();
+
+  // Get the output type from the project node.
+  auto projectOutput = projectPlan->outputType();
+  std::vector<std::shared_ptr<const core::FieldAccessTypedExpr>> unnestFields;
+  unnestFields.emplace_back(
+      std::make_shared<core::FieldAccessTypedExpr>(
+          projectOutput->childAt(0), "s"));
+
+  struct {
+    std::optional<bool> nodeSplitOutput;
+    bool configSplitOutput{};
+    bool expectSplit{};
+
+    std::string toString() const {
+      return fmt::format(
+          "nodeSplitOutput: {}, configSplitOutput: {}, expectSplit: {}",
+          nodeSplitOutput.has_value()
+              ? (nodeSplitOutput.value() ? "true" : "false")
+              : "nullopt",
+          configSplitOutput,
+          expectSplit);
+    }
+  } testSettings[] = {
+      // Node splitOutput not set, use config.
+      {std::nullopt, true, true},
+      {std::nullopt, false, false},
+      // Node splitOutput=true overrides config.
+      {true, true, true},
+      {true, false, true},
+      // Node splitOutput=false overrides config.
+      {false, true, false},
+      {false, false, false},
+  };
+
+  for (const auto& testData : testSettings) {
+    SCOPED_TRACE(testData.toString());
+
+    core::PlanNodeId unnestPlanNodeId;
+    auto unnestNode = std::make_shared<core::UnnestNode>(
+        planNodeIdGenerator->next(),
+        std::vector<std::shared_ptr<const core::FieldAccessTypedExpr>>{},
+        unnestFields,
+        std::vector<std::string>{"s_e"},
+        std::nullopt,
+        std::nullopt,
+        testData.nodeSplitOutput,
+        projectPlan);
+    unnestPlanNodeId = unnestNode->id();
+
+    const int expectedNumOutputVectors = testData.expectSplit
+        ? bits::divRoundUp(inputBatchSize * 3, GetParam()) * numBatches
+        : numBatches;
+
+    auto task = AssertQueryBuilder(unnestNode)
+                    .config(
+                        core::QueryConfig::kPreferredOutputBatchRows,
+                        std::to_string(GetParam()))
+                    .config(
+                        core::QueryConfig::kUnnestSplitOutput,
+                        testData.configSplitOutput ? "true" : "false")
+                    .assertResults(expectedResult);
+    const auto taskStats = task->taskStats();
+    ASSERT_EQ(
+        exec::toPlanStats(taskStats).at(unnestPlanNodeId).outputVectors,
+        expectedNumOutputVectors);
   }
 }
 

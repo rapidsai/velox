@@ -42,10 +42,6 @@ class DateTimeFunctionsTest : public SparkFunctionBaseTest {
   static constexpr int8_t kMaxTinyint = std::numeric_limits<int8_t>::max();
   static constexpr int64_t kMinBigint = std::numeric_limits<int64_t>::min();
   static constexpr int64_t kMaxBigint = std::numeric_limits<int64_t>::max();
-  static constexpr float kLowestFloat = std::numeric_limits<float>::lowest();
-  static constexpr float kMaxFloat = std::numeric_limits<float>::max();
-  static constexpr double kLowestDouble = std::numeric_limits<double>::lowest();
-  static constexpr double kMaxDouble = std::numeric_limits<double>::max();
 
  protected:
   void setQueryTimeZone(const std::string& timeZone) {
@@ -662,6 +658,44 @@ TEST_F(DateTimeFunctionsTest, weekdayDate) {
   EXPECT_EQ(4, weekday(parseDate("1582-10-15")));
 }
 
+TEST_F(DateTimeFunctionsTest, dayNameDate) {
+  const auto dayName = [&](std::optional<int32_t> date) {
+    return evaluateOnce<std::string>("dayname(c0)", DATE(), date);
+  };
+
+  EXPECT_EQ(std::nullopt, dayName(std::nullopt));
+  EXPECT_EQ("Thu", dayName(0)); // 1970-01-01
+  EXPECT_EQ("Wed", dayName(-1)); // 1969-12-31
+  EXPECT_EQ("Tue", dayName(-2)); // 1969-12-30
+  EXPECT_EQ("Sun", dayName(parseDate("2023-08-20")));
+  EXPECT_EQ("Mon", dayName(parseDate("2023-08-21")));
+  EXPECT_EQ("Tue", dayName(parseDate("2023-08-22")));
+  EXPECT_EQ("Wed", dayName(parseDate("2023-08-23")));
+  EXPECT_EQ("Thu", dayName(parseDate("2023-08-24")));
+  EXPECT_EQ("Fri", dayName(parseDate("2023-08-25")));
+  EXPECT_EQ("Sat", dayName(parseDate("2023-08-26")));
+  EXPECT_EQ(
+      "Fri", dayName(parseDate("1582-10-15"))); // Gregorian calendar start.
+}
+
+TEST_F(DateTimeFunctionsTest, monthNameDate) {
+  const auto monthName = [&](std::optional<int32_t> date) {
+    return evaluateOnce<std::string>("monthname(c0)", DATE(), date);
+  };
+
+  // Test epoch date (1970-01-01).
+  EXPECT_EQ("Jan", monthName(0));
+
+  // Test various months across different years.
+  EXPECT_EQ("Jan", monthName(parseDate("2017-01-27")));
+  EXPECT_EQ("Feb", monthName(parseDate("2008-02-20")));
+  EXPECT_EQ("May", monthName(parseDate("2011-05-06")));
+  EXPECT_EQ("Aug", monthName(parseDate("2023-08-20")));
+  EXPECT_EQ("Aug", monthName(parseDate("2023-08-21")));
+  EXPECT_EQ(
+      "Oct", monthName(parseDate("1582-10-15"))); // Gregorian calendar start.
+}
+
 TEST_F(DateTimeFunctionsTest, dateDiffDate) {
   const auto dateDiff = [&](std::optional<int32_t> endDate,
                             std::optional<int32_t> startDate) {
@@ -1208,11 +1242,17 @@ TEST_F(DateTimeFunctionsTest, secondsToTimestamp) {
       secondsToTimestamp<float>(1.1234567),
       parseTimestamp("1970-01-01 00:00:01.123456"));
   EXPECT_EQ(
-      secondsToTimestamp<float>(kMaxFloat),
+      secondsToTimestamp<float>(std::numeric_limits<float>::max()),
       parseTimestamp("+294247-01-10 04:00:54.775807"));
   EXPECT_EQ(
-      secondsToTimestamp<float>(kLowestFloat),
+      secondsToTimestamp<float>(std::numeric_limits<float>::lowest()),
       parseTimestamp("-290308-12-21 19:59:05.224192"));
+  EXPECT_EQ(
+      secondsToTimestamp<float>(std::numeric_limits<float>::quiet_NaN()),
+      std::nullopt);
+  EXPECT_EQ(
+      secondsToTimestamp<float>(std::numeric_limits<float>::infinity()),
+      std::nullopt);
 
   // Tests using double seconds as input.
   EXPECT_EQ(
@@ -1249,11 +1289,17 @@ TEST_F(DateTimeFunctionsTest, secondsToTimestamp) {
       secondsToTimestamp<double>(1.1234567),
       parseTimestamp("1970-01-01 00:00:01.123456"));
   EXPECT_EQ(
-      secondsToTimestamp<double>(kLowestDouble),
+      secondsToTimestamp<double>(std::numeric_limits<double>::lowest()),
       parseTimestamp("-290308-12-21 19:59:05.224192"));
   EXPECT_EQ(
-      secondsToTimestamp<double>(kMaxDouble),
+      secondsToTimestamp<double>(std::numeric_limits<double>::max()),
       parseTimestamp("+294247-01-10 04:00:54.775807"));
+  EXPECT_EQ(
+      secondsToTimestamp<double>(std::numeric_limits<double>::quiet_NaN()),
+      std::nullopt);
+  EXPECT_EQ(
+      secondsToTimestamp<double>(std::numeric_limits<double>::infinity()),
+      std::nullopt);
 }
 
 TEST_F(DateTimeFunctionsTest, timestampToMicros) {
@@ -1697,18 +1743,36 @@ TEST_F(DateTimeFunctionsTest, timestampadd) {
         fmt::format("timestampadd('{}', c0, c1)", unit), value, timestamp);
   };
 
+  const auto timestampaddBigint = [&](const std::string& unit,
+                                      std::optional<int64_t> value,
+                                      std::optional<Timestamp> timestamp) {
+    return evaluateOnce<Timestamp>(
+        fmt::format("timestampadd('{}', c0, c1)", unit), value, timestamp);
+  };
+
   // Check null behaviors.
   EXPECT_EQ(std::nullopt, timestampadd("second", 1, std::nullopt));
   EXPECT_EQ(std::nullopt, timestampadd("month", std::nullopt, Timestamp(0, 0)));
+  EXPECT_EQ(
+      std::nullopt, timestampaddBigint("month", std::nullopt, Timestamp(0, 0)));
 
   // Check invalid units.
   VELOX_ASSERT_THROW(
       timestampadd("invalid_unit", 1, Timestamp(0, 0)),
       "Unsupported datetime unit: invalid_unit");
+  VELOX_ASSERT_THROW(
+      timestampaddBigint("invalid_unit", 1, Timestamp(0, 0)),
+      "Unsupported datetime unit: invalid_unit");
 
   EXPECT_EQ(
       Timestamp(1551348061, 999) /*2019-02-28 10:01:01.000000*/,
       timestampadd(
+          "microsecond",
+          60 * 1000000 + 500,
+          Timestamp(1551348000, 999'500'999) /*2019-02-28 10:00:00.999500*/));
+  EXPECT_EQ(
+      Timestamp(1551348061, 999) /*2019-02-28 10:01:01.000000*/,
+      timestampaddBigint(
           "microsecond",
           60 * 1000000 + 500,
           Timestamp(1551348000, 999'500'999) /*2019-02-28 10:00:00.999500*/));
@@ -1795,6 +1859,85 @@ TEST_F(DateTimeFunctionsTest, timestampadd) {
           "year",
           10,
           Timestamp(1582970400, 500'999'999) /*2020-02-29 10:00:00.500*/));
+}
+
+TEST_F(DateTimeFunctionsTest, monthsBetween) {
+  const auto monthsBetween = [&](std::optional<Timestamp> timestamp1,
+                                 std::optional<Timestamp> timestamp2,
+                                 std::optional<bool> roundOff) {
+    return evaluateOnce<double>(
+        "months_between(c0, c1, c2)", timestamp1, timestamp2, roundOff);
+  };
+
+  EXPECT_EQ(
+      3.94959677,
+      monthsBetween(
+          parseTimestamp("1997-02-28 10:30:00"),
+          parseTimestamp("1996-10-30"),
+          true));
+  EXPECT_EQ(
+      3.9495967741935485,
+      monthsBetween(
+          parseTimestamp("1997-02-28 10:30:00"),
+          parseTimestamp("1996-10-30"),
+          false));
+  EXPECT_EQ(
+      3.9495949074074073,
+      monthsBetween(
+          parseTimestamp("1997-02-28 10:30:00"),
+          parseTimestamp("1996-10-30 00:00:05"),
+          false));
+  EXPECT_EQ(
+      -3.9495949074074073,
+      monthsBetween(
+          parseTimestamp("1996-10-30 00:00:05"),
+          parseTimestamp("1997-02-28 10:30:00"),
+          false));
+  // `timestamp1` and `timestamp2` both are the last day of month.
+  EXPECT_EQ(
+      11,
+      monthsBetween(
+          parseTimestamp("1997-02-28 10:30:00"),
+          parseTimestamp("1996-03-31 11:00:00"),
+          true));
+  // `timestamp1` and `timestamp2` are on the same day of month.
+  EXPECT_EQ(
+      11,
+      monthsBetween(
+          parseTimestamp("1997-02-28 10:30:00"),
+          parseTimestamp("1996-03-28 11:00:00"),
+          true));
+  EXPECT_EQ(
+      11,
+      monthsBetween(
+          parseTimestamp("1997-02-21 10:30:00"),
+          parseTimestamp("1996-03-21 11:00:00"),
+          true));
+}
+TEST_F(DateTimeFunctionsTest, dateFormat) {
+  const auto dateFormat = [&](std::optional<Timestamp> timestamp,
+                              std::optional<std::string> format) {
+    return evaluateOnce<std::string>("date_format(c0, c1)", timestamp, format);
+  };
+
+  // Check invalid format.
+  EXPECT_THROW(dateFormat(parseTimestamp("1970-01-01"), "u"), VeloxUserError);
+  EXPECT_THROW(
+      dateFormat(parseTimestamp("1970-01-01"), "'abcd"), VeloxUserError);
+
+  // Check Simple tests.
+  EXPECT_EQ("AD", dateFormat(parseTimestamp("1970-01-01"), "G"));
+  EXPECT_EQ("19", dateFormat(parseTimestamp("1900-01-01"), "C"));
+  EXPECT_EQ("2020", dateFormat(parseTimestamp("2020-01-01"), "Y"));
+  EXPECT_EQ("1", dateFormat(parseTimestamp("2022-01-01"), "D"));
+  EXPECT_EQ("1", dateFormat(parseTimestamp("2022-01-01"), "d"));
+  EXPECT_EQ("AM", dateFormat(parseTimestamp("2022-01-01 00:00:00"), "a"));
+  EXPECT_EQ(
+      "2022-01-01 00:00:00",
+      dateFormat(parseTimestamp("2022-01-01"), "yyyy-MM-dd HH:mm:ss"));
+
+  enableLegacyFormatter();
+  EXPECT_EQ("4", dateFormat(parseTimestamp("1970-01-01"), "u"));
 }
 } // namespace
 } // namespace facebook::velox::functions::sparksql::test

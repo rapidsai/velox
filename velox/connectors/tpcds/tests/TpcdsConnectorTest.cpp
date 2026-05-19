@@ -17,6 +17,7 @@
 #include "velox/connectors/tpcds/TpcdsConnector.h"
 #include <folly/init/Init.h>
 #include "gtest/gtest.h"
+#include "velox/connectors/ConnectorRegistry.h"
 #include "velox/exec/tests/utils/AssertQueryBuilder.h"
 #include "velox/exec/tests/utils/OperatorTestBase.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
@@ -35,18 +36,20 @@ class TpcdsConnectorTest : public exec::test::OperatorTestBase {
         kTpcdsConnectorId,
         std::make_shared<config::ConfigBase>(
             std::unordered_map<std::string, std::string>()));
-    connector::registerConnector(connector);
+    connector::ConnectorRegistry::global().insert(
+        connector->connectorId(), connector);
   }
 
   void TearDown() override {
-    connector::unregisterConnector(kTpcdsConnectorId);
+    connector::ConnectorRegistry::global().erase(kTpcdsConnectorId);
     OperatorTestBase::TearDown();
   }
 
   exec::Split makeTpcdsSplit(size_t totalParts = 1, size_t partNumber = 0)
       const {
-    return exec::Split(std::make_shared<TpcdsConnectorSplit>(
-        kTpcdsConnectorId, /*cacheable=*/true, totalParts, partNumber));
+    return exec::Split(
+        std::make_shared<TpcdsConnectorSplit>(
+            kTpcdsConnectorId, /*cacheable=*/true, totalParts, partNumber));
   }
 
   RowVectorPtr getResults(
@@ -118,8 +121,9 @@ TEST_F(TpcdsConnectorTest, singleColumnWithAlias) {
   auto plan = exec::test::PlanBuilder()
                   .startTableScan()
                   .outputType(outputType)
-                  .tableHandle(std::make_shared<TpcdsTableHandle>(
-                      kTpcdsConnectorId, velox::tpcds::Table::TBL_ITEM))
+                  .tableHandle(
+                      std::make_shared<TpcdsTableHandle>(
+                          kTpcdsConnectorId, velox::tpcds::Table::TBL_ITEM))
                   .assignments({
                       {aliasedName,
                        std::make_shared<TpcdsColumnHandle>("i_product_name")},

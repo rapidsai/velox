@@ -16,10 +16,11 @@
 #include <re2/re2.h>
 
 #include <fmt/format.h>
-#include "folly/experimental/EventCount.h"
+#include "folly/synchronization/EventCount.h"
 #include "velox/common/base/tests/GTestUtils.h"
 #include "velox/common/file/FileSystems.h"
 #include "velox/common/memory/tests/SharedArbitratorTestUtil.h"
+#include "velox/common/testutil/TempDirectoryPath.h"
 #include "velox/common/testutil/TestValue.h"
 #include "velox/core/QueryConfig.h"
 #include "velox/dwio/common/tests/utils/BatchMaker.h"
@@ -30,7 +31,6 @@
 #include "velox/exec/tests/utils/OperatorTestBase.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
 #include "velox/exec/tests/utils/QueryAssertions.h"
-#include "velox/exec/tests/utils/TempDirectoryPath.h"
 #include "velox/vector/fuzzer/VectorFuzzer.h"
 
 using namespace facebook::velox;
@@ -42,8 +42,8 @@ using namespace facebook::velox::exec::test;
 namespace facebook::velox::exec::test {
 namespace {
 // Returns aggregated spilled stats by 'task'.
-common::SpillStats spilledStats(const exec::Task& task) {
-  common::SpillStats spilledStats;
+exec::SpillStats spilledStats(const exec::Task& task) {
+  exec::SpillStats spilledStats;
   auto stats = task.taskStats();
   for (auto& pipeline : stats.pipelineStats) {
     for (auto op : pipeline.operatorStats) {
@@ -194,7 +194,7 @@ class OrderByTest : public OperatorTestBase {
     }
     {
       SCOPED_TRACE("run with spilling");
-      auto spillDirectory = exec::test::TempDirectoryPath::create();
+      auto spillDirectory = TempDirectoryPath::create();
       auto queryCtx = core::QueryCtx::create(executor_.get());
       TestScopedSpillInjection scopedSpillInjection(100);
       queryCtx->testingOverrideConfigUnsafe({
@@ -495,7 +495,7 @@ TEST_F(OrderByTest, spill) {
 
   const auto expectedResult = AssertQueryBuilder(plan).copyResults(pool_.get());
 
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto spillDirectory = TempDirectoryPath::create();
   TestScopedSpillInjection scopedSpillInjection(100);
   auto task = AssertQueryBuilder(plan)
                   .spillDirectory(spillDirectory->getPath())
@@ -510,20 +510,29 @@ TEST_F(OrderByTest, spill) {
   ASSERT_GT(planStats.spilledInputBytes, 0);
   ASSERT_EQ(planStats.spilledPartitions, 1);
   ASSERT_GT(planStats.spilledFiles, 0);
-  ASSERT_GT(planStats.customStats[Operator::kSpillRuns].count, 0);
-  ASSERT_GT(planStats.customStats[Operator::kSpillFillTime].sum, 0);
-  ASSERT_GT(planStats.customStats[Operator::kSpillSortTime].sum, 0);
-  ASSERT_GT(planStats.customStats[Operator::kSpillExtractVectorTime].sum, 0);
-  ASSERT_GT(planStats.customStats[Operator::kSpillSerializationTime].sum, 0);
-  ASSERT_GT(planStats.customStats[Operator::kSpillFlushTime].sum, 0);
+  ASSERT_GT(planStats.customStats[std::string(Operator::kSpillRuns)].count, 0);
+  ASSERT_GT(
+      planStats.customStats[std::string(Operator::kSpillFillTime)].sum, 0);
+  ASSERT_GT(
+      planStats.customStats[std::string(Operator::kSpillSortTime)].sum, 0);
+  ASSERT_GT(
+      planStats.customStats[std::string(Operator::kSpillExtractVectorTime)].sum,
+      0);
+  ASSERT_GT(
+      planStats.customStats[std::string(Operator::kSpillSerializationTime)].sum,
+      0);
+  ASSERT_GT(
+      planStats.customStats[std::string(Operator::kSpillFlushTime)].sum, 0);
   ASSERT_EQ(
-      planStats.customStats[Operator::kSpillSerializationTime].count,
-      planStats.customStats[Operator::kSpillFlushTime].count);
-  ASSERT_GT(planStats.customStats[Operator::kSpillWrites].sum, 0);
-  ASSERT_GT(planStats.customStats[Operator::kSpillWriteTime].sum, 0);
+      planStats.customStats[std::string(Operator::kSpillSerializationTime)]
+          .count,
+      planStats.customStats[std::string(Operator::kSpillFlushTime)].count);
+  ASSERT_GT(planStats.customStats[std::string(Operator::kSpillWrites)].sum, 0);
+  ASSERT_GT(
+      planStats.customStats[std::string(Operator::kSpillWriteTime)].sum, 0);
   ASSERT_EQ(
-      planStats.customStats[Operator::kSpillWrites].count,
-      planStats.customStats[Operator::kSpillWriteTime].count);
+      planStats.customStats[std::string(Operator::kSpillWrites)].count,
+      planStats.customStats[std::string(Operator::kSpillWriteTime)].count);
   OperatorTestBase::deleteTaskAndCheckSpillDirectory(task);
 }
 
@@ -556,10 +565,11 @@ DEBUG_ONLY_TEST_F(OrderByTest, reclaimDuringInputProcessing) {
   for (const auto& testData : testSettings) {
     SCOPED_TRACE(testData.debugString());
 
-    auto spillDirectory = exec::test::TempDirectoryPath::create();
+    auto spillDirectory = TempDirectoryPath::create();
     auto queryCtx = core::QueryCtx::create(executor_.get());
-    queryCtx->testingOverrideMemoryPool(memory::memoryManager()->addRootPool(
-        queryCtx->queryId(), kMaxBytes, memory::MemoryReclaimer::create()));
+    queryCtx->testingOverrideMemoryPool(
+        memory::memoryManager()->addRootPool(
+            queryCtx->queryId(), kMaxBytes, memory::MemoryReclaimer::create()));
     auto expectedResult =
         AssertQueryBuilder(
             PlanBuilder()
@@ -698,10 +708,11 @@ DEBUG_ONLY_TEST_F(OrderByTest, reclaimDuringReserve) {
     batches.push_back(fuzzer.fuzzRow(rowType));
   }
 
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto spillDirectory = TempDirectoryPath::create();
   auto queryCtx = core::QueryCtx::create(executor_.get());
-  queryCtx->testingOverrideMemoryPool(memory::memoryManager()->addRootPool(
-      queryCtx->queryId(), kMaxBytes, memory::MemoryReclaimer::create()));
+  queryCtx->testingOverrideMemoryPool(
+      memory::memoryManager()->addRootPool(
+          queryCtx->queryId(), kMaxBytes, memory::MemoryReclaimer::create()));
   auto expectedResult =
       AssertQueryBuilder(
           PlanBuilder()
@@ -814,7 +825,7 @@ DEBUG_ONLY_TEST_F(OrderByTest, reclaimDuringAllocation) {
   const std::vector<bool> enableSpillings = {false, true};
   for (const auto enableSpilling : enableSpillings) {
     SCOPED_TRACE(fmt::format("enableSpilling {}", enableSpilling));
-    auto spillDirectory = exec::test::TempDirectoryPath::create();
+    auto spillDirectory = TempDirectoryPath::create();
     auto queryCtx = core::QueryCtx::create(executor_.get());
     queryCtx->testingOverrideMemoryPool(
         memory::memoryManager()->addRootPool(queryCtx->queryId(), kMaxBytes));
@@ -944,10 +955,11 @@ DEBUG_ONLY_TEST_F(OrderByTest, reclaimDuringOutputProcessing) {
   const std::vector<bool> enableSpillings = {false, true};
   for (const auto enableSpilling : enableSpillings) {
     SCOPED_TRACE(fmt::format("enableSpilling {}", enableSpilling));
-    auto spillDirectory = exec::test::TempDirectoryPath::create();
+    auto spillDirectory = TempDirectoryPath::create();
     auto queryCtx = core::QueryCtx::create(executor_.get());
-    queryCtx->testingOverrideMemoryPool(memory::memoryManager()->addRootPool(
-        queryCtx->queryId(), kMaxBytes, memory::MemoryReclaimer::create()));
+    queryCtx->testingOverrideMemoryPool(
+        memory::memoryManager()->addRootPool(
+            queryCtx->queryId(), kMaxBytes, memory::MemoryReclaimer::create()));
     auto expectedResult =
         AssertQueryBuilder(
             PlanBuilder()
@@ -1226,7 +1238,7 @@ DEBUG_ONLY_TEST_F(OrderByTest, spillWithNoMoreOutput) {
         ASSERT_EQ(reclaimerStats_.reclaimedBytes, 0);
       })));
 
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto spillDirectory = TempDirectoryPath::create();
   auto task =
       AssertQueryBuilder(plan)
           .spillDirectory(spillDirectory->getPath())
@@ -1259,7 +1271,7 @@ TEST_F(OrderByTest, maxSpillBytes) {
           .orderBy({fmt::format("{} ASC NULLS LAST", "c0")}, false)
           .capturePlanNodeId(orderNodeId)
           .planNode();
-  auto spillDirectory = exec::test::TempDirectoryPath::create();
+  auto spillDirectory = TempDirectoryPath::create();
   auto queryCtx = core::QueryCtx::create(executor_.get());
 
   struct {
@@ -1312,18 +1324,19 @@ DEBUG_ONLY_TEST_F(OrderByTest, reclaimFromOrderBy) {
         memory::testingRunArbitration();
       })));
 
-  const auto spillDirectory = exec::test::TempDirectoryPath::create();
+  const auto spillDirectory = TempDirectoryPath::create();
   core::PlanNodeId orderById;
   auto task =
       AssertQueryBuilder(duckDbQueryRunner_)
           .spillDirectory(spillDirectory->getPath())
           .config(core::QueryConfig::kSpillEnabled, true)
           .config(core::QueryConfig::kOrderBySpillEnabled, true)
-          .plan(PlanBuilder()
-                    .values(vectors)
-                    .orderBy({"c0 ASC NULLS LAST"}, false)
-                    .capturePlanNodeId(orderById)
-                    .planNode())
+          .plan(
+              PlanBuilder()
+                  .values(vectors)
+                  .orderBy({"c0 ASC NULLS LAST"}, false)
+                  .capturePlanNodeId(orderById)
+                  .planNode())
           .assertResults("SELECT * FROM tmp ORDER BY c0 ASC NULLS LAST");
   auto taskStats = exec::toPlanStats(task->taskStats());
   auto& planStats = taskStats.at(orderById);
@@ -1351,16 +1364,17 @@ DEBUG_ONLY_TEST_F(OrderByTest, reclaimFromEmptyOrderBy) {
         testingRunArbitration(op->pool());
       })));
 
-  const auto spillDirectory = exec::test::TempDirectoryPath::create();
+  const auto spillDirectory = TempDirectoryPath::create();
   auto task =
       AssertQueryBuilder(duckDbQueryRunner_)
           .spillDirectory(spillDirectory->getPath())
           .config(core::QueryConfig::kSpillEnabled, true)
           .config(core::QueryConfig::kOrderBySpillEnabled, true)
-          .plan(PlanBuilder()
-                    .values(vectors)
-                    .orderBy({"c0 ASC NULLS LAST"}, false)
-                    .planNode())
+          .plan(
+              PlanBuilder()
+                  .values(vectors)
+                  .orderBy({"c0 ASC NULLS LAST"}, false)
+                  .planNode())
           .assertResults("SELECT * FROM tmp ORDER BY c0 ASC NULLS LAST");
   // Verify no spill has been triggered.
   const auto stats = task->taskStats().pipelineStats;
@@ -1376,8 +1390,9 @@ DEBUG_ONLY_TEST_F(OrderByTest, orderByWithLazyInput) {
       VectorFuzzer(fuzzerOpts_, pool()).fuzzRowChildrenToLazy(nonLazyVector));
 
   std::vector<RowVectorPtr> lazyInputCopy;
-  lazyInputCopy.push_back(std::dynamic_pointer_cast<RowVector>(
-      nonLazyVector->testingCopyPreserveEncodings()));
+  lazyInputCopy.push_back(
+      std::dynamic_pointer_cast<RowVector>(
+          nonLazyVector->testingCopyPreserveEncodings()));
   createDuckDbTable(lazyInputCopy);
 
   std::atomic_bool nonReclaimableSectionEntered{false};
@@ -1398,16 +1413,17 @@ DEBUG_ONLY_TEST_F(OrderByTest, orderByWithLazyInput) {
         }
       })));
 
-  const auto spillDirectory = exec::test::TempDirectoryPath::create();
+  const auto spillDirectory = TempDirectoryPath::create();
   auto task =
       AssertQueryBuilder(duckDbQueryRunner_)
           .spillDirectory(spillDirectory->getPath())
           .config(core::QueryConfig::kSpillEnabled, true)
           .config(core::QueryConfig::kOrderBySpillEnabled, true)
-          .plan(PlanBuilder()
-                    .values(lazyInput)
-                    .orderBy({"c0 ASC NULLS LAST"}, false)
-                    .planNode())
+          .plan(
+              PlanBuilder()
+                  .values(lazyInput)
+                  .orderBy({"c0 ASC NULLS LAST"}, false)
+                  .planNode())
           .assertResults("SELECT * FROM tmp ORDER BY c0 ASC NULLS LAST");
 
   ASSERT_TRUE(lazyLoadedInNonReclaimableSection.has_value());

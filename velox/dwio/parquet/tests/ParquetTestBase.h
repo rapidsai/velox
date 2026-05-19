@@ -19,17 +19,20 @@
 #include <gtest/gtest.h>
 #include <string>
 #include "velox/common/base/Fs.h"
+#include "velox/common/file/File.h"
+#include "velox/common/io/IoStatistics.h"
+#include "velox/common/testutil/TempDirectoryPath.h"
 #include "velox/dwio/common/FileSink.h"
 #include "velox/dwio/common/Reader.h"
 #include "velox/dwio/common/tests/utils/DataFiles.h"
 #include "velox/dwio/parquet/reader/PageReader.h"
 #include "velox/dwio/parquet/reader/ParquetReader.h"
 #include "velox/dwio/parquet/writer/Writer.h"
-#include "velox/exec/tests/utils/TempDirectoryPath.h"
 #include "velox/vector/fuzzer/VectorFuzzer.h"
 #include "velox/vector/tests/utils/VectorTestBase.h"
 
 namespace facebook::velox::parquet {
+using TempDirectoryPath = common::testutil::TempDirectoryPath;
 
 class ParquetTestBase : public testing::Test,
                         public velox::test::VectorTestBase {
@@ -42,7 +45,7 @@ class ParquetTestBase : public testing::Test,
     dwio::common::LocalFileSink::registerFactory();
     rootPool_ = memory::memoryManager()->addRootPool("ParquetTests");
     leafPool_ = rootPool_->addLeafChild("ParquetTests");
-    tempPath_ = exec::test::TempDirectoryPath::create();
+    tempPath_ = TempDirectoryPath::create();
   }
 
   static RowTypePtr sampleSchema() {
@@ -191,10 +194,55 @@ class ParquetTestBase : public testing::Test,
         "velox/dwio/parquet/tests/reader", "../examples/" + fileName);
   }
 
+  dwio::common::MemorySink* write(
+      const RowVectorPtr& data,
+      const WriterOptions& writerOptions) {
+    auto sink = std::make_unique<dwio::common::MemorySink>(
+        200 * 1024 * 1024,
+        dwio::common::FileSink::Options{.pool = leafPool_.get()});
+    auto* sinkPtr = sink.get();
+    auto writer = std::make_unique<Writer>(
+        std::move(sink), writerOptions, data->rowType());
+    writer->write(data);
+    writer->close();
+    writers_.push_back(std::move(writer));
+    return sinkPtr;
+  }
+
+  dwio::common::MemorySink* write(
+      const RowVectorPtr& data,
+      std::unordered_map<std::string, std::string> configFromFile = {},
+      std::unordered_map<std::string, std::string> sessionProperties = {}) {
+    parquet::WriterOptions writerOptions;
+    writerOptions.memoryPool = rootPool_.get();
+    auto connectorConfig = config::ConfigBase(std::move(configFromFile));
+    auto connectorSessionProperties =
+        config::ConfigBase(std::move(sessionProperties));
+    writerOptions.processConfigs(connectorConfig, connectorSessionProperties);
+    return write(data, writerOptions);
+  }
+
+  std::unique_ptr<ParquetReader> createReaderInMemory(
+      const dwio::common::MemorySink& sink,
+      const dwio::common::ReaderOptions& opts) {
+    std::string data(sink.data(), sink.size());
+    return std::make_unique<ParquetReader>(
+        std::make_unique<dwio::common::BufferedInput>(
+            std::make_shared<InMemoryReadFile>(std::move(data)),
+            opts.memoryPool()),
+        opts);
+  }
+
   static constexpr uint64_t kRowsInRowGroup = 10'000;
   static constexpr uint64_t kBytesInRowGroup = 128 * 1'024 * 1'024;
   std::shared_ptr<memory::MemoryPool> rootPool_;
   std::shared_ptr<memory::MemoryPool> leafPool_;
-  std::shared_ptr<exec::test::TempDirectoryPath> tempPath_;
+  std::shared_ptr<velox::io::IoStatistics> dataIoStats_ =
+      std::make_shared<velox::io::IoStatistics>();
+  std::shared_ptr<velox::io::IoStatistics> metadataIoStats_ =
+      std::make_shared<velox::io::IoStatistics>();
+  std::shared_ptr<TempDirectoryPath> tempPath_;
+  // Stores writers created by write() helper to keep sinks alive for reading.
+  std::vector<std::unique_ptr<Writer>> writers_;
 };
 } // namespace facebook::velox::parquet

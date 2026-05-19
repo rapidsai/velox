@@ -15,13 +15,14 @@
  */
 #pragma once
 
+#include "velox/common/base/TreeOfLosers.h"
+#include "velox/common/file/FileSystems.h"
 #include "velox/exec/AggregateInfo.h"
 #include "velox/exec/AggregationMasks.h"
 #include "velox/exec/DistinctAggregations.h"
 #include "velox/exec/HashTable.h"
 #include "velox/exec/SortedAggregations.h"
 #include "velox/exec/Spiller.h"
-#include "velox/exec/TreeOfLosers.h"
 #include "velox/exec/VectorHasher.h"
 
 namespace facebook::velox::exec {
@@ -45,14 +46,18 @@ class GroupingSet {
       tsan_atomic<bool>* nonReclaimableSection,
       const core::QueryConfig* queryConfig,
       memory::MemoryPool* pool,
-      folly::Synchronized<common::SpillStats>* spillStats);
+      exec::SpillStats* spillStats);
 
   ~GroupingSet();
 
-  /// Used by MarkDistinct operator to identify rows with unique values.
-  static std::unique_ptr<GroupingSet> createForMarkDistinct(
+  /// Used by MarkDistinct and EnforceDistinct operators to identify rows with
+  /// unique values for a set of keys.
+  /// @param preGroupedKeys Subset of grouping keys that input is already
+  /// clustered on.
+  static std::unique_ptr<GroupingSet> createForDistinct(
       const RowTypePtr& inputType,
       std::vector<std::unique_ptr<VectorHasher>>&& hashers,
+      std::vector<column_index_t>&& preGroupedKeys,
       OperatorCtx* operatorCtx,
       tsan_atomic<bool>* nonReclaimableSection);
 
@@ -109,6 +114,18 @@ class GroupingSet {
 
   const HashLookup& hashLookup() const;
 
+  /// Returns true if there are pending new-group rows from the most recent
+  /// tail auto-drain that have not yet been consumed.
+  bool hasDrainedNewGroups() const;
+
+  /// Returns the number of pending drained new-group rows.
+  vector_size_t drainedNewGroupsCount() const;
+
+  /// Extracts the pending drained new-group rows into 'result' by reading
+  /// directly from row-container pointers. Clears the pending state after
+  /// extraction.
+  void extractDrainedNewGroups(const RowVectorPtr& result);
+
   /// Spills all the rows in container.
   void spill();
 
@@ -118,10 +135,21 @@ class GroupingSet {
   void spill(const RowContainerIterator& rowIterator);
 
   /// Returns the spiller stats including total bytes and rows spilled so far.
-  std::optional<common::SpillStats> spilledStats() const;
+  std::optional<exec::SpillStats> spilledStats() const;
 
   /// Returns true if spilling has triggered on this grouping set.
   bool hasSpilled() const;
+
+  /// Performs lightweight memory compaction across all aggregates before
+  /// spilling. Iterates over all groups and calls Aggregate::compact() on each
+  /// aggregate function. Returns the total number of bytes freed.
+  uint64_t compact();
+
+  /// Returns true if any aggregate function supports lightweight memory
+  /// compaction.
+  bool hasCompactableAggregates() const {
+    return hasCompactableAggregates_;
+  }
 
   /// Returns the hashtable stats.
   HashTableStats hashTableStats() const {
@@ -131,6 +159,12 @@ class GroupingSet {
   /// Return the number of rows kept in memory.
   int64_t numRows() const {
     return table_ ? table_->rows()->numRows() : 0;
+  }
+
+  /// Returns the underlying hash table, or nullptr if it has not been created
+  /// yet.
+  BaseHashTable* table() const {
+    return table_.get();
   }
 
   /// Frees hash tables and other state when giving up partial aggregation as
@@ -289,42 +323,44 @@ class GroupingSet {
   // 'toIntermediate'.
   std::vector<Accumulator> accumulators(bool excludeToIntermediate);
 
-  std::vector<column_index_t> keyChannels_;
-
   // A subset of grouping keys on which the input is clustered.
   const std::vector<column_index_t> preGroupedKeyChannels_;
 
+  const bool isGlobal_;
+  const bool isPartial_;
+  const bool isRawInput_;
+  const bool ignoreNullKeys_;
+  const bool isAdaptive_;
+  // List of global grouping set numbers, if being used with a GROUPING SET.
+  const std::vector<vector_size_t> globalGroupingSets_;
+  // Indicates if this grouping set and the associated hash aggregation operator
+  // is under non-reclaimable execution section or not.
+  tsan_atomic<bool>* const nonReclaimableSection_;
+
+  const common::SpillConfig* const spillConfig_;
+  const core::QueryConfig* const queryConfig_;
+  memory::MemoryPool* const pool_;
+  exec::SpillStats* const spillStats_;
+
+  std::vector<column_index_t> keyChannels_;
   // Provides the column projections for extracting the grouping keys from
   // 'table_' for output. The vector index is the output channel and the value
   // is the corresponding column index stored in 'table_'.
   std::vector<column_index_t> groupingKeyOutputProjections_;
-
   std::vector<std::unique_ptr<VectorHasher>> hashers_;
-  const bool isGlobal_;
-  const bool isPartial_;
-  const bool isRawInput_;
-  const core::QueryConfig* const queryConfig_;
-  memory::MemoryPool* const pool_;
 
   std::vector<AggregateInfo> aggregates_;
   AggregationMasks masks_;
   std::unique_ptr<SortedAggregations> sortedAggregations_;
   std::vector<std::unique_ptr<DistinctAggregations>> distinctAggregations_;
 
-  const bool ignoreNullKeys_;
+  // Boolean indicating whether any aggregate supports compact().
+  bool hasCompactableAggregates_{false};
 
   uint64_t numInputRows_ = 0;
 
-  // List of global grouping set numbers, if being used with a GROUPING SET.
-  const std::vector<vector_size_t> globalGroupingSets_;
   // Column for groupId for a GROUPING SET.
   std::optional<column_index_t> groupIdChannel_;
-
-  const common::SpillConfig* const spillConfig_;
-
-  // Indicates if this grouping set and the associated hash aggregation operator
-  // is under non-reclaimable execution section or not.
-  tsan_atomic<bool>* const nonReclaimableSection_;
 
   // Boolean indicating whether accumulators for a global aggregation (i.e.
   // aggregation with no grouping keys) have been initialized.
@@ -342,7 +378,6 @@ class GroupingSet {
   // aggregation
   HashStringAllocator stringAllocator_;
   memory::AllocationPool rows_;
-  const bool isAdaptive_;
 
   bool noMoreInput_{false};
 
@@ -354,11 +389,22 @@ class GroupingSet {
   // First row in remainingInput_ that needs to be processed.
   vector_size_t firstRemainingRow_;
 
+  // Populated by addRemainingInput(); reset at top of addInput()/noMoreInput().
+  // Pointers reference table_->rows() and remain valid only while no spill
+  // path runs. Pre-grouped distinct aggregation does not currently spill, so
+  // the row container is not cleared between capture and consumption.
+  std::vector<char*> drainedNewGroups_;
+
   // In case of distinct aggregation without aggregates and the grouping key
   // reordered, the spilled data is first loaded into
   // 'spillResultWithoutAggregates_' and then reordered back and load to
   // result.
   RowVectorPtr spillResultWithoutAggregates_{nullptr};
+
+  // Records the source rows to copy to 'output_' in order.
+  std::vector<const RowVector*> spillSources_;
+
+  std::vector<vector_size_t> spillSourceRows_;
 
   // The value of mayPushdown flag specified in addInput() for the
   // 'remainingInput_'.
@@ -408,8 +454,6 @@ class GroupingSet {
   // Temporary for case where an aggregate in toIntermediate() outputs post-init
   // state of aggregate for all rows.
   std::vector<char*> firstGroup_;
-
-  folly::Synchronized<common::SpillStats>* const spillStats_;
 };
 
 class AggregationInputSpiller : public SpillerBase {
@@ -422,7 +466,7 @@ class AggregationInputSpiller : public SpillerBase {
       const HashBitRange& hashBitRange,
       const std::vector<SpillSortKey>& sortingKeys,
       const common::SpillConfig* spillConfig,
-      folly::Synchronized<common::SpillStats>* spillStats);
+      exec::SpillStats* spillStats);
 
   void spill();
 
@@ -444,7 +488,7 @@ class AggregationOutputSpiller : public SpillerBase {
       RowContainer* container,
       RowTypePtr rowType,
       const common::SpillConfig* spillConfig,
-      folly::Synchronized<common::SpillStats>* spillStats);
+      exec::SpillStats* spillStats);
 
   void spill(const RowContainerIterator& startRowIter);
 

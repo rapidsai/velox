@@ -52,6 +52,7 @@ maintainers of that component.
 * Jimmy Lu - [Yuhta](https://github.com/Yuhta) / jimmylu@meta.com
 * Masha Basmanova - [mbasmanova](https://github.com/mbasmanova) / mbasmanova@meta.com
 * Xiaoxuan Meng - [xiaoxmeng](https://github.com/xiaoxmeng) / xiaoxmeng@meta.com
+* Meng Duan - [duanmeng](https://github.com/duanmeng) / meng.duan@bytedance.com
 
 ### Presto Functions
 
@@ -67,6 +68,7 @@ maintainers of that component.
 ### Memory Management
 
 * Xiaoxuan Meng - [xiaoxmeng](https://github.com/xiaoxmeng) / xiaoxmeng@meta.com
+* Meng Duan - [duanmeng](https://github.com/duanmeng) / meng.duan@bytedance.com
 
 ### IO, Cache, Hive connector, and File reader/writers
 
@@ -84,6 +86,11 @@ maintainers of that component.
 ### Storage Adapters (S3/HDFS/GCS/ABFS)
 
 * Deepak Majeti - [majetideepak](https://github.com/majetideepak) / deepak.majeti@ibm.com
+* Ke Jia - [JkSelf](https://github.com/jkself) / ke.a.jia@intel.com
+
+### LibcuDF Bindings
+
+* Karthikeyan Natarajan - [karthikeyann](https://github.com/karthikeyann) / knataraj@nvidia.com
 
 ### Builds and CI
 
@@ -96,3 +103,4 @@ maintainers of that component.
 
 * Masha Basmanova - [mbasmanova](https://github.com/mbasmanova) / mbasmanova@meta.com
 * Pedro Pedreira - [pedroerp](https://github.com/pedroerp) / pedroerp@meta.com
+* Meng Duan - [duanmeng](https://github.com/duanmeng) / meng.duan@bytedance.com

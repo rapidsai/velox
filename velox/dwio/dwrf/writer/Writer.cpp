@@ -58,10 +58,12 @@ uint64_t orcWriterMaxStripeSize(
     const config::ConfigBase& config,
     const config::ConfigBase& session) {
   return config::toCapacity(
-      session.get<std::string>(
-          dwrf::Config::kOrcWriterMaxStripeSizeSession,
-          config.get<std::string>(
-              dwrf::Config::kOrcWriterMaxStripeSize, "64MB")),
+      session
+          .getLegacyWithFallback<std::string>(
+              dwrf::Config::kOrcWriterMaxStripeSizeSession,
+              config,
+              dwrf::Config::kOrcWriterMaxStripeSize)
+          .value_or("64MB"),
       config::CapacityUnit::BYTE);
 }
 
@@ -69,68 +71,66 @@ uint64_t orcWriterMaxDictionaryMemory(
     const config::ConfigBase& config,
     const config::ConfigBase& session) {
   return config::toCapacity(
-      session.get<std::string>(
-          dwrf::Config::kOrcWriterMaxDictionaryMemorySession,
-          config.get<std::string>(
-              dwrf::Config::kOrcWriterMaxDictionaryMemory, "16MB")),
+      session
+          .getLegacyWithFallback<std::string>(
+              dwrf::Config::kOrcWriterMaxDictionaryMemorySession,
+              config,
+              dwrf::Config::kOrcWriterMaxDictionaryMemory)
+          .value_or("16MB"),
       config::CapacityUnit::BYTE);
 }
 
 bool isOrcWriterIntegerDictionaryEncodingEnabled(
     const config::ConfigBase& config,
     const config::ConfigBase& session) {
-  return session.get<bool>(
-      dwrf::Config::kOrcWriterIntegerDictionaryEncodingEnabledSession,
-      config.get<bool>(
-          dwrf::Config::kOrcWriterIntegerDictionaryEncodingEnabled, true));
+  return session
+      .getLegacyWithFallback<bool>(
+          dwrf::Config::kOrcWriterIntegerDictionaryEncodingEnabledSession,
+          config,
+          dwrf::Config::kOrcWriterIntegerDictionaryEncodingEnabled)
+      .value_or(true);
 }
 
 bool isOrcWriterStringDictionaryEncodingEnabled(
     const config::ConfigBase& config,
     const config::ConfigBase& session) {
-  return session.get<bool>(
-      dwrf::Config::kOrcWriterStringDictionaryEncodingEnabledSession,
-      config.get<bool>(
-          dwrf::Config::kOrcWriterStringDictionaryEncodingEnabled, true));
+  return session
+      .getLegacyWithFallback<bool>(
+          dwrf::Config::kOrcWriterStringDictionaryEncodingEnabledSession,
+          config,
+          dwrf::Config::kOrcWriterStringDictionaryEncodingEnabled)
+      .value_or(true);
 }
 
 bool orcWriterLinearStripeSizeHeuristics(
     const config::ConfigBase& config,
     const config::ConfigBase& session) {
-  return session.get<bool>(
-      dwrf::Config::kOrcWriterLinearStripeSizeHeuristicsSession,
-      config.get<bool>(
-          dwrf::Config::kOrcWriterLinearStripeSizeHeuristics, true));
+  return session
+      .getLegacyWithFallback<bool>(
+          dwrf::Config::kOrcWriterLinearStripeSizeHeuristicsSession,
+          config,
+          dwrf::Config::kOrcWriterLinearStripeSizeHeuristics)
+      .value_or(true);
 }
 
 uint64_t orcWriterMinCompressionSize(
     const config::ConfigBase& config,
     const config::ConfigBase& session) {
-  return session.get<uint64_t>(
-      dwrf::Config::kOrcWriterMinCompressionSizeSession,
-      config.get<uint64_t>(dwrf::Config::kOrcWriterMinCompressionSize, 1024));
+  return session
+      .getLegacyWithFallback<uint64_t>(
+          dwrf::Config::kOrcWriterMinCompressionSizeSession,
+          config,
+          dwrf::Config::kOrcWriterMinCompressionSize)
+      .value_or(1024);
 }
 
 std::optional<uint8_t> orcWriterCompressionLevel(
     const config::ConfigBase& config,
     const config::ConfigBase& session) {
-  auto sessionProp =
-      session.get<uint8_t>(dwrf::Config::kOrcWriterCompressionLevelSession);
-
-  if (sessionProp.has_value()) {
-    return sessionProp.value();
-  }
-
-  auto configProp =
-      config.get<uint8_t>(dwrf::Config::kOrcWriterCompressionLevel);
-
-  if (configProp.has_value()) {
-    return configProp.value();
-  }
-
-  // Presto has a single config controlling this value, but different defaults
-  // depending on the compression kind.
-  return std::nullopt;
+  return session.getLegacyWithFallback<uint8_t>(
+      dwrf::Config::kOrcWriterCompressionLevelSession,
+      config,
+      dwrf::Config::kOrcWriterCompressionLevel);
 }
 
 uint8_t orcWriterZLIBCompressionLevel(
@@ -175,7 +175,8 @@ Writer::Writer(
       pool,
       options.sessionTimezone,
       options.adjustTimestampToTimezone,
-      std::move(handler));
+      std::move(handler),
+      options.memoryBudget);
   auto& context = writerBase_->getContext();
   VELOX_CHECK_EQ(
       context.getTotalMemoryUsage(),
@@ -213,10 +214,11 @@ Writer::Writer(
     : Writer{
           std::move(sink),
           options,
-          options.memoryPool->addAggregateChild(fmt::format(
-              "{}.dwrf.{}",
-              options.memoryPool->name(),
-              folly::to<std::string>(folly::Random::rand64())))} {}
+          options.memoryPool->addAggregateChild(
+              fmt::format(
+                  "{}.dwrf.{}",
+                  options.memoryPool->name(),
+                  folly::to<std::string>(folly::Random::rand64())))} {}
 
 void Writer::setMemoryReclaimers(
     const std::shared_ptr<memory::MemoryPool>& pool) {
@@ -521,7 +523,7 @@ void Writer::flushStripe(bool close) {
   const auto& handler = context.getEncryptionHandler();
   EncodingManager encodingManager{handler};
 
-  writer_->flush([&](uint32_t nodeId) -> proto::ColumnEncoding& {
+  writer_->flush([&](uint32_t nodeId) -> ColumnEncodingWriteWrapper {
     return encodingManager.addEncodingToFooter(nodeId);
   });
 
@@ -546,7 +548,8 @@ void Writer::flushStripe(bool close) {
                              const DataBufferHolder& out) {
     uint32_t currentIndex = 0;
     const auto nodeId = stream.encodingKey().node();
-    proto::Stream* s = encodingManager.addStreamToFooter(nodeId, currentIndex);
+    StreamWriteWrapper s =
+        encodingManager.addStreamToFooter(nodeId, currentIndex);
 
     // set offset only when needed, ie. when offset of current stream cannot be
     // calculated based on offset and length of previous stream. In that case,
@@ -554,19 +557,19 @@ void Writer::flushStripe(bool close) {
     // encryption group or neither are encrypted. So the logic is simplified to
     // check if group index are the same for current and previous stream
     if (offset > 0 && lastIndex != currentIndex) {
-      s->set_offset(offset);
+      s.setOffset(offset);
     }
     lastIndex = currentIndex;
 
     // Jolly/Presto readers can't read streams bigger than 2GB.
     writerBase_->validateStreamSize(stream, out.size());
 
-    s->set_kind(static_cast<proto::Stream_Kind>(stream.kind()));
-    s->set_node(nodeId);
-    s->set_column(stream.column());
-    s->set_sequence(stream.encodingKey().sequence());
-    s->set_length(out.size());
-    s->set_usevints(context.getConfig(Config::USE_VINTS));
+    s.setKind(stream.kind());
+    s.setNode(nodeId);
+    s.setColumn(stream.column());
+    s.setSequence(stream.encodingKey().sequence());
+    s.setLength(out.size());
+    s.setUseVints(context.getConfig(Config::USE_VINTS));
     offset += out.size();
 
     context.recordPhysicalSize(stream, out.size());
@@ -619,19 +622,20 @@ void Writer::flushStripe(bool close) {
   VELOX_CHECK_EQ(footerOffset, stripeOffset + dataLength + indexLength);
 
   sink.setMode(WriterSink::Mode::Footer);
-  writerBase_->writeProto(encodingManager.getFooter());
+  encodingManager.getFooter().setWriterTimezone();
+  writerBase_->writeProto(&encodingManager.getFooter());
   sink.setMode(WriterSink::Mode::None);
 
-  auto& stripe = writerBase_->addStripeInfo();
-  stripe.set_offset(stripeOffset);
-  stripe.set_indexlength(indexLength);
-  stripe.set_datalength(dataLength);
-  stripe.set_footerlength(sink.size() - footerOffset);
+  auto stripe = writerBase_->addStripeInfo();
+  stripe.setOffset(stripeOffset);
+  stripe.setIndexLength(indexLength);
+  stripe.setDataLength(dataLength);
+  stripe.setFooterLength(sink.size() - footerOffset);
 
   // set encryption key metadata
   if (handler.isEncrypted() && context.stripeIndex() == 0) {
     for (uint32_t i = 0; i < handler.getEncryptionGroupCount(); ++i) {
-      *stripe.add_keymetadata() =
+      *stripe.addKeyMetadata() =
           handler.getEncryptionProviderByIndex(i).getKey();
     }
   }
@@ -694,10 +698,10 @@ void Writer::flushInternal(bool close) {
       proto::Encryption* encryption = nullptr;
 
       // initialize encryption related metadata only when there is data written
-      if (handler.isEncrypted() && footer.stripes_size() > 0) {
+      if (handler.isEncrypted() && footer->stripesSize() > 0) {
         const auto count = handler.getEncryptionGroupCount();
         stats.resize(count);
-        encryption = footer.mutable_encryption();
+        encryption = footer->mutableEncryption();
         encryption->set_keyprovider(
             encryption::toProto(handler.getKeyProviderType()));
         for (uint32_t i = 0; i < count; ++i) {
@@ -708,25 +712,28 @@ void Writer::flushInternal(bool close) {
       std::optional<uint32_t> lastRoot;
       std::unordered_map<proto::ColumnStatistics*, proto::ColumnStatistics*>
           statsMap;
-      writer_->writeFileStats([&](uint32_t nodeId) -> proto::ColumnStatistics& {
-        auto entry = footer.add_statistics();
-        if (!encryption || !handler.isEncrypted(nodeId)) {
-          return *entry;
-        }
+      writer_->writeFileStats(
+          [&](uint32_t nodeId) -> ColumnStatisticsWriteWrapper {
+            auto entry = footer->addStatistics();
+            if (!encryption || !handler.isEncrypted(nodeId)) {
+              return entry;
+            }
 
-        auto root = handler.getEncryptionRoot(nodeId);
-        auto groupIndex = handler.getEncryptionGroupIndex(nodeId);
-        auto& group = stats.at(groupIndex);
-        if (!lastRoot || root != lastRoot.value()) {
-          // this is a new root, add to the footer, and use a new slot
-          group.emplace_back();
-          encryption->mutable_encryptiongroups(groupIndex)->add_nodes(root);
-        }
-        lastRoot = root;
-        auto encryptedStats = group.back().add_statistics();
-        statsMap[entry] = encryptedStats;
-        return *encryptedStats;
-      });
+            auto root = handler.getEncryptionRoot(nodeId);
+            auto groupIndex = handler.getEncryptionGroupIndex(nodeId);
+            auto& group = stats.at(groupIndex);
+            if (!lastRoot || root != lastRoot.value()) {
+              // this is a new root, add to the footer, and use a new slot
+              group.emplace_back();
+              encryption->mutable_encryptiongroups(groupIndex)->add_nodes(root);
+            }
+            lastRoot = root;
+            auto encryptedStats = group.back().add_statistics();
+            auto cs =
+                reinterpret_cast<proto::ColumnStatistics*>(entry.rawProtoPtr());
+            statsMap[cs] = encryptedStats;
+            return ColumnStatisticsWriteWrapper(encryptedStats);
+          });
 
 #define COPY_STAT(from, to, stat) \
   if (from->has_##stat()) {       \
@@ -770,7 +777,7 @@ void Writer::flushInternal(bool close) {
         dwio::common::MetricsLog::FileCloseMetrics{
             .writerVersion = writerVersionToString(
                 context.getConfig(Config::WRITER_VERSION)),
-            .footerLength = footer.contentlength(),
+            .footerLength = footer->contentLength(),
             .fileSize = sink.size(),
             .cacheSize = sink.getCacheSize(),
             .numCacheBlocks = sink.getCacheOffsets().size() - 1,
@@ -792,7 +799,7 @@ void Writer::flush() {
   flushInternal(false);
 }
 
-void Writer::close() {
+std::unique_ptr<dwio::common::FileMetadata> Writer::close() {
   checkRunning();
   auto exitGuard = folly::makeGuard([this]() {
     flushPolicy_->onClose();
@@ -800,6 +807,7 @@ void Writer::close() {
   });
   flushInternal(true);
   writerBase_->close();
+  return std::make_unique<DwrfFileMetadata>();
 }
 
 void Writer::abort() {
@@ -853,13 +861,22 @@ uint64_t Writer::MemoryReclaimer::reclaim(
     LOG(WARNING)
         << "Can't reclaim from dwrf writer which is under non-reclaimable "
            "section: "
-        << pool->name();
+        << pool->name() << ", root pool: " << pool->root()->name()
+        << ", used: " << succinctBytes(pool->usedBytes())
+        << ", reservation: " << succinctBytes(pool->reservedBytes())
+        << ", root pool reservation: "
+        << succinctBytes(pool->root()->reservedBytes());
     ++stats.numNonReclaimableAttempts;
     return 0;
   }
   if (!writer_->isRunning()) {
     LOG(WARNING) << "Can't reclaim from a not running dwrf writer: "
-                 << pool->name() << ", state: " << writer_->state();
+                 << pool->name() << ", root pool: " << pool->root()->name()
+                 << ", state: " << writer_->state()
+                 << ", used: " << succinctBytes(pool->usedBytes())
+                 << ", reservation: " << succinctBytes(pool->reservedBytes())
+                 << ", root pool reservation: "
+                 << succinctBytes(pool->root()->reservedBytes());
     ++stats.numNonReclaimableAttempts;
     return 0;
   }

@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "velox/experimental/cudf/CudfNoDefaults.h"
 #include "velox/experimental/cudf/connectors/hive/CudfHiveConnector.h"
 #include "velox/experimental/cudf/connectors/hive/CudfHiveDataSource.h"
 #include "velox/experimental/cudf/exec/ToCudf.h"
@@ -29,7 +30,9 @@ CudfHiveConnector::CudfHiveConnector(
     std::shared_ptr<const facebook::velox::config::ConfigBase> config,
     folly::Executor* executor)
     : ::facebook::velox::connector::hive::HiveConnector(id, config, executor),
-      cudfHiveConfig_(std::make_shared<CudfHiveConfig>(config)) {}
+      cudfHiveConfig_(std::make_shared<CudfHiveConfig>(config)) {
+  VLOG(1) << "cuDF Hive connector created";
+}
 
 std::unique_ptr<DataSource> CudfHiveConnector::createDataSource(
     const RowTypePtr& outputType,
@@ -46,6 +49,7 @@ std::unique_ptr<DataSource> CudfHiveConnector::createDataSource(
         outputType,
         tableHandle,
         columnHandles,
+        &fileHandleFactory_,
         ioExecutor_,
         connectorQueryCtx,
         cudfHiveConfig_);

@@ -24,9 +24,12 @@ VELOX_ARROW_CMAKE_PATCH=${VELOX_ARROW_CMAKE_PATCH:-""} # avoid error due to +u
 CMAKE_BUILD_TYPE="${BUILD_TYPE:-Release}"
 DEPENDENCY_DIR=${DEPENDENCY_DIR:-$(pwd)}
 BUILD_GEOS="${BUILD_GEOS:-true}"
+BUILD_S2GEOMETRY="${BUILD_S2GEOMETRY:-true}"
 BUILD_FAISS="${BUILD_FAISS:-true}"
 BUILD_DUCKDB="${BUILD_DUCKDB:-true}"
 EXTRA_ARROW_OPTIONS=${EXTRA_ARROW_OPTIONS:-""}
+EXTRA_ARROW_PATCH=${EXTRA_ARROW_PATCH:-""}
+SIMDJSON_SKIPUTF8VALIDATION=${SIMDJSON_SKIPUTF8VALIDATION:-"OFF"}
 
 USE_CLANG="${USE_CLANG:-false}"
 
@@ -44,19 +47,18 @@ function install_fmt {
 }
 
 function install_folly {
-  # Folly Portability.h being used to decide whether or not support coroutines
-  # causes issues (build, link) if the selection is not consistent across users of folly.
-  # shellcheck disable=SC2034
-  EXTRA_PKG_CXXFLAGS=" -DFOLLY_CFG_NO_COROUTINES"
   wget_and_untar https://github.com/facebook/folly/archive/refs/tags/"${FB_OS_VERSION}".tar.gz folly
-  cmake_install_dir folly -DBUILD_SHARED_LIBS="$VELOX_BUILD_SHARED" -DBUILD_TESTS=OFF -DFOLLY_HAVE_INT128_T=ON
+  local FOLLY_FLAGS=(-DBUILD_SHARED_LIBS="$VELOX_BUILD_SHARED" -DBUILD_TESTS=OFF -DFOLLY_HAVE_INT128_T=ON)
+  # When folly is static, use static gflags to avoid dual gflags flag
+  # registration when .so plugins are dlopen'd (both the binary and plugin
+  # would register the same flags in a shared gflags registry).
+  if [[ ${VELOX_BUILD_SHARED} != "ON" ]]; then
+    FOLLY_FLAGS+=(-DGFLAGS_SHARED=FALSE)
+  fi
+  cmake_install_dir folly "${FOLLY_FLAGS[@]}"
 }
 
 function install_fizz {
-  # Folly Portability.h being used to decide whether or not support coroutines
-  # causes issues (build, link) if the selection is not consistent across users of folly.
-  # shellcheck disable=SC2034
-  EXTRA_PKG_CXXFLAGS=" -DFOLLY_CFG_NO_COROUTINES"
   wget_and_untar https://github.com/facebookincubator/fizz/archive/refs/tags/"${FB_OS_VERSION}".tar.gz fizz
   cmake_install_dir fizz/fizz -DBUILD_TESTS=OFF
 }
@@ -67,28 +69,16 @@ function install_fast_float {
 }
 
 function install_wangle {
-  # Folly Portability.h being used to decide whether or not support coroutines
-  # causes issues (build, link) if the selection is not consistent across users of folly.
-  # shellcheck disable=SC2034
-  EXTRA_PKG_CXXFLAGS=" -DFOLLY_CFG_NO_COROUTINES"
   wget_and_untar https://github.com/facebook/wangle/archive/refs/tags/"${FB_OS_VERSION}".tar.gz wangle
   cmake_install_dir wangle/wangle -DBUILD_TESTS=OFF
 }
 
 function install_mvfst {
-  # Folly Portability.h being used to decide whether or not support coroutines
-  # causes issues (build, link) if the selection is not consistent across users of folly.
-  # shellcheck disable=SC2034
-  EXTRA_PKG_CXXFLAGS=" -DFOLLY_CFG_NO_COROUTINES"
   wget_and_untar https://github.com/facebook/mvfst/archive/refs/tags/"${FB_OS_VERSION}".tar.gz mvfst
   cmake_install_dir mvfst -DBUILD_TESTS=OFF
 }
 
 function install_fbthrift {
-  # Folly Portability.h being used to decide whether or not support coroutines
-  # causes issues (build, link) if the selection is not consistent across users of folly.
-  # shellcheck disable=SC2034
-  EXTRA_PKG_CXXFLAGS=" -DFOLLY_CFG_NO_COROUTINES"
   wget_and_untar https://github.com/facebook/fbthrift/archive/refs/tags/"${FB_OS_VERSION}".tar.gz fbthrift
   cmake_install_dir fbthrift -Denable_tests=OFF -DBUILD_TESTS=OFF -DBUILD_SHARED_LIBS=OFF
 }
@@ -125,8 +115,23 @@ function install_boost {
 }
 
 function install_protobuf {
+  install_abseil
+
   wget_and_untar https://github.com/protocolbuffers/protobuf/releases/download/v"${PROTOBUF_VERSION}"/protobuf-all-"${PROTOBUF_VERSION}".tar.gz protobuf
   cmake_install_dir protobuf -Dprotobuf_BUILD_TESTS=OFF -Dprotobuf_ABSL_PROVIDER=package
+}
+
+function install_grpc {
+  wget_and_untar https://github.com/grpc/grpc/archive/refs/tags/v"${GRPC_VERSION}".tar.gz grpc
+  cmake_install_dir grpc \
+    -DgRPC_BUILD_TESTS=OFF \
+    -DgRPC_ABSL_PROVIDER=package \
+    -DgRPC_ZLIB_PROVIDER=package \
+    -DgRPC_CARES_PROVIDER=package \
+    -DgRPC_RE2_PROVIDER=package \
+    -DgRPC_SSL_PROVIDER=package \
+    -DgRPC_PROTOBUF_PROVIDER=package \
+    -DgRPC_INSTALL=ON
 }
 
 function install_double_conversion {
@@ -139,9 +144,29 @@ function install_ranges_v3 {
   cmake_install_dir ranges_v3 -DRANGES_ENABLE_WERROR=OFF -DRANGE_V3_TESTS=OFF -DRANGE_V3_EXAMPLES=OFF
 }
 
+function install_abseil {
+  wget_and_untar https://github.com/abseil/abseil-cpp/archive/refs/tags/"${ABSEIL_VERSION}".tar.gz abseil-cpp
+  local OS
+  OS=$(uname)
+  if [[ $OS == "Darwin" ]]; then
+    ABSOLUTE_SCRIPTDIR=$(realpath "$SCRIPT_DIR")
+    (
+      cd "${DEPENDENCY_DIR}/abseil-cpp" || exit 1
+      git apply $ABSOLUTE_SCRIPTDIR/../CMake/resolve_dependency_modules/absl/absl-macos.patch
+    )
+  fi
+  cmake_install_dir abseil-cpp \
+    -DABSL_BUILD_TESTING=OFF \
+    -DCMAKE_CXX_STANDARD=17 \
+    -DABSL_PROPAGATE_CXX_STD=ON \
+    -DABSL_ENABLE_INSTALL=ON
+}
+
 function install_re2 {
+  install_abseil
+
   wget_and_untar https://github.com/google/re2/archive/refs/tags/"${RE2_VERSION}".tar.gz re2
-  cmake_install_dir re2 -DRE2_BUILD_TESTING=OFF
+  cmake_install_dir re2 -DRE2_BUILD_TESTING=OFF -Dabsl_DIR="${INSTALL_PREFIX}/lib/cmake/absl"
 }
 
 function install_glog {
@@ -150,7 +175,7 @@ function install_glog {
 }
 
 function install_lzo {
-  wget_and_untar http://www.oberhumer.com/opensource/lzo/download/lzo-"${LZO_VERSION}".tar.gz lzo
+  wget_and_untar https://www.oberhumer.com/opensource/lzo/download/lzo-"${LZO_VERSION}".tar.gz lzo
   (
     cd "${DEPENDENCY_DIR}"/lzo || exit
     ./configure --prefix="${INSTALL_PREFIX}" --enable-shared --disable-static --docdir=/usr/share/doc/lzo-"${LZO_VERSION}"
@@ -171,7 +196,7 @@ function install_xsimd {
 
 function install_simdjson {
   wget_and_untar https://github.com/simdjson/simdjson/archive/refs/tags/v"${SIMDJSON_VERSION}".tar.gz simdjson
-  cmake_install_dir simdjson
+  cmake_install_dir simdjson -DSIMDJSON_SKIPUTF8VALIDATION=${SIMDJSON_SKIPUTF8VALIDATION}
 }
 
 function install_arrow {
@@ -186,6 +211,10 @@ function install_arrow {
 
     cd "$DEPENDENCY_DIR"/arrow || exit 1
     git apply "$VELOX_ARROW_CMAKE_PATCH"
+    # Presto needs this for Arrow Flight
+    if [[ -n $EXTRA_ARROW_PATCH ]]; then
+      git apply "$EXTRA_ARROW_PATCH"
+    fi
   ) || exit 1
 
   cmake_install_dir arrow/cpp \
@@ -252,6 +281,16 @@ function install_geos {
   fi
 }
 
+function install_s2geometry {
+  if [[ $BUILD_S2GEOMETRY == "true" ]]; then
+    wget_and_untar https://github.com/google/s2geometry/archive/refs/tags/v"${S2GEOMETRY_VERSION}".tar.gz s2geometry
+    # Apply the same GCC 12 patch used by the BUNDLED CMake resolver.
+    patch -p1 -d "${DEPENDENCY_DIR}/s2geometry" < \
+      "${SCRIPT_DIR}/../CMake/resolve_dependency_modules/s2geometry/s2geometry-gcc12-max.patch" || true
+    cmake_install_dir s2geometry -DBUILD_TESTING=OFF -DBUILD_TESTS=OFF -DBUILD_SHARED_LIBS=OFF
+  fi
+}
+
 function install_faiss_deps {
   echo "Unsupported platform for faiss"
 }
@@ -277,7 +316,7 @@ function install_aws_deps {
   local AWS_REPO_NAME="aws/aws-sdk-cpp"
 
   github_checkout $AWS_REPO_NAME "$AWS_SDK_VERSION" --depth 1 --recurse-submodules
-  cmake_install -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE}" -DBUILD_SHARED_LIBS:BOOL=OFF -DMINIMIZE_SIZE:BOOL=ON -DENABLE_TESTING:BOOL=OFF -DBUILD_ONLY:STRING="s3;identity-management"
+  cmake_install_dir aws-sdk-cpp -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE}" -DBUILD_SHARED_LIBS:BOOL=OFF -DMINIMIZE_SIZE:BOOL=ON -DENABLE_TESTING:BOOL=OFF -DBUILD_ONLY:STRING="s3;identity-management"
 }
 
 function install_minio {
@@ -298,62 +337,41 @@ function install_minio {
   ${SUDO} mv ./"${MINIO_BINARY_NAME}" "$INSTALL_PREFIX"/bin/
 }
 
-function install_gcs-sdk-cpp {
+function install_gcs_sdk_cpp {
   # Install gcs dependencies
   # https://github.com/googleapis/google-cloud-cpp/blob/main/doc/packaging.md#required-libraries
 
-  # abseil-cpp
-  github_checkout abseil/abseil-cpp "${ABSEIL_VERSION}" --depth 1
-  cmake_install \
-    -DABSL_BUILD_TESTING=OFF \
-    -DCMAKE_CXX_STANDARD=17 \
-    -DABSL_PROPAGATE_CXX_STD=ON \
-    -DABSL_ENABLE_INSTALL=ON
-
-  # protobuf
-  github_checkout protocolbuffers/protobuf v"${PROTOBUF_VERSION}" --depth 1
-  cmake_install \
-    -Dprotobuf_BUILD_TESTS=OFF \
-    -Dprotobuf_ABSL_PROVIDER=package
-
-  # grpc
-  github_checkout grpc/grpc "${GRPC_VERSION}" --depth 1
-  cmake_install \
-    -DgRPC_BUILD_TESTS=OFF \
-    -DgRPC_ABSL_PROVIDER=package \
-    -DgRPC_ZLIB_PROVIDER=package \
-    -DgRPC_CARES_PROVIDER=package \
-    -DgRPC_RE2_PROVIDER=package \
-    -DgRPC_SSL_PROVIDER=package \
-    -DgRPC_PROTOBUF_PROVIDER=package \
-    -DgRPC_INSTALL=ON
+  # abseil-cpp, protobuf, grpc
+  install_protobuf
+  install_grpc
 
   # crc32
-  github_checkout google/crc32c "${CRC32_VERSION}" --depth 1
-  cmake_install \
+  wget_and_untar https://github.com/google/crc32c/archive/refs/tags/"${CRC32_VERSION}".tar.gz crc32c
+  cmake_install_dir crc32c \
     -DCRC32C_BUILD_TESTS=OFF \
     -DCRC32C_BUILD_BENCHMARKS=OFF \
     -DCRC32C_USE_GLOG=OFF
 
   # nlohmann json
-  github_checkout nlohmann/json "${NLOHMAN_JSON_VERSION}" --depth 1
-  cmake_install \
+  wget_and_untar https://github.com/nlohmann/json/archive/refs/tags/v"${NLOHMAN_JSON_VERSION}".tar.gz json
+  cmake_install_dir json \
     -DJSON_BuildTests=OFF
 
   # google-cloud-cpp
-  github_checkout googleapis/google-cloud-cpp "${GOOGLE_CLOUD_CPP_VERSION}" --depth 1
-  cmake_install \
+  wget_and_untar https://github.com/googleapis/google-cloud-cpp/archive/refs/tags/v"${GOOGLE_CLOUD_CPP_VERSION}".tar.gz google-cloud-cpp
+  cmake_install_dir google-cloud-cpp \
     -DGOOGLE_CLOUD_CPP_ENABLE_EXAMPLES=OFF \
     -DGOOGLE_CLOUD_CPP_ENABLE=storage
 }
 
-function install_azure-storage-sdk-cpp {
+function install_azure_storage_sdk_cpp {
   # Disable VCPKG to install additional static dependencies under the VCPKG installed path
   # instead of using system pre-installed dependencies.
   export AZURE_SDK_DISABLE_AUTO_VCPKG=ON
   vcpkg_commit_id=7a6f366cefd27210f6a8309aed10c31104436509
   github_checkout azure/azure-sdk-for-cpp azure-storage-files-datalake_"${AZURE_SDK_VERSION}"
-  sed -i "s/set(VCPKG_COMMIT_STRING .*)/set(VCPKG_COMMIT_STRING $vcpkg_commit_id)/" cmake-modules/AzureVcpkg.cmake
+  pushd azure-sdk-for-cpp || exit
+  sed -i='' "s/set(VCPKG_COMMIT_STRING .*)/set(VCPKG_COMMIT_STRING $vcpkg_commit_id)/" cmake-modules/AzureVcpkg.cmake
 
   azure_core_dir="sdk/core/azure-core"
   if ! grep -q "baseline" $azure_core_dir/vcpkg.json; then
@@ -362,8 +380,8 @@ function install_azure-storage-sdk-cpp {
     if [[ $openssl_version == 1.1.1* ]]; then
       openssl_version="1.1.1n"
     fi
-    sed -i "s/\"version-string\"/\"builtin-baseline\": \"$vcpkg_commit_id\",\"version-string\"/" $azure_core_dir/vcpkg.json
-    sed -i "s/\"version-string\"/\"overrides\": [{ \"name\": \"openssl\", \"version-string\": \"$openssl_version\" }],\"version-string\"/" $azure_core_dir/vcpkg.json
+    sed -i='' "s/\"version-string\"/\"builtin-baseline\": \"$vcpkg_commit_id\",\"version-string\"/" $azure_core_dir/vcpkg.json
+    sed -i='' "s/\"version-string\"/\"overrides\": [{ \"name\": \"openssl\", \"version-string\": \"$openssl_version\" }],\"version-string\"/" $azure_core_dir/vcpkg.json
   fi
   (
     cd $azure_core_dir || exit
@@ -389,13 +407,16 @@ function install_azure-storage-sdk-cpp {
     cd sdk/storage/azure-storage-files-datalake || exit
     cmake_install -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE}" -DBUILD_SHARED_LIBS=OFF
   )
+  popd || exit
 }
 
 function install_hdfs_deps {
   # Dependencies for Hadoop testing
-  wget_and_untar https://archive.apache.org/dist/hadoop/common/hadoop-"${HADOOP_VERSION}"/hadoop-"${HADOOP_VERSION}".tar.gz hadoop
+  wget_and_untar https://dlcdn.apache.org/hadoop/common/hadoop-"${HADOOP_VERSION}"/hadoop-"${HADOOP_VERSION}".tar.gz hadoop
   cp -a "${DEPENDENCY_DIR}"/hadoop "$INSTALL_PREFIX"
   wget "${WGET_OPTS[@]}" -P "$INSTALL_PREFIX"/hadoop/share/hadoop/common/lib/ https://repo1.maven.org/maven2/junit/junit/4.11/junit-4.11.jar
+  # Needed for HADOOP 3.3.6 minicluster. Can remove after updating to 3.4.2.
+  wget "${WGET_OPTS[@]}" -P "$INSTALL_PREFIX"/hadoop/share/hadoop/mapreduce/ https://repo1.maven.org/maven2/org/mockito/mockito-core/2.23.4/mockito-core-2.23.4.jar
 }
 
 function install_uv {

@@ -24,21 +24,21 @@
  * THE TPC SOFTWARE IS AVAILABLE WITHOUT CHARGE FROM TPC.
  */
 
-#include "w_customer.h"
+#include "velox/tpcds/gen/dsdgen/include/w_customer.h"
 
-#include "append_info.h"
-#include "build_support.h"
-#include "columns.h"
-#include "config.h"
-#include "constants.h"
-#include "genrand.h"
-#include "nulls.h"
-#include "porting.h"
-#include "tables.h"
-#include "tdefs.h"
+#include "velox/tpcds/gen/dsdgen/include/append_info.h"
+#include "velox/tpcds/gen/dsdgen/include/build_support.h"
+#include "velox/tpcds/gen/dsdgen/include/columns.h"
+#include "velox/tpcds/gen/dsdgen/include/config.h"
+#include "velox/tpcds/gen/dsdgen/include/constants.h"
+#include "velox/tpcds/gen/dsdgen/include/genrand.h"
+#include "velox/tpcds/gen/dsdgen/include/nulls.h"
+#include "velox/tpcds/gen/dsdgen/include/porting.h"
+#include "velox/tpcds/gen/dsdgen/include/tables.h"
+#include "velox/tpcds/gen/dsdgen/include/tdefs.h"
 
 #include <stdio.h>
-#include "parallel.h"
+#include "velox/tpcds/gen/dsdgen/include/parallel.h"
 /* extern tdef w_tdefs[]; */
 
 /*
@@ -61,7 +61,6 @@ int mk_w_customer(
     DSDGenContext& dsdGenContext) {
   int nTemp;
 
-  int nBaseDate;
   /* begin locals declarations */
   int nNameIndex, nGender;
   struct W_CUSTOMER_TBL* r;
@@ -69,10 +68,6 @@ int mk_w_customer(
   date_t dtBirthMin, dtBirthMax, dtToday, dt1YearAgo, dt10YearsAgo;
   tdef* pT = getSimpleTdefsByNumber(CUSTOMER, dsdGenContext);
   r = &dsdGenContext.g_w_customer;
-
-  date_t min_date;
-  strtodt(&min_date, DATE_MINIMUM);
-  nBaseDate = dttoj(&min_date);
 
   strtodt(&dtBirthMax, "1992-12-31");
   strtodt(&dtBirthMin, "1924-01-01");

@@ -20,9 +20,7 @@
 namespace facebook::velox {
 namespace {
 std::string formatDecimal(uint8_t scale, int128_t unscaledValue) {
-  VELOX_DCHECK_GE(scale, 0);
-  VELOX_DCHECK_LT(
-      static_cast<size_t>(scale), sizeof(DecimalUtil::kPowersOfTen));
+  VELOX_DCHECK_LT(scale, std::size(DecimalUtil::kPowersOfTen));
   const bool isFraction = (scale > 0);
   if (unscaledValue == 0) {
     if (isFraction) {
@@ -226,7 +224,7 @@ parseDecimalComponents(const char* s, size_t size, DecimalComponents& out) {
             "Non-digit character is not allowed in the exponent part.");
       }
     }
-    out.exponent = folly::to<int32_t>(folly::StringPiece(s + pos, size - pos));
+    out.exponent = folly::to<int32_t>(std::string_view(s + pos, size - pos));
     return Status::OK();
   }
   return pos == size ? Status::OK() : Status::UserError("Chars are invalid.");
@@ -238,7 +236,7 @@ parseDecimalComponents(const char* s, size_t size, DecimalComponents& out) {
 Status parseHugeInt(const DecimalComponents& decimalComponents, int128_t& out) {
   // Parse the whole digits.
   if (decimalComponents.wholeDigits.size() > 0) {
-    const auto tryValue = folly::tryTo<int128_t>(folly::StringPiece(
+    const auto tryValue = folly::tryTo<int128_t>(std::string_view(
         decimalComponents.wholeDigits.data(),
         decimalComponents.wholeDigits.size()));
     if (tryValue.hasError()) {
@@ -256,7 +254,7 @@ Status parseHugeInt(const DecimalComponents& decimalComponents, int128_t& out) {
       return Status::UserError("Value too large.");
     }
     const auto tryValue = folly::tryTo<int128_t>(
-        folly::StringPiece(decimalComponents.fractionalDigits.data(), length));
+        std::string_view(decimalComponents.fractionalDigits.data(), length));
     if (tryValue.hasError()) {
       return Status::UserError("Value too large.");
     }

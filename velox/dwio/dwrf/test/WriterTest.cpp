@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 #include <stdexcept>
 #include "velox/common/base/tests/GTestUtils.h"
+#include "velox/common/io/IoStatistics.h"
 #include "velox/dwio/dwrf/reader/ReaderBase.h"
 #include "velox/dwio/dwrf/writer/WriterBase.h"
 #include "velox/type/fbhive/HiveTypeParser.h"
@@ -61,7 +62,9 @@ class WriterTest : public Test {
     std::string data(sinkPtr_->data(), sinkPtr_->size());
     auto readFile = std::make_shared<InMemoryReadFile>(std::move(data));
     auto input = std::make_unique<BufferedInput>(std::move(readFile), *pool_);
-    dwio::common::ReaderOptions readerOpts{pool_.get()};
+    dwio::common::ReaderOptions readerOpts(pool_.get());
+    readerOpts.setDataIoStats(dataIoStats_);
+    readerOpts.setMetadataIoStats(metadataIoStats_);
     auto reader = std::make_unique<ReaderBase>(readerOpts, std::move(input));
     reader->loadCache();
     return reader;
@@ -75,7 +78,7 @@ class WriterTest : public Test {
     return writer_->getFooter();
   }
 
-  auto& addStripeInfo() {
+  StripeInformationWriteWrapper addStripeInfo() {
     return writer_->addStripeInfo();
   }
 
@@ -91,6 +94,10 @@ class WriterTest : public Test {
   std::shared_ptr<MemoryPool> pool_;
   MemorySink* sinkPtr_;
   std::unique_ptr<WriterBase> writer_;
+  std::shared_ptr<io::IoStatistics> dataIoStats_{
+      std::make_shared<io::IoStatistics>()};
+  std::shared_ptr<io::IoStatistics> metadataIoStats_{
+      std::make_shared<io::IoStatistics>()};
 };
 
 class SupportedCompressionTest
@@ -168,7 +175,7 @@ TEST_P(AllWriterCompressionTest, compression) {
         folly::to<std::string>(i), folly::to<std::string>(i + 1));
   }
   for (size_t i = 0; i < 4; ++i) {
-    getFooter().add_statistics();
+    getFooter()->addStatistics();
   }
 
   if (compressionKind_ == CompressionKind::CompressionKind_SNAPPY ||
@@ -230,7 +237,7 @@ TEST_P(SupportedCompressionTest, WriteFooter) {
         folly::to<std::string>(i), folly::to<std::string>(i + 1));
   }
   for (size_t i = 0; i < 4; ++i) {
-    getFooter().add_statistics();
+    getFooter()->addStatistics();
   }
   writeFooter(*schema);
   writer.close();
@@ -262,11 +269,11 @@ TEST_P(SupportedCompressionTest, WriteFooter) {
   ASSERT_EQ(footer.metadataSize(), 5);
   for (size_t i = 0; i < 4; ++i) {
     auto item = footer.metadata(i);
-    if (item.name() == WRITER_NAME_KEY) {
+    if (item.name() == kWriterNameKey) {
       ASSERT_EQ(item.value(), kDwioWriter);
-    } else if (item.name() == WRITER_VERSION_KEY) {
+    } else if (item.name() == kWriterVersionKey) {
       ASSERT_EQ(item.value(), folly::to<std::string>(reader->writerVersion()));
-    } else if (item.name() == WRITER_HOSTNAME_KEY) {
+    } else if (item.name() == kWriterHostnameKey) {
       ASSERT_EQ(item.value(), process::getHostName());
     } else {
       ASSERT_EQ(
@@ -306,9 +313,9 @@ TEST_P(SupportedCompressionTest, AddStripeInfo) {
   writerSink.addBuffer(*pool_, data.data(), data.size());
   writerSink.setMode(WriterSink::Mode::None);
 
-  auto& ret = addStripeInfo();
-  ASSERT_EQ(ret.numberofrows(), 101);
-  ASSERT_EQ(ret.rawdatasize(), 202);
+  auto ret = addStripeInfo();
+  ASSERT_EQ(ret.numberOfRows(), 101);
+  ASSERT_EQ(ret.rawDataSize(), 202);
   ASSERT_EQ(ret.checksum(), 8963334039576633799);
   writer.close();
 }
@@ -326,14 +333,14 @@ TEST_P(SupportedCompressionTest, NoChecksum) {
   writerSink.addBuffer(*pool_, data.data(), data.size());
   writerSink.setMode(WriterSink::Mode::None);
 
-  auto& ret = addStripeInfo();
-  ASSERT_FALSE(ret.has_checksum());
+  auto ret = addStripeInfo();
+  ASSERT_FALSE(ret.hasChecksum());
 
   std::string typeStr{"struct<a:int,b:float,c:string>"};
   HiveTypeParser parser;
   auto schema = parser.parse(typeStr);
   for (size_t i = 0; i < 4; ++i) {
-    getFooter().add_statistics();
+    getFooter()->addStatistics();
   }
   writeFooter(*schema);
   writer.close();
@@ -368,7 +375,7 @@ TEST_P(SupportedCompressionTest, NoCache) {
   HiveTypeParser parser;
   auto schema = parser.parse(typeStr);
   for (size_t i = 0; i < 4; ++i) {
-    getFooter().add_statistics();
+    getFooter()->addStatistics();
   }
   writeFooter(*schema);
   writer.close();
@@ -456,7 +463,20 @@ class MockFileSink : public dwio::common::FileSink {
 
   MOCK_METHOD(uint64_t, size, (), (const override));
   MOCK_METHOD(bool, isBuffered, (), (const override));
+// On Centos9 the gtest mock header doesn't initialize the
+// buffer_ member in MatcherBase correctly - the default constructor only
+// initializes one: /usr/include/gtest/gtest-matchers.h:302:33 resulting in
+// error:
+// '<unnamed>.testing::Matcher<const
+// facebook::velox::FileIoContext&>::<unnamed>.testing::internal::MatcherBase<const
+// facebook::velox::FileIoContext&>::buffer_' is used uninitialized
+// [-Werror=uninitialized]
+//  302 |       : vtable_(other.vtable_), buffer_(other.buffer_) {
+// Fix: https://github.com/google/googletest/pull/3797
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wuninitialized"
   MOCK_METHOD(void, write, (std::vector<DataBuffer<char>>&));
+#pragma GCC diagnostic pop
 };
 
 TEST_F(WriterTest, FlushWriterSinkUponClose) {

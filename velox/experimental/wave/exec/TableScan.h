@@ -15,6 +15,7 @@
  */
 #pragma once
 
+#include "velox/connectors/ConnectorRegistry.h"
 #include "velox/experimental/wave/exec/WaveOperator.h"
 
 #include "velox/common/time/Timer.h"
@@ -49,7 +50,8 @@ class TableScan : public WaveSourceOperator {
                            ->queryConfig()
                            .preferredOutputBatchRows()) {
     defines_ = std::move(defines);
-    connector_ = connector::getConnector(tableHandle_->connectorId());
+    connector_ =
+        connector::ConnectorRegistry::tryGet(tableHandle_->connectorId());
   }
 
   std::vector<AdvanceResult> canAdvance(WaveStream& stream) override;
@@ -95,6 +97,9 @@ class TableScan : public WaveSourceOperator {
   // map.
   void updateStats(
       std::unordered_map<std::string, RuntimeCounter> stats,
+      WaveSplitReader* splitReader = nullptr);
+  void updateStats(
+      std::unordered_map<std::string, RuntimeMetric> stats,
       WaveSplitReader* splitReader = nullptr);
 
   // Process-wide IO wait time.

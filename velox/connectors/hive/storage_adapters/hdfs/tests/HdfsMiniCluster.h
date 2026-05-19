@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "velox/exec/tests/utils/TempDirectoryPath.h"
+#include "velox/common/testutil/TempDirectoryPath.h"
 
 #include <pwd.h>
 #include <unistd.h>
@@ -22,11 +22,14 @@
 #include "boost/process.hpp"
 
 namespace facebook::velox::filesystems::test {
+
+using TempDirectoryPath = common::testutil::TempDirectoryPath;
+
 static const std::string kMiniClusterExecutableName{"hadoop"};
 static const std::string kHadoopSearchPath{":/usr/local/hadoop/bin"};
 static const std::string kJarCommand{"jar"};
 static const std::string kMiniclusterJar{
-    "/share/hadoop/mapreduce/hadoop-mapreduce-client-jobclient-3.3.0-tests.jar"};
+    "/share/hadoop/mapreduce/hadoop-mapreduce-client-jobclient-3.3.6-tests.jar"};
 static const std::string kMiniclusterCommand{"minicluster"};
 static const std::string kNoMapReduceOption{"-nomr"};
 static const std::string kFormatNameNodeOption{"-format"};

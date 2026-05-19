@@ -18,6 +18,8 @@
 #include <gtest/gtest.h>
 #include "velox/common/base/tests/GTestUtils.h"
 #include "velox/type/Variant.h"
+#include "velox/vector/BaseVector.h"
+#include "velox/vector/VectorSaver.h"
 #include "velox/vector/tests/utils/VectorTestBase.h"
 
 namespace facebook::velox {
@@ -30,10 +32,11 @@ class VariantToVectorTest : public testing::Test, public test::VectorTestBase {
   }
 
   void testNull(const TypePtr& type) const {
-    auto vector = variantToVector(type, Variant::null(type->kind()), pool());
+    auto vector = BaseVector::createConstant(
+        type, Variant::null(type->kind()), 1, pool());
 
     EXPECT_TRUE(vector->isConstantEncoding());
-    EXPECT_EQ(vector->type()->toString(), type->toString());
+    VELOX_EXPECT_EQ_TYPES(vector->type(), type);
     EXPECT_TRUE(vector->isNullAt(0));
 
     auto copy = vector->variantAt(0);
@@ -45,10 +48,10 @@ class VariantToVectorTest : public testing::Test, public test::VectorTestBase {
       const TypePtr& type,
       const Variant& value,
       const VectorPtr& expected) {
-    auto vector = variantToVector(type, value, pool());
+    auto vector = BaseVector::createConstant(type, value, 1, pool());
 
     EXPECT_TRUE(vector->isConstantEncoding());
-    EXPECT_EQ(vector->type()->toString(), type->toString());
+    VELOX_EXPECT_EQ_TYPES(vector->type(), type);
     EXPECT_TRUE(expected->equalValueAt(vector.get(), 0, 0))
         << "Expected: " << expected->toString(0)
         << ", but got: " << vector->toString(0);
@@ -57,6 +60,23 @@ class VariantToVectorTest : public testing::Test, public test::VectorTestBase {
     EXPECT_FALSE(copy.isNull());
     EXPECT_TRUE(copy.isTypeCompatible(type));
     EXPECT_EQ(copy, value);
+  }
+
+  void testFromVariants(
+      const TypePtr& type,
+      const std::vector<Variant>& values) {
+    auto vector = BaseVector::createFromVariants(type, values, pool());
+
+    EXPECT_FALSE(vector->isConstantEncoding());
+    VELOX_EXPECT_EQ_TYPES(vector->type(), type);
+    EXPECT_EQ(vector->size(), values.size());
+
+    vector->validate();
+
+    for (auto i = 0; i < values.size(); ++i) {
+      EXPECT_EQ(values[i], vector->variantAt(i));
+      EXPECT_TRUE(vector->variantAt(i).isTypeCompatible(type));
+    }
   }
 };
 
@@ -82,9 +102,8 @@ TEST_F(VariantToVectorTest, decimal) {
       Variant(arrayData[0]), Variant(arrayData[1]), Variant(arrayData[2])};
   Variant arrayInput = Variant::array(arrayInputData);
 
-  VELOX_ASSERT_THROW(
-      variantToVector(ARRAY(type), arrayInput, pool()),
-      "Type not supported: DECIMAL(20, 3)");
+  auto expectedVector = makeArrayVector<int128_t>({arrayData}, type);
+  testValue(ARRAY(type), arrayInput, expectedVector);
 }
 
 TEST_F(VariantToVectorTest, timestamp) {
@@ -124,6 +143,19 @@ TEST_F(VariantToVectorTest, array) {
       type,
       Variant::array({1, 2, Variant::null(TypeKind::INTEGER), 4}),
       makeArrayVectorFromJson<int32_t>({"[1, 2, null, 4]"}));
+}
+
+TEST_F(VariantToVectorTest, saveVarcharArrayVector) {
+  auto type = ARRAY(VARCHAR());
+  auto variant =
+      Variant::array({"a", "b", Variant::null(TypeKind::VARCHAR), "d"});
+  auto vectorWithNulls = BaseVector::createConstant(type, variant, 1, pool());
+  std::ostringstream out;
+  saveVector(*vectorWithNulls, out);
+  std::istringstream in(out.str());
+  auto vectorCopy = restoreVector(in, pool());
+  auto variantCopy = vectorCopy->variantAt(0);
+  EXPECT_EQ(variantCopy, variant);
 }
 
 TEST_F(VariantToVectorTest, nestedContainers) {
@@ -200,6 +232,85 @@ TEST_F(VariantToVectorTest, opaque) {
   auto expected = makeFlatVector<std::shared_ptr<void>>({data});
 
   testValue(type, Variant::opaque(data), expected);
+}
+
+TEST_F(VariantToVectorTest, createFromVariantsInteger) {
+  testFromVariants(
+      INTEGER(),
+      {
+          Variant::create<int32_t>(1),
+          Variant::create<int32_t>(2),
+          Variant::create<int32_t>(3),
+      });
+}
+
+TEST_F(VariantToVectorTest, createFromVariantsWithNulls) {
+  testFromVariants(
+      INTEGER(),
+      {
+          Variant::create<int32_t>(1),
+          Variant::null(TypeKind::INTEGER),
+          Variant::create<int32_t>(3),
+      });
+}
+
+TEST_F(VariantToVectorTest, createFromVariantsVarchar) {
+  testFromVariants(
+      VARCHAR(), {Variant("hello"), Variant("world"), Variant("test")});
+}
+
+TEST_F(VariantToVectorTest, createFromVariantsArray) {
+  testFromVariants(
+      ARRAY(INTEGER()),
+      {Variant::array({1, 2, 3}), Variant::array({4, 5}), Variant::array({})});
+}
+
+TEST_F(VariantToVectorTest, createFromVariantsMap) {
+  testFromVariants(
+      MAP(INTEGER(), DOUBLE()),
+      {Variant::map({{1, 1.0}, {2, 2.0}}), Variant::map({{3, 3.0}})});
+}
+
+TEST_F(VariantToVectorTest, createFromVariantsRow) {
+  testFromVariants(
+      ROW({"a", "b"}, {INTEGER(), DOUBLE()}),
+      {Variant::row({1, 1.0}), Variant::row({2, 2.0})});
+
+  // All nulls.
+  testFromVariants(
+      ROW({"a", "b"}, {INTEGER(), DOUBLE()}),
+      {Variant::null(TypeKind::ROW), Variant::null(TypeKind::ROW)});
+
+  // Mixed nulls and values.
+  testFromVariants(
+      ROW({"a", "b"}, {INTEGER(), DOUBLE()}),
+      {Variant::row({1, 1.0}),
+       Variant::null(TypeKind::ROW),
+       Variant::row({2, 2.0}),
+       Variant::null(TypeKind::ROW)});
+}
+
+TEST_F(VariantToVectorTest, createFromVariantsEmpty) {
+  auto vector = BaseVector::createFromVariants(INTEGER(), {}, pool());
+  EXPECT_EQ(vector->size(), 0);
+}
+
+TEST_F(VariantToVectorTest, createFromVariantsMismatchedType) {
+  {
+    std::vector<Variant> values = {
+        Variant::create<int32_t>(1),
+        Variant::create<int32_t>(2),
+    };
+    VELOX_ASSERT_THROW(
+        BaseVector::createFromVariants(VARCHAR(), values, pool()),
+        "wrong kind! INTEGER != VARCHAR");
+  }
+  {
+    std::vector<Variant> values = {Variant::create<int32_t>(1), Variant("one")};
+    VELOX_ASSERT_THROW(
+        BaseVector::createFromVariants(INTEGER(), values, pool()),
+        "wrong kind! VARCHAR != INTEGER");
+  }
 }
 
 } // namespace

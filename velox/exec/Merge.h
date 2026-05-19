@@ -15,11 +15,11 @@
  */
 #pragma once
 
+#include "velox/common/base/TreeOfLosers.h"
 #include "velox/exec/Exchange.h"
 #include "velox/exec/MergeSource.h"
 #include "velox/exec/Spill.h"
 #include "velox/exec/Spiller.h"
-#include "velox/exec/TreeOfLosers.h"
 
 namespace facebook::velox::exec {
 
@@ -40,7 +40,7 @@ class Merge : public SourceOperator {
           sortingKeys,
       const std::vector<core::SortOrder>& sortingOrders,
       const std::string& planNodeId,
-      const std::string& operatorType,
+      std::string_view operatorType,
       const std::optional<common::SpillConfig>& spillConfig = std::nullopt);
 
   void initialize() override;
@@ -61,12 +61,12 @@ class Merge : public SourceOperator {
   /// The running wall time of the merge operator reading from the streaming
   /// source. If spilling is enabled for local merge, this also includes the
   /// time that writes to the spilled source.
-  static inline const std::string kStreamingSourceReadWallNanos{
+  static constexpr std::string_view kStreamingSourceReadWallNanos{
       "streamingSourceReadWallNanos"};
   /// The running wall time of the merge operator reading from the spilled
   /// source to produce the final output. This only applies when spilling is
   /// enabled for local merge.
-  static inline const std::string kSpilledSourceReadWallNanos{
+  static constexpr std::string_view kSpilledSourceReadWallNanos{
       "spilledSourceReadWallNanos"};
 
  protected:
@@ -167,6 +167,10 @@ class SourceMerger {
  private:
   void setOutputBatchSize();
 
+  /// Creates the output vector. If a template is available from input data,
+  /// creates output children with matching encodings to support FlatMapVector.
+  RowVectorPtr createOutputVector();
+
   const RowTypePtr type_;
   const vector_size_t maxOutputBatchRows_;
   const uint64_t maxOutputBatchBytes_;
@@ -209,6 +213,12 @@ class SourceStream final : public MergeStream {
 
   bool hasData() const override {
     return !atEnd_;
+  }
+
+  /// Returns the current data batch from the source. Used for encoding
+  /// detection to create output vectors with matching encodings.
+  const RowVector* data() const {
+    return data_.get();
   }
 
   // Returns the estimated row size based on the vector received from the
@@ -292,8 +302,7 @@ class SpillMerger : public std::enable_shared_from_this<SpillMerger> {
       uint64_t maxOutputBatchBytes,
       int mergeSourceQueueSize,
       const common::SpillConfig* spillConfig,
-      const std::shared_ptr<folly::Synchronized<common::SpillStats>>&
-          spillStats,
+      const std::shared_ptr<exec::SpillStats>& spillStats,
       velox::memory::MemoryPool* pool);
 
   ~SpillMerger();
@@ -302,7 +311,7 @@ class SpillMerger : public std::enable_shared_from_this<SpillMerger> {
 
   RowVectorPtr getOutput(
       std::vector<ContinueFuture>& sourceBlockingFutures,
-      bool& atEnd) const;
+      bool& atEnd);
 
  private:
   static std::vector<std::shared_ptr<MergeSource>> createMergeSources(
@@ -321,21 +330,32 @@ class SpillMerger : public std::enable_shared_from_this<SpillMerger> {
       uint64_t maxOutputBatchBytes,
       velox::memory::MemoryPool* pool);
 
-  static void asyncReadFromSpillFileStream(
+  void finishSource(size_t streamIdx) const;
+
+  void readFromSpillFileStream(
       const std::weak_ptr<SpillMerger>& mergeHolder,
       size_t streamIdx);
 
-  void readFromSpillFileStream(size_t streamIdx);
-
   void scheduleAsyncSpillFileStreamReads();
 
+  // Sets 'exception_' when an async reader throws.
+  void setError(const std::exception_ptr& exception);
+
+  // Returns true if any async reader has thrown an exception.
+  bool hasError() const;
+
+  // If any async reader has thrown an exception, rethrows it.
+  void checkError();
+
   folly::Executor* const executor_;
-  const std::shared_ptr<folly::Synchronized<common::SpillStats>> spillStats_;
+  const std::shared_ptr<exec::SpillStats> spillStats_;
   const std::shared_ptr<memory::MemoryPool> pool_;
 
   std::vector<std::shared_ptr<MergeSource>> sources_;
   std::vector<std::unique_ptr<BatchStream>> batchStreams_;
   std::unique_ptr<SourceMerger> sourceMerger_;
+  mutable std::timed_mutex mutex_;
+  std::exception_ptr exception_ = nullptr;
 };
 
 // LocalMerge merges its source's output into a single stream of

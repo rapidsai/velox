@@ -21,8 +21,8 @@
 #include "velox/connectors/hive/TableHandle.h"
 #include "velox/dwio/dwrf/reader/DwrfReader.h"
 
+#include "velox/common/testutil/TempDirectoryPath.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
-#include "velox/exec/tests/utils/TempDirectoryPath.h"
 
 #include "velox/exec/PartitionFunction.h"
 #include "velox/exec/fuzzer/FuzzerUtil.h"
@@ -34,10 +34,17 @@ DEFINE_bool(
     true,
     "When true, generates plans with aggregations over sorted inputs");
 
+DEFINE_bool(
+    enable_streaming_aggregations,
+    true,
+    "When true, generates plans with streaming aggregations");
+
 using facebook::velox::fuzzer::CallableSignature;
 using facebook::velox::fuzzer::SignatureTemplate;
 
 namespace facebook::velox::exec::test {
+
+using namespace facebook::velox::common::testutil;
 
 class AggregationFuzzerBase;
 
@@ -490,21 +497,23 @@ void makeAlternativePlansWithValues(
     const std::vector<core::ExprPtr>& projections,
     std::vector<core::PlanNodePtr>& plans) {
   // Partial -> final aggregation plan.
-  plans.push_back(PlanBuilder()
-                      .values(inputVectors)
-                      .projectExpressions(projections)
-                      .partialAggregation(groupingKeys, aggregates, masks)
-                      .finalAggregation()
-                      .planNode());
+  plans.push_back(
+      PlanBuilder()
+          .values(inputVectors)
+          .projectExpressions(projections)
+          .partialAggregation(groupingKeys, aggregates, masks)
+          .finalAggregation()
+          .planNode());
 
   // Partial -> intermediate -> final aggregation plan.
-  plans.push_back(PlanBuilder()
-                      .values(inputVectors)
-                      .projectExpressions(projections)
-                      .partialAggregation(groupingKeys, aggregates, masks)
-                      .intermediateAggregation()
-                      .finalAggregation()
-                      .planNode());
+  plans.push_back(
+      PlanBuilder()
+          .values(inputVectors)
+          .projectExpressions(projections)
+          .partialAggregation(groupingKeys, aggregates, masks)
+          .intermediateAggregation()
+          .finalAggregation()
+          .planNode());
 
   // Partial -> local exchange -> final aggregation plan.
   auto numSources = std::min<size_t>(4, inputVectors.size());
@@ -550,23 +559,25 @@ void makeAlternativePlansWithTableScan(
 // the false negatives.
 #ifndef TSAN_BUILD
   // Partial -> final aggregation plan.
-  plans.push_back(PlanBuilder()
-                      .tableScan(inputRowType)
-                      .projectExpressions(projections)
-                      .partialAggregation(groupingKeys, aggregates, masks)
-                      .localPartition(groupingKeys)
-                      .finalAggregation()
-                      .planNode());
+  plans.push_back(
+      PlanBuilder()
+          .tableScan(inputRowType)
+          .projectExpressions(projections)
+          .partialAggregation(groupingKeys, aggregates, masks)
+          .localPartition(groupingKeys)
+          .finalAggregation()
+          .planNode());
 
   // Partial -> intermediate -> final aggregation plan.
-  plans.push_back(PlanBuilder()
-                      .tableScan(inputRowType)
-                      .projectExpressions(projections)
-                      .partialAggregation(groupingKeys, aggregates, masks)
-                      .localPartition(groupingKeys)
-                      .intermediateAggregation()
-                      .finalAggregation()
-                      .planNode());
+  plans.push_back(
+      PlanBuilder()
+          .tableScan(inputRowType)
+          .projectExpressions(projections)
+          .partialAggregation(groupingKeys, aggregates, masks)
+          .localPartition(groupingKeys)
+          .intermediateAggregation()
+          .finalAggregation()
+          .planNode());
 #endif
 }
 
@@ -578,17 +589,18 @@ void makeStreamingPlansWithValues(
     const std::vector<core::ExprPtr>& projections,
     std::vector<core::PlanNodePtr>& plans) {
   // Single aggregation.
-  plans.push_back(PlanBuilder()
-                      .values(inputVectors)
-                      .projectExpressions(projections)
-                      .orderBy(groupingKeys, false)
-                      .streamingAggregation(
-                          groupingKeys,
-                          aggregates,
-                          masks,
-                          core::AggregationNode::Step::kSingle,
-                          false)
-                      .planNode());
+  plans.push_back(
+      PlanBuilder()
+          .values(inputVectors)
+          .projectExpressions(projections)
+          .orderBy(groupingKeys, false)
+          .streamingAggregation(
+              groupingKeys,
+              aggregates,
+              masks,
+              core::AggregationNode::Step::kSingle,
+              false)
+          .planNode());
 
   // Partial -> final aggregation plan.
   plans.push_back(
@@ -643,17 +655,18 @@ void makeStreamingPlansWithTableScan(
     const std::vector<core::ExprPtr>& projections,
     std::vector<core::PlanNodePtr>& plans) {
   // Single aggregation.
-  plans.push_back(PlanBuilder()
-                      .tableScan(inputRowType)
-                      .projectExpressions(projections)
-                      .orderBy(groupingKeys, false)
-                      .streamingAggregation(
-                          groupingKeys,
-                          aggregates,
-                          masks,
-                          core::AggregationNode::Step::kSingle,
-                          false)
-                      .planNode());
+  plans.push_back(
+      PlanBuilder()
+          .tableScan(inputRowType)
+          .projectExpressions(projections)
+          .orderBy(groupingKeys, false)
+          .streamingAggregation(
+              groupingKeys,
+              aggregates,
+              masks,
+              core::AggregationNode::Step::kSingle,
+              false)
+          .planNode());
 
   // Partial -> final aggregation plan.
   plans.push_back(
@@ -724,7 +737,7 @@ bool AggregationFuzzer::verifyAggregation(
   std::vector<PlanWithSplits> plans;
   plans.push_back({firstPlan, {}});
 
-  auto directory = exec::test::TempDirectoryPath::create();
+  auto directory = TempDirectoryPath::create();
 
   // Alternate between using Values and TableScan node.
 
@@ -741,7 +754,7 @@ bool AggregationFuzzer::verifyAggregation(
         projections,
         tableScanPlans);
 
-    if (!groupingKeys.empty()) {
+    if (FLAGS_enable_streaming_aggregations && !groupingKeys.empty()) {
       // Use OrderBy + StreamingAggregation on original input.
       makeStreamingPlansWithTableScan(
           groupingKeys,
@@ -772,7 +785,7 @@ bool AggregationFuzzer::verifyAggregation(
     makeAlternativePlansWithValues(
         groupingKeys, aggregates, masks, flatInput, projections, valuesPlans);
 
-    if (!groupingKeys.empty()) {
+    if (FLAGS_enable_streaming_aggregations && !groupingKeys.empty()) {
       // Use OrderBy + StreamingAggregation on original input.
       makeStreamingPlansWithValues(
           groupingKeys, aggregates, masks, input, projections, valuesPlans);
@@ -839,7 +852,7 @@ bool AggregationFuzzer::verifySortedAggregation(
   std::vector<PlanWithSplits> plans;
   plans.push_back({firstPlan, {}});
 
-  if (!groupingKeys.empty()) {
+  if (FLAGS_enable_streaming_aggregations && !groupingKeys.empty()) {
     plans.push_back(
         {PlanBuilder()
              .values(input)
@@ -855,10 +868,10 @@ bool AggregationFuzzer::verifySortedAggregation(
          {}});
   }
 
-  std::shared_ptr<exec::test::TempDirectoryPath> directory;
+  std::shared_ptr<TempDirectoryPath> directory;
   const auto inputRowType = asRowType(input[0]->type());
   if (isTableScanSupported(inputRowType)) {
-    directory = exec::test::TempDirectoryPath::create();
+    directory = TempDirectoryPath::create();
     auto splits = makeSplits(input, directory->getPath(), writerPool_);
 
     plans.push_back(
@@ -869,7 +882,7 @@ bool AggregationFuzzer::verifySortedAggregation(
              .planNode(),
          splits});
 
-    if (!groupingKeys.empty()) {
+    if (FLAGS_enable_streaming_aggregations && !groupingKeys.empty()) {
       plans.push_back(
           {PlanBuilder()
                .tableScan(inputRowType)
@@ -1066,7 +1079,7 @@ bool AggregationFuzzer::compareEquivalentPlanResults(
               firstPlan, referenceQueryRunner_.get());
           stats_.updateReferenceQueryStats(referenceResult.second);
 
-          if (referenceResult.first) {
+          if (referenceResult.first && !referenceResult.first.value().empty()) {
             velox::fuzzer::ResultOrError expected;
             expected.result = fuzzer::mergeRowVectors(
                 referenceResult.first.value(), pool_.get());
@@ -1135,7 +1148,7 @@ bool AggregationFuzzer::verifyDistinctAggregation(
   std::vector<PlanWithSplits> plans;
   plans.push_back({firstPlan, {}});
 
-  if (!groupingKeys.empty()) {
+  if (FLAGS_enable_streaming_aggregations && !groupingKeys.empty()) {
     plans.push_back(
         {PlanBuilder()
              .values(input)
@@ -1153,10 +1166,10 @@ bool AggregationFuzzer::verifyDistinctAggregation(
 
   // Alternate between using Values and TableScan node.
 
-  std::shared_ptr<exec::test::TempDirectoryPath> directory;
+  std::shared_ptr<TempDirectoryPath> directory;
   const auto inputRowType = asRowType(input[0]->type());
   if (isTableScanSupported(inputRowType) && vectorFuzzer_.coinToss(0.5)) {
-    directory = exec::test::TempDirectoryPath::create();
+    directory = TempDirectoryPath::create();
     auto splits = makeSplits(input, directory->getPath(), writerPool_);
 
     plans.push_back(
@@ -1167,7 +1180,7 @@ bool AggregationFuzzer::verifyDistinctAggregation(
              .planNode(),
          splits});
 
-    if (!groupingKeys.empty()) {
+    if (FLAGS_enable_streaming_aggregations && !groupingKeys.empty()) {
       plans.push_back(
           {PlanBuilder()
                .tableScan(inputRowType)

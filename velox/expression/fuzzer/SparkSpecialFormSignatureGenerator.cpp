@@ -20,17 +20,53 @@ namespace facebook::velox::fuzzer {
 std::vector<exec::FunctionSignaturePtr>
 SparkSpecialFormSignatureGenerator::getSignaturesForCast() const {
   std::vector<exec::FunctionSignaturePtr> signatures =
-      SpecialFormSignatureGenerator::getSignaturesForCast();
+      getCommonSignaturesForCast();
 
-  // Cast tinyint/smallint/integer/bigint as varbinary is supported in Spark.
+  // Cast integer types as varbinary is supported in Spark.
   for (auto fromType : {"tinyint", "smallint", "integer", "bigint"}) {
     signatures.push_back(makeCastSignature(fromType, "varbinary"));
   }
 
-  // Cast tinyint/smallint/integer/bigint as timestamp is supported in Spark.
-  for (auto fromType : {"tinyint", "smallint", "integer", "bigint"}) {
+  // Cast the below types as timestamp is supported in Spark.
+  for (auto fromType :
+       {"boolean",
+        "tinyint",
+        "smallint",
+        "integer",
+        "bigint",
+        "real",
+        "double"}) {
     signatures.push_back(makeCastSignature(fromType, "timestamp"));
   }
+
+  // For each supported translation pair T --> U, add signatures of array(T) -->
+  // array(U), map(varchar, T) --> map(varchar, U), row(T) --> row(U).
+  auto size = signatures.size();
+  for (auto i = 0; i < size; ++i) {
+    auto from = signatures[i]->argumentTypes()[0].baseName();
+    auto to = signatures[i]->returnType().baseName();
+
+    // Signature parsing of nested decimal type is not supported.
+    if (from == "DECIMAL" || to == "DECIMAL") {
+      continue;
+    }
+
+    signatures.push_back(makeCastSignature(
+        fmt::format("array({})", from), fmt::format("array({})", to)));
+
+    signatures.push_back(makeCastSignature(
+        fmt::format("map(varchar, {})", from),
+        fmt::format("map(varchar, {})", to)));
+
+    signatures.push_back(makeCastSignature(
+        fmt::format("row({})", from), fmt::format("row({})", to)));
+  }
+
+  // Cast timestamp as integer types is supported in Spark.
+  for (auto toType : {"tinyint", "smallint", "integer", "bigint"}) {
+    signatures.push_back(makeCastSignature("timestamp", toType));
+  }
+
   return signatures;
 }
 

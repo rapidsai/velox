@@ -16,14 +16,52 @@
 #include "velox/exec/IndexLookupJoin.h"
 
 #include "velox/buffer/Buffer.h"
+#include "velox/common/base/RuntimeMetrics.h"
+#include "velox/common/testutil/TestValue.h"
 #include "velox/connectors/Connector.h"
+#include "velox/connectors/ConnectorRegistry.h"
+#include "velox/core/QueryConfig.h"
+#include "velox/exec/OperatorTraceWriter.h"
+#include "velox/exec/OperatorType.h"
 #include "velox/exec/OperatorUtils.h"
 #include "velox/exec/Task.h"
+#include "velox/exec/trace/TraceUtil.h"
 #include "velox/expression/Expr.h"
 #include "velox/expression/FieldReference.h"
+#include "velox/vector/LazyVector.h"
+
+using facebook::velox::common::testutil::TestValue;
 
 namespace facebook::velox::exec {
+using IndexSource = connector::IndexSource;
+
+void IndexLookupJoin::IndexStatWriter::addRuntimeStat(
+    std::string_view name,
+    const RuntimeCounter& value) {
+  auto lockedStats = runtimeStats_.wlock();
+  auto it = lockedStats->find(std::string(name));
+  if (it != lockedStats->end()) {
+    it->second.addValue(value.value);
+  } else {
+    RuntimeMetric metric(value.unit);
+    metric.addValue(value.value);
+    lockedStats->emplace(std::string(name), std::move(metric));
+  }
+}
+
+void IndexLookupJoin::IndexStatWriter::setRuntimeStat(
+    const std::string& name,
+    const RuntimeMetric& metric) {
+  runtimeStats_.wlock()->insert_or_assign(name, metric);
+}
+
+std::unordered_map<std::string, RuntimeMetric>
+IndexLookupJoin::IndexStatWriter::runtimeStats() const {
+  return *runtimeStats_.rlock();
+}
+
 namespace {
+
 void duplicateJoinKeyCheck(
     const std::vector<core::FieldAccessTypedExprPtr>& keys) {
   folly::F14FastSet<std::string> lookupKeyNames;
@@ -60,6 +98,36 @@ void addLookupInputColumn(
   lookupInputNameSet.insert(columnName);
 }
 
+// Normalizes all join conditions into a unified representation by converting
+// equi-join keys (leftKeys/rightKeys) to EqualIndexLookupCondition objects.
+// Each leftKey/rightKey pair is converted to an EqualIndexLookupCondition
+// where:
+// - key: the index column expression (from rightKeys)
+// - value: the probe column expression (from leftKeys)
+// The resulting vector contains the converted equi-join conditions followed by
+// the original joinConditions.
+std::vector<core::IndexLookupConditionPtr> getJoinConditions(
+    const std::vector<core::FieldAccessTypedExprPtr>& leftKeys,
+    const std::vector<core::FieldAccessTypedExprPtr>& rightKeys,
+    const std::vector<core::IndexLookupConditionPtr>& joinConditions) {
+  VELOX_CHECK_EQ(leftKeys.size(), rightKeys.size());
+
+  std::vector<core::IndexLookupConditionPtr> normalizedConditions;
+  normalizedConditions.reserve(leftKeys.size() + joinConditions.size());
+
+  for (size_t i = 0; i < leftKeys.size(); ++i) {
+    normalizedConditions.push_back(
+        std::make_shared<core::EqualIndexLookupCondition>(
+            rightKeys[i], leftKeys[i]));
+  }
+
+  for (const auto& condition : joinConditions) {
+    normalizedConditions.push_back(condition);
+  }
+
+  return normalizedConditions;
+}
+
 // Validates one of between bound, and update the lookup input channels and type
 // to include the corresponding probe input column if the bound is not constant.
 bool addBetweenConditionBound(
@@ -86,8 +154,9 @@ bool addBetweenConditionBound(
         lookupInputChannels,
         lookupInputNameSet);
   } else {
-    VELOX_USER_CHECK(core::TypedExprs::asConstant(typeExpr)->type()->equivalent(
-        *indexKeyType));
+    VELOX_USER_CHECK(
+        core::TypedExprs::asConstant(typeExpr)->type()->equivalent(
+            *indexKeyType));
   }
   return isConstant;
 }
@@ -127,7 +196,101 @@ void addBetweenCondition(
       "At least one of the between condition bounds needs to be not constant: {}",
       betweenCondition->toString());
 }
+
+// Create a row vector wrapper without allocating any buffer.
+// We expect the child vectors to be directly set from probe inputs and join
+// outputs.
+inline RowVectorPtr createRowVector(
+    velox::memory::MemoryPool* pool,
+    const RowTypePtr& type,
+    vector_size_t numRows) {
+  std::vector<VectorPtr> children(type->size(), nullptr);
+  return std::make_shared<RowVector>(
+      pool, type, nullptr, numRows, std::move(children));
+}
+
+// Extracts a runtime stat from the map, removes it, and returns its sum value.
+// Returns 0 if the stat is not found.
+int64_t extractStatSum(
+    std::unordered_map<std::string, RuntimeMetric>& stats,
+    const std::string& name) {
+  auto it = stats.find(name);
+  if (it == stats.end()) {
+    return 0;
+  }
+  const auto value = it->second.sum;
+  stats.erase(it);
+  return value;
+}
+
 } // namespace
+
+// static
+std::vector<OperatorStats> IndexLookupJoin::splitStats(
+    const OperatorStats& combinedStats,
+    const core::PlanNodeId& indexSourceNodeId,
+    const IndexStatWriter& indexSourceStatWriter) {
+  // Create stats for the IndexSource node from the accumulated index source
+  // runtime stats.
+  OperatorStats indexSourceStats;
+  indexSourceStats.operatorId = combinedStats.operatorId;
+  indexSourceStats.pipelineId = combinedStats.pipelineId;
+  indexSourceStats.planNodeId = indexSourceNodeId;
+  indexSourceStats.operatorType = "IndexSource";
+  indexSourceStats.numDrivers = combinedStats.numDrivers;
+
+  // Populate IndexSource runtime stats from the writer's accumulated map.
+  indexSourceStats.runtimeStats = indexSourceStatWriter.runtimeStats();
+
+  // Extract standard operator stats from runtime stats into OperatorStats
+  // fields so they show up in PlanNodeStats (inputRows, outputRows, etc.).
+  indexSourceStats.outputPositions =
+      extractStatSum(indexSourceStats.runtimeStats, "outputPositions");
+  indexSourceStats.outputBytes =
+      extractStatSum(indexSourceStats.runtimeStats, "outputBytes");
+  indexSourceStats.outputVectors =
+      extractStatSum(indexSourceStats.runtimeStats, "outputVectors");
+  indexSourceStats.inputPositions =
+      extractStatSum(indexSourceStats.runtimeStats, "inputPositions");
+  indexSourceStats.inputBytes =
+      extractStatSum(indexSourceStats.runtimeStats, "inputBytes");
+
+  // Populate IndexSource addInputTiming from lookup timing stats recorded by
+  // recordConnectorStats into the writer.
+  const auto lookupCount =
+      extractStatSum(indexSourceStats.runtimeStats, "lookupCount");
+  const auto lookupWallNanos =
+      extractStatSum(indexSourceStats.runtimeStats, "lookupWallNanos");
+  const auto lookupCpuNanos =
+      extractStatSum(indexSourceStats.runtimeStats, "lookupCpuNanos");
+  if (lookupCount > 0) {
+    indexSourceStats.addInputTiming = CpuWallTiming{
+        static_cast<uint64_t>(lookupCount),
+        static_cast<uint64_t>(lookupWallNanos),
+        static_cast<uint64_t>(lookupCpuNanos)};
+  }
+
+  // Create stats for the IndexLookupJoin node.
+  auto joinStats = combinedStats;
+
+  // Remove residual probe-side lazy loading stats from join stats. These
+  // accumulate in every non-scan operator's runtimeStats and are normally
+  // harmless, but splitStats copies combinedStats to create the join node
+  // entry, so we must erase them to avoid exposing them on the join node.
+  joinStats.runtimeStats.erase(std::string(LazyVector::kInputBytes));
+  joinStats.runtimeStats.erase(std::string(LazyVector::kCpuNanos));
+  joinStats.runtimeStats.erase(std::string(LazyVector::kWallNanos));
+
+  // Remove index source stats from join stats. recordConnectorStats copies
+  // these into the operator's runtimeStats (prefixed with "indexSource.") so
+  // they flow through the task-level stats path, but they belong to the
+  // IndexSource node, not the join node.
+  for (const auto& [name, _] : indexSourceStatWriter.runtimeStats()) {
+    joinStats.runtimeStats.erase(fmt::format("indexSource.{}", name));
+  }
+
+  return {std::move(joinStats), std::move(indexSourceStats)};
+}
 
 IndexLookupJoin::IndexLookupJoin(
     int32_t operatorId,
@@ -138,7 +301,8 @@ IndexLookupJoin::IndexLookupJoin(
           joinNode->outputType(),
           operatorId,
           joinNode->id(),
-          "IndexLookupJoin"),
+          OperatorType::kIndexLookupJoin),
+      splitOutput_{driverCtx->queryConfig().indexLookupJoinSplitOutput()},
       // TODO: support to update output batch size with output size stats during
       // the lookup processing.
       outputBatchSize_{
@@ -146,12 +310,15 @@ IndexLookupJoin::IndexLookupJoin(
               ? outputBatchRows()
               : std::numeric_limits<vector_size_t>::max()},
       joinType_{joinNode->joinType()},
-      includeMatchColumn_(joinNode->includeMatchColumn()),
-      numKeys_{joinNode->leftKeys().size()},
+      hasMarker_(joinNode->hasMarker()),
       probeType_{joinNode->sources()[0]->outputType()},
       lookupType_{joinNode->lookupSource()->outputType()},
+      indexSourceNodeId_(joinNode->lookupSource()->id()),
       lookupTableHandle_{joinNode->lookupSource()->tableHandle()},
-      lookupConditions_{joinNode->joinConditions()},
+      joinConditions_{getJoinConditions(
+          joinNode->leftKeys(),
+          joinNode->rightKeys(),
+          joinNode->joinConditions())},
       lookupColumnHandles_(joinNode->lookupSource()->assignments()),
       connectorQueryCtx_{operatorCtx_->createConnectorQueryCtx(
           lookupTableHandle_->connectorId(),
@@ -163,12 +330,29 @@ IndexLookupJoin::IndexLookupJoin(
               operatorType(),
               lookupTableHandle_->connectorId()),
           spillConfig_.has_value() ? &(spillConfig_.value()) : nullptr)},
-      connector_(connector::getConnector(lookupTableHandle_->connectorId())),
+      connector_(
+          connector::ConnectorRegistry::tryGet(
+              *driverCtx->task->queryCtx(),
+              lookupTableHandle_->connectorId())),
       maxNumInputBatches_(
           1 + driverCtx->queryConfig().indexLookupJoinMaxPrefetchBatches()),
-      joinNode_{joinNode} {
+      isIndexSplitCollector_{driverCtx->partitionId == 0},
+      joinNode_{joinNode},
+      indexStatWriter_(std::make_shared<IndexStatWriter>()) {
   duplicateJoinKeyCheck(joinNode_->leftKeys());
   duplicateJoinKeyCheck(joinNode_->rightKeys());
+
+  // Set up the stat splitter to report separate OperatorStats for
+  // IndexLookupJoin and IndexSource nodes. Must be done in the constructor
+  // (not initialize()) because operator stats are copied to task stats before
+  // initialize() is called.
+  stats_.withWLock([&](auto& stats) {
+    stats.setStatSplitter([indexSourceId = indexSourceNodeId_,
+                           indexSourceStatWriter =
+                               indexStatWriter_](const auto& combinedStats) {
+      return splitStats(combinedStats, indexSourceId, *indexSourceStatWriter);
+    });
+  });
 }
 
 void IndexLookupJoin::initialize() {
@@ -184,15 +368,56 @@ void IndexLookupJoin::initialize() {
   initLookupInput();
   initLookupOutput();
   initOutputProjections();
+  initFilter();
 
   indexSource_ = connector_->createIndexSource(
       lookupInputType_,
-      numKeys_,
-      lookupConditions_,
+      joinConditions_,
       lookupOutputType_,
       lookupTableHandle_,
       lookupColumnHandles_,
       connectorQueryCtx_.get());
+
+  if (lookupTableHandle_->needsIndexSplit()) {
+    auto* driverCtx = operatorCtx_->driverCtx();
+    joinBridge_ = driverCtx->task->getIndexLookupJoinBridge(
+        driverCtx->splitGroupId, planNodeId());
+    VELOX_CHECK_NOT_NULL(joinBridge_);
+  }
+
+  createIndexSplitTracer();
+}
+
+void IndexLookupJoin::createIndexSplitTracer() {
+  if (inputTracer_ == nullptr) {
+    return;
+  }
+  const auto& queryConfig = operatorCtx_->driverCtx()->queryConfig();
+  const auto taskTraceDir = exec::trace::getTaskTraceDirectory(
+      queryConfig.queryTraceDir(),
+      operatorCtx_->driverCtx()->task->queryCtx()->queryId(),
+      operatorCtx_->taskId());
+  const auto opTraceDir = exec::trace::getOpTraceDirectory(
+      taskTraceDir,
+      planNodeId(),
+      operatorCtx_->driverCtx()->pipelineId,
+      operatorCtx_->driverCtx()->driverId);
+  indexSplitTracer_ =
+      std::make_unique<trace::OperatorTraceSplitWriter>(this, opTraceDir);
+}
+
+void IndexLookupJoin::traceIndexSplit(const exec::Split& split) {
+  if (FOLLY_UNLIKELY(indexSplitTracer_ != nullptr)) {
+    auto connectorSplit = split.connectorSplit;
+    indexSplitTracer_->write(exec::Split(std::move(connectorSplit)));
+  }
+}
+
+void IndexLookupJoin::closeIndexSplitTracer() {
+  // NOTE: skip calling finish() because the input tracer (via Operator::close)
+  // already wrote the summary file. Both tracers share the same summary path
+  // and finish() would fail with O_EXCL.
+  indexSplitTracer_.reset();
 }
 
 void IndexLookupJoin::ensureInputLoaded(const InputBatchState& batch) {
@@ -215,14 +440,13 @@ void IndexLookupJoin::initLookupInput() {
   VELOX_CHECK(lookupInputChannels_.empty());
 
   std::vector<std::string> lookupInputNames;
-  lookupInputNames.reserve(numKeys_ + lookupConditions_.size());
+  lookupInputNames.reserve(joinConditions_.size());
   std::vector<TypePtr> lookupInputTypes;
-  lookupInputTypes.reserve(numKeys_ + lookupConditions_.size());
-  lookupInputChannels_.reserve(numKeys_ + lookupConditions_.size());
+  lookupInputTypes.reserve(joinConditions_.size());
+  lookupInputChannels_.reserve(joinConditions_.size());
 
   SCOPE_EXIT {
-    VELOX_CHECK_GE(
-        lookupInputNames.size(), numKeys_ + lookupConditions_.size());
+    VELOX_CHECK_GE(lookupInputNames.size(), joinConditions_.size());
     VELOX_CHECK_EQ(lookupInputNames.size(), lookupInputChannels_.size());
     lookupInputType_ =
         ROW(std::move(lookupInputNames), std::move(lookupInputTypes));
@@ -231,25 +455,6 @@ void IndexLookupJoin::initLookupInput() {
 
   folly::F14FastSet<std::string> lookupInputColumnSet;
   folly::F14FastSet<std::string> lookupIndexColumnSet;
-  // List probe columns used in join-equi caluse first.
-  for (auto keyIdx = 0; keyIdx < numKeys_; ++keyIdx) {
-    const auto probeKeyName = joinNode_->leftKeys()[keyIdx]->name();
-    const auto indexKeyName = joinNode_->rightKeys()[keyIdx]->name();
-    VELOX_USER_CHECK_EQ(lookupIndexColumnSet.count(indexKeyName), 0);
-    lookupIndexColumnSet.insert(indexKeyName);
-    const auto probeKeyChannel = probeType_->getChildIdx(probeKeyName);
-    const auto probeKeyType = probeType_->childAt(probeKeyChannel);
-    VELOX_USER_CHECK(
-        lookupType_->findChild(indexKeyName)->equivalent(*probeKeyType));
-    addLookupInputColumn(
-        indexKeyName,
-        probeKeyType,
-        probeKeyChannel,
-        lookupInputNames,
-        lookupInputTypes,
-        lookupInputChannels_,
-        lookupInputColumnSet);
-  }
 
   SCOPE_EXIT {
     VELOX_CHECK(lookupKeyOrConditionHashers_.empty());
@@ -257,19 +462,42 @@ void IndexLookupJoin::initLookupInput() {
     lookupKeyOrConditionHashers_ =
         createVectorHashers(probeType_, lookupInputChannels_);
   };
-  if (lookupConditions_.empty()) {
-    return;
-  }
 
-  for (const auto& lookupCondition : lookupConditions_) {
-    const auto indexKeyName = getColumnName(lookupCondition->key);
+  for (const auto& condition : joinConditions_) {
+    const auto indexKeyName = getColumnName(condition->key);
     VELOX_USER_CHECK_EQ(lookupIndexColumnSet.count(indexKeyName), 0);
     lookupIndexColumnSet.insert(indexKeyName);
     const auto indexKeyType = lookupType_->findChild(indexKeyName);
 
+    if (const auto equalCondition =
+            std::dynamic_pointer_cast<const core::EqualIndexLookupCondition>(
+                condition)) {
+      VELOX_CHECK(
+          !equalCondition->isFilter(),
+          "Constant equal condition in join not supported");
+      // Process as a join condition - value references a probe column.
+      const auto probeKeyName = getColumnName(equalCondition->value);
+      const auto probeKeyChannel = probeType_->getChildIdx(probeKeyName);
+      const auto probeKeyType = probeType_->childAt(probeKeyChannel);
+      VELOX_USER_CHECK(
+          indexKeyType->equivalent(*probeKeyType),
+          "Index key type {} must be equivalent to probe key type {}",
+          indexKeyType->toString(),
+          probeKeyType->toString());
+      addLookupInputColumn(
+          probeKeyName,
+          probeKeyType,
+          probeKeyChannel,
+          lookupInputNames,
+          lookupInputTypes,
+          lookupInputChannels_,
+          lookupInputColumnSet);
+      continue;
+    }
+
     if (const auto inCondition =
             std::dynamic_pointer_cast<const core::InIndexLookupCondition>(
-                lookupCondition)) {
+                condition)) {
       const auto conditionInputName = getColumnName(inCondition->list);
       const auto conditionInputChannel =
           probeType_->getChildIdx(conditionInputName);
@@ -286,11 +514,12 @@ void IndexLookupJoin::initLookupInput() {
           lookupInputTypes,
           lookupInputChannels_,
           lookupInputColumnSet);
+      continue;
     }
 
     if (const auto betweenCondition =
             std::dynamic_pointer_cast<core::BetweenIndexLookupCondition>(
-                lookupCondition)) {
+                condition)) {
       addBetweenCondition(
           betweenCondition,
           probeType_,
@@ -299,21 +528,10 @@ void IndexLookupJoin::initLookupInput() {
           lookupInputTypes,
           lookupInputChannels_,
           lookupInputColumnSet);
+      continue;
     }
 
-    if (const auto equalCondition =
-            std::dynamic_pointer_cast<core::EqualIndexLookupCondition>(
-                lookupCondition)) {
-      // Process an equal join condition by validating that the value is
-      // constant. Equal conditions only support constant values for filtering.
-      VELOX_USER_CHECK(
-          core::TypedExprs::isConstant(equalCondition->value),
-          "Equal condition value must be constant: {}",
-          equalCondition->toString());
-      VELOX_USER_CHECK(core::TypedExprs::asConstant(equalCondition->value)
-                           ->type()
-                           ->equivalent(*indexKeyType));
-    }
+    VELOX_UNSUPPORTED("Unsupported join condition type");
   }
 }
 
@@ -371,13 +589,127 @@ void IndexLookupJoin::initOutputProjections() {
     }
     lookupOutputProjections_.emplace_back(i, outputChannelOpt.value());
   }
-  if (includeMatchColumn_) {
+  if (hasMarker_) {
     matchOutputChannel_ = outputType_->size() - 1;
   }
+
   VELOX_USER_CHECK_EQ(
       probeOutputProjections_.size() + lookupOutputProjections_.size() +
           !!matchOutputChannel_.has_value(),
       outputType_->size());
+}
+
+void IndexLookupJoin::initFilter() {
+  VELOX_CHECK_NULL(filter_);
+
+  if (joinNode_->filter() == nullptr) {
+    return;
+  }
+
+  std::vector<core::TypedExprPtr> filters = {joinNode_->filter()};
+  filter_ =
+      std::make_unique<ExprSet>(std::move(filters), operatorCtx_->execCtx());
+
+  std::vector<std::string> names;
+  std::vector<TypePtr> types;
+  const auto numFields = filter_->expr(0)->distinctFields().size();
+  names.reserve(numFields);
+  types.reserve(numFields);
+
+  column_index_t filterChannel{0};
+  const auto addChannel = [&](column_index_t channel,
+                              const RowTypePtr& inputType,
+                              std::vector<IdentityProjection>& projections) {
+    names.emplace_back(inputType->nameOf(channel));
+    types.emplace_back(inputType->childAt(channel));
+    projections.emplace_back(channel, filterChannel++);
+  };
+
+  for (const auto& field : filter_->expr(0)->distinctFields()) {
+    const auto& name = field->field();
+    auto channel = probeType_->getChildIdxIfExists(name);
+    if (channel.has_value()) {
+      addChannel(channel.value(), probeType_, filterProbeInputProjections_);
+      continue;
+    }
+    channel = lookupOutputType_->getChildIdxIfExists(name);
+    if (channel.has_value()) {
+      addChannel(
+          channel.value(), lookupOutputType_, filterLookupInputProjections_);
+      continue;
+    }
+    VELOX_FAIL(
+        "Index lookup join filter field not found in either left or right input: {}",
+        field->toString());
+  }
+
+  filterInputType_ = ROW(std::move(names), std::move(types));
+}
+
+bool IndexLookupJoin::collectIndexSplits(ContinueFuture* future) {
+  VELOX_CHECK(needsIndexSplits());
+
+  TestValue::adjust(
+      "facebook::velox::exec::IndexLookupJoin::collectIndexSplits", this);
+
+  auto* driverCtx = operatorCtx_->driverCtx();
+  while (true) {
+    exec::Split split;
+    const auto reason = driverCtx->task->getSplitOrFuture(
+        driverCtx->driverId,
+        driverCtx->splitGroupId,
+        indexSourceNodeId_,
+        /*maxPreloadSplits=*/0,
+        /*preload=*/nullptr,
+        split,
+        indexSplitFuture_);
+    if (reason != BlockingReason::kNotBlocked) {
+      *future = std::move(indexSplitFuture_);
+      return false;
+    }
+
+    if (!split.hasConnectorSplit()) {
+      noMoreIndexSplits_ = true;
+      VELOX_CHECK(!hasNoIndexSplits_);
+      VELOX_CHECK_NOT_NULL(joinBridge_);
+      joinBridge_->setIndexSplits(indexSplits_);
+      {
+        auto lockedStats = stats_.wlock();
+        lockedStats->addRuntimeStat(
+            kNumIndexSplits,
+            RuntimeCounter(
+                static_cast<int64_t>(indexSplits_.size()),
+                RuntimeCounter::Unit::kNone));
+      }
+      if (indexSplits_.empty()) {
+        hasNoIndexSplits_ = true;
+      } else {
+        indexSource_->addSplits(std::move(indexSplits_));
+      }
+      return true;
+    }
+
+    traceIndexSplit(split);
+    indexSplits_.push_back(std::move(split.connectorSplit));
+  }
+}
+
+bool IndexLookupJoin::waitForIndexSplits(ContinueFuture* future) {
+  VELOX_CHECK(needsIndexSplits());
+  VELOX_CHECK(!isIndexSplitCollector_);
+  VELOX_CHECK(indexSplits_.empty());
+
+  auto splits = joinBridge_->splitsOrFuture(future);
+  if (future->valid()) {
+    return false;
+  }
+  noMoreIndexSplits_ = true;
+  if (splits.empty()) {
+    hasNoIndexSplits_ = true;
+  } else {
+    indexSource_->addSplits(std::move(splits));
+  }
+  return true;
 }
 
 bool IndexLookupJoin::startDrain() {
@@ -386,6 +718,13 @@ bool IndexLookupJoin::startDrain() {
 
 bool IndexLookupJoin::needsInput() const {
   if (noMoreInput_ || isDraining()) {
+    return false;
+  }
+  // Don't accept input until we have collected all splits for index source.
+  if (needsIndexSplits()) {
+    return false;
+  }
+  if (shouldSkipInput()) {
     return false;
   }
   if (numInputBatches() >= maxNumInputBatches_) {
@@ -402,6 +741,21 @@ bool IndexLookupJoin::needsInput() const {
 }
 
 BlockingReason IndexLookupJoin::isBlocked(ContinueFuture* future) {
+  // Handle split collection for index sources that require splits.
+  if (needsIndexSplits()) {
+    if (isIndexSplitCollector_) {
+      if (!collectIndexSplits(future)) {
+        VELOX_CHECK(future->valid());
+        return BlockingReason::kWaitForSplit;
+      }
+    } else {
+      if (!waitForIndexSplits(future)) {
+        VELOX_CHECK(future->valid());
+        return BlockingReason::kWaitForIndexSplits;
+      }
+    }
+  }
+
   auto& batch = currentInputBatch();
   if (!batch.lookupFuture.valid()) {
     endLookupBlockWait();
@@ -438,16 +792,33 @@ void IndexLookupJoin::endLookupBlockWait() {
 
 void IndexLookupJoin::addInput(RowVectorPtr input) {
   VELOX_CHECK_GT(input->size(), 0);
+  VELOX_CHECK(!shouldSkipInput());
   auto& batch = nextInputBatch();
   VELOX_CHECK_LE(numInputBatches(), maxNumInputBatches_);
   batch.input = std::move(input);
+  // Probe-side lazy loading happens here — stats go to kInputBytes (standard
+  // names) and are transferred to the scan by Driver::processLazyIoStats().
   ensureInputLoaded(batch);
   decodeAndDetectNonNullKeys(batch);
   prepareLookup(batch);
-  startLookup(batch);
+  recordIndexSourceInputStats(batch);
+  // startLookup may trigger index-side lazy loading via mergeLookupResults()
+  // when sync lookups return multiple partial results. Redirect those stats to
+  // index-specific names.
+  {
+    RuntimeStatWriterScopeGuard guard(indexStatWriter_.get());
+    startLookup(batch);
+  }
 }
 
 RowVectorPtr IndexLookupJoin::getOutput() {
+  // Redirect lazy loading stats during getOutput() to index-specific names.
+  // This separates index-side lazy loading (loading lookup result vectors) from
+  // probe-side lazy loading (loading scan input vectors in addInput()), so that
+  // Driver::processLazyIoStats() correctly attributes only probe-side stats to
+  // the scan operator.
+  RuntimeStatWriterScopeGuard guard(indexStatWriter_.get());
+
   SCOPE_EXIT {
     if (numInputBatches() == 0 && isDraining()) {
       finishDrain();
@@ -478,14 +849,8 @@ void IndexLookupJoin::prepareLookup(InputBatchState& batch) {
   const size_t numLookupRows = batch.lookupInputHasNullKeys
       ? batch.nonNullInputRows.countSelected()
       : batch.input->size();
-  if (batch.lookupInput == nullptr) {
-    batch.lookupInput =
-        BaseVector::create<RowVector>(lookupInputType_, numLookupRows, pool());
-  } else {
-    VectorPtr lookupInputVector = std::move(batch.lookupInput);
-    BaseVector::prepareForReuse(lookupInputVector, numLookupRows);
-    batch.lookupInput = std::static_pointer_cast<RowVector>(lookupInputVector);
-  }
+  batch.lookupInput = createRowVector(
+      pool(), lookupInputType_, static_cast<vector_size_t>(numLookupRows));
 
   if (!batch.lookupInputHasNullKeys) {
     for (auto i = 0; i < lookupInputType_->size(); ++i) {
@@ -525,6 +890,110 @@ void IndexLookupJoin::prepareLookup(InputBatchState& batch) {
   }
 }
 
+void IndexLookupJoin::mergeLookupResults(InputBatchState& batch) {
+  VELOX_CHECK(!batch.partialOutputs.empty());
+  VELOX_CHECK_NULL(batch.lookupResult);
+
+  if (batch.partialOutputs.size() == 1) {
+    batch.lookupResult = std::move(batch.partialOutputs[0]);
+    SCOPE_EXIT {
+      VELOX_CHECK_NOT_NULL(batch.lookupResult);
+      batch.partialOutputs.clear();
+    };
+    return;
+  }
+
+  // Calculate total size.
+  vector_size_t totalSize = 0;
+  for (const auto& result : batch.partialOutputs) {
+    totalSize += static_cast<vector_size_t>(result->size());
+  }
+
+  // Merge inputHits buffers.
+  auto mergedInputHits = allocateIndices(totalSize, pool());
+  auto* rawMergedInputHits = mergedInputHits->asMutable<vector_size_t>();
+  vector_size_t offset = 0;
+  for (const auto& result : batch.partialOutputs) {
+    std::memcpy(
+        rawMergedInputHits + offset,
+        result->inputHits->as<const vector_size_t>(),
+        result->size() * sizeof(vector_size_t));
+    offset += static_cast<vector_size_t>(result->size());
+  }
+
+  // Merge output RowVectors.
+  // NOTE: Uncommon path for connectors that do not respect output batch size
+  // properly
+  auto mergedOutput = BaseVector::create<RowVector>(
+      batch.partialOutputs[0]->output->type(), totalSize, pool());
+  vector_size_t outputOffset = 0;
+  for (const auto& result : batch.partialOutputs) {
+    mergedOutput->copy(result->output.get(), outputOffset, 0, result->size());
+    outputOffset += static_cast<vector_size_t>(result->size());
+  }
+
+  batch.lookupResult = std::make_unique<connector::IndexSource::Result>(
+      std::move(mergedInputHits), std::move(mergedOutput));
+  batch.partialOutputs.clear();
+}
+
+bool IndexLookupJoin::getLookupResults(InputBatchState& batch) {
+  VELOX_CHECK_NOT_NULL(batch.lookupInput);
+  VELOX_CHECK_NOT_NULL(batch.lookupResultIter);
+  VELOX_CHECK(!batch.lookupFuture.valid());
+
+  // Result is ready.
+  if (batch.lookupResult != nullptr) {
+    return true;
+  }
+
+  // Fetch the first result if not already fetched.
+  if (batch.lookupResult == nullptr && batch.partialOutputs.empty()) {
+    auto lookupResultOr =
+        batch.lookupResultIter->next(outputBatchSize_, batch.lookupFuture);
+    if (!lookupResultOr.has_value()) {
+      VELOX_CHECK(batch.lookupFuture.valid());
+      return false;
+    }
+    VELOX_CHECK(!batch.lookupFuture.valid());
+
+    // Either splitOutput_ is true, or no more results, or first result is null.
+    if (splitOutput_ || !batch.lookupResultIter->hasNext()) {
+      batch.lookupResult = std::move(lookupResultOr).value();
+      return true;
+    }
+
+    // Otherwise start accumulating results.
+    batch.partialOutputs.push_back(std::move(lookupResultOr).value());
+  }
+
+  // Continue accumulating remaining results when splitOutput_ is false.
+  // This handles both initial accumulation and resuming after async
+  // interruption.
+  VELOX_CHECK(!splitOutput_);
+  VELOX_CHECK(!batch.partialOutputs.empty());
+  VELOX_CHECK_NULL(batch.lookupResult);
+
+  while (batch.lookupResultIter->hasNext()) {
+    auto nextResultOr =
+        batch.lookupResultIter->next(outputBatchSize_, batch.lookupFuture);
+    if (!nextResultOr.has_value()) {
+      // Need to wait for async operation.
+      VELOX_CHECK(batch.lookupFuture.valid());
+      return false;
+    }
+    VELOX_CHECK(!batch.lookupFuture.valid());
+    auto nextResult = std::move(nextResultOr).value();
+    if (nextResult != nullptr) {
+      batch.partialOutputs.push_back(std::move(nextResult));
+    }
+  }
+
+  // All results accumulated, merge them.
+  mergeLookupResults(batch);
+  return true;
+}
+
 void IndexLookupJoin::decodeAndDetectNonNullKeys(InputBatchState& batch) {
   const auto numRows = batch.input->size();
   batch.nonNullInputRows.resize(numRows);
@@ -555,30 +1024,38 @@ void IndexLookupJoin::startLookup(InputBatchState& batch) {
   VELOX_CHECK_NULL(batch.lookupResult);
   VELOX_CHECK(!batch.lookupFuture.valid());
 
-  if (batch.lookupInput->size() == 0) {
-    // No need to start lookup for empty lookup input.
+  if (shouldSkipLookup(batch)) {
     return;
   }
 
-  batch.lookupResultIter = indexSource_->lookup(
-      connector::IndexSource::LookupRequest{batch.lookupInput});
-  auto lookupResultOr =
-      batch.lookupResultIter->next(outputBatchSize_, batch.lookupFuture);
-  if (!lookupResultOr.has_value()) {
-    VELOX_CHECK(batch.lookupFuture.valid());
-    return;
-  }
-  VELOX_CHECK(!batch.lookupFuture.valid());
-  batch.lookupResult = std::move(lookupResultOr).value();
+  // Create the lookup result iterator.
+  batch.lookupResultIter =
+      indexSource_->lookup(connector::IndexSource::Request{batch.lookupInput});
+
+  getLookupResults(batch);
 }
 
 RowVectorPtr IndexLookupJoin::getOutputFromLookupResult(
     InputBatchState& batch) {
   VELOX_CHECK(!batch.empty());
+  VELOX_CHECK(!shouldSkipInput());
   VELOX_CHECK(!batch.lookupFuture.valid() || batch.lookupFuture.isReady());
   batch.lookupFuture = ContinueFuture::makeEmpty();
 
-  if (batch.lookupInput->size() == 0) {
+  if (shouldSkipLookup(batch)) {
+    return produceRemainingOutput(batch);
+  }
+
+  if (!getLookupResults(batch)) {
+    // Async operation pending, need to wait.
+    VELOX_CHECK(batch.lookupFuture.valid());
+    return nullptr;
+  }
+
+  VELOX_CHECK(!batch.lookupFuture.valid());
+  VELOX_CHECK(batch.partialOutputs.empty());
+
+  if (batch.lookupResult == nullptr) {
     if (hasRemainingOutputForLeftJoin(batch)) {
       return produceRemainingOutputForLeftJoin(batch);
     }
@@ -586,28 +1063,15 @@ RowVectorPtr IndexLookupJoin::getOutputFromLookupResult(
     return nullptr;
   }
 
-  VELOX_CHECK_NOT_NULL(batch.lookupResultIter);
-
-  if (batch.lookupResult == nullptr) {
-    auto resultOptional =
-        batch.lookupResultIter->next(outputBatchSize_, batch.lookupFuture);
-    if (!resultOptional.has_value()) {
-      VELOX_CHECK(batch.lookupFuture.valid());
-      return nullptr;
-    }
-    VELOX_CHECK(!batch.lookupFuture.valid());
-
-    batch.lookupResult = std::move(resultOptional).value();
-    if (batch.lookupResult == nullptr) {
-      if (hasRemainingOutputForLeftJoin(batch)) {
-        return produceRemainingOutputForLeftJoin(batch);
-      }
-      finishInput(batch);
-      return nullptr;
-    }
-  }
   prepareLookupResult(batch);
   VELOX_CHECK_NOT_NULL(batch.lookupResult);
+
+  if (!applyFilterOnLookupResult(batch)) {
+    VELOX_CHECK_NULL(batch.lookupResult);
+    // All rows in lookup result are filtered out, and fetch next lookup result
+    // batch.
+    return nullptr;
+  }
 
   SCOPE_EXIT {
     maybeFinishLookupResult(batch);
@@ -618,8 +1082,52 @@ RowVectorPtr IndexLookupJoin::getOutputFromLookupResult(
   return produceOutputForLeftJoin(batch);
 }
 
+RowVectorPtr IndexLookupJoin::produceRemainingOutput(InputBatchState& batch) {
+  if (hasRemainingOutputForLeftJoin(batch)) {
+    return produceRemainingOutputForLeftJoin(batch);
+  }
+  finishInput(batch);
+  return nullptr;
+}
+
+void IndexLookupJoin::recordIndexSourceInputStats(
+    const InputBatchState& batch) {
+  if (batch.lookupInput == nullptr || batch.lookupInput->size() == 0) {
+    return;
+  }
+  indexStatWriter_->addRuntimeStat(
+      "inputPositions",
+      RuntimeCounter(
+          static_cast<int64_t>(batch.lookupInput->size()),
+          RuntimeCounter::Unit::kNone));
+  indexStatWriter_->addRuntimeStat(
+      "inputBytes",
+      RuntimeCounter(
+          static_cast<int64_t>(batch.lookupInput->estimateFlatSize()),
+          RuntimeCounter::Unit::kBytes));
+}
+
+void IndexLookupJoin::recordIndexSourceOutputStats(
+    const InputBatchState& batch) {
+  indexStatWriter_->addRuntimeStat(
+      "outputPositions",
+      RuntimeCounter(
+          static_cast<int64_t>(batch.lookupResult->size()),
+          RuntimeCounter::Unit::kNone));
+  indexStatWriter_->addRuntimeStat(
+      "outputBytes",
+      RuntimeCounter(
+          static_cast<int64_t>(batch.lookupResult->output->estimateFlatSize()),
+          RuntimeCounter::Unit::kBytes));
+  indexStatWriter_->addRuntimeStat(
+      "outputVectors", RuntimeCounter(1, RuntimeCounter::Unit::kNone));
+}
+
 void IndexLookupJoin::prepareLookupResult(InputBatchState& batch) {
   VELOX_CHECK_NOT_NULL(batch.lookupResult);
+
+  recordIndexSourceOutputStats(batch);
+
   if (rawLookupInputHitIndices_ != nullptr) {
     return;
   }
@@ -630,28 +1138,8 @@ void IndexLookupJoin::prepareLookupResult(InputBatchState& batch) {
     return;
   }
   VELOX_CHECK_NOT_NULL(batch.nonNullInputMappings);
-  vector_size_t* rawLookupInputHitIndices{nullptr};
-  if (batch.lookupResult->inputHits->isMutable()) {
-    rawLookupInputHitIndices =
-        batch.lookupResult->inputHits->asMutable<vector_size_t>();
-  } else {
-    const auto indicesByteSize =
-        batch.lookupResult->size() * sizeof(vector_size_t);
-    if ((batch.resultInputHitIndices == nullptr) ||
-        !batch.resultInputHitIndices->unique() ||
-        (batch.resultInputHitIndices->capacity() < indicesByteSize)) {
-      batch.resultInputHitIndices = allocateIndices(indicesByteSize, pool());
-    } else {
-      batch.resultInputHitIndices->setSize(indicesByteSize);
-    }
-    rawLookupInputHitIndices =
-        batch.resultInputHitIndices->asMutable<vector_size_t>();
-    std::memcpy(
-        rawLookupInputHitIndices,
-        batch.lookupResult->inputHits->as<const vector_size_t>(),
-        indicesByteSize);
-    batch.lookupResult->inputHits = batch.resultInputHitIndices;
-  }
+  vector_size_t* rawLookupInputHitIndices =
+      batch.ensureInputHitsWritable(pool());
   for (auto i = 0; i < batch.lookupResult->size(); ++i) {
     rawLookupInputHitIndices[i] =
         batch.rawNonNullInputMappings[rawLookupInputHitIndices[i]];
@@ -665,13 +1153,42 @@ void IndexLookupJoin::prepareLookupResult(InputBatchState& batch) {
   rawLookupInputHitIndices_ = rawLookupInputHitIndices;
 }
 
+vector_size_t* IndexLookupJoin::InputBatchState::ensureInputHitsWritable(
+    memory::MemoryPool* pool) {
+  VELOX_CHECK_NOT_NULL(lookupResult);
+  if (lookupResult->inputHits->isMutable()) {
+    return lookupResult->inputHits->asMutable<vector_size_t>();
+  }
+
+  const auto indicesByteSize = lookupResult->size() * sizeof(vector_size_t);
+  if ((resultInputHitIndices == nullptr) ||
+      !resultInputHitIndices->isMutable() ||
+      (resultInputHitIndices->capacity() < indicesByteSize)) {
+    resultInputHitIndices = allocateIndices(indicesByteSize, pool);
+  } else {
+    resultInputHitIndices->setSize(indicesByteSize);
+  }
+  auto* rawLookupInputHitIndices =
+      resultInputHitIndices->asMutable<vector_size_t>();
+  std::memcpy(
+      rawLookupInputHitIndices,
+      lookupResult->inputHits->as<const vector_size_t>(),
+      indicesByteSize);
+  lookupResult->inputHits = resultInputHitIndices;
+  return rawLookupInputHitIndices;
+}
+
 void IndexLookupJoin::maybeFinishLookupResult(InputBatchState& batch) {
   VELOX_CHECK_NOT_NULL(batch.lookupResult);
   if (nextOutputResultRow_ == batch.lookupResult->size()) {
-    batch.lookupResult = nullptr;
-    nextOutputResultRow_ = 0;
-    rawLookupInputHitIndices_ = nullptr;
+    finishLookupResult(batch);
   }
+}
+
+void IndexLookupJoin::finishLookupResult(InputBatchState& batch) {
+  batch.lookupResult = nullptr;
+  nextOutputResultRow_ = 0;
+  rawLookupInputHitIndices_ = nullptr;
 }
 
 bool IndexLookupJoin::hasRemainingOutputForLeftJoin(
@@ -687,8 +1204,8 @@ bool IndexLookupJoin::hasRemainingOutputForLeftJoin(
 
 void IndexLookupJoin::finishInput(InputBatchState& batch) {
   VELOX_CHECK_NOT_NULL(batch.input);
-  VELOX_CHECK_EQ(
-      batch.lookupInput->size() == 0, batch.lookupResultIter == nullptr);
+  VELOX_CHECK(!shouldSkipInput());
+  VELOX_CHECK_EQ(shouldSkipLookup(batch), batch.lookupResultIter == nullptr);
   VELOX_CHECK(!batch.lookupFuture.valid());
 
   batch.input = nullptr;
@@ -706,19 +1223,14 @@ void IndexLookupJoin::finishInput(InputBatchState& batch) {
       VELOX_CHECK(!nextBatch.lookupFuture.valid());
     } else {
       VELOX_CHECK_EQ(
-          nextBatch.lookupInput->size() != 0, nextBatch.lookupFuture.valid());
+          !shouldSkipLookup(nextBatch), nextBatch.lookupFuture.valid());
     }
   }
 }
 
-void IndexLookupJoin::prepareOutput(vector_size_t numOutputRows) {
-  if (output_ == nullptr) {
-    output_ = BaseVector::create<RowVector>(outputType_, numOutputRows, pool());
-  } else {
-    VectorPtr output = std::move(output_);
-    BaseVector::prepareForReuse(output, numOutputRows);
-    output_ = std::static_pointer_cast<RowVector>(output);
-  }
+RowVectorPtr IndexLookupJoin::prepareOutput(vector_size_t numOutputRows) {
+  std::vector<VectorPtr> children(outputType_->size(), nullptr);
+  return createRowVector(pool(), outputType_, numOutputRows);
 }
 
 RowVectorPtr IndexLookupJoin::produceOutputForInnerJoin(
@@ -729,22 +1241,22 @@ RowVectorPtr IndexLookupJoin::produceOutputForInnerJoin(
 
   const size_t numOutputRows = std::min<size_t>(
       batch.lookupResult->size() - nextOutputResultRow_, outputBatchSize_);
-  prepareOutput(numOutputRows);
+  auto output = prepareOutput(numOutputRows);
   if (numOutputRows == batch.lookupResult->size()) {
     for (const auto& projection : probeOutputProjections_) {
-      output_->childAt(projection.outputChannel) = BaseVector::wrapInDictionary(
+      output->childAt(projection.outputChannel) = BaseVector::wrapInDictionary(
           nullptr,
           batch.lookupResult->inputHits,
           numOutputRows,
           batch.input->childAt(projection.inputChannel));
     }
     for (const auto& projection : lookupOutputProjections_) {
-      output_->childAt(projection.outputChannel) =
+      output->childAt(projection.outputChannel) =
           batch.lookupResult->output->childAt(projection.inputChannel);
     }
   } else {
     for (const auto& projection : probeOutputProjections_) {
-      output_->childAt(projection.outputChannel) = BaseVector::wrapInDictionary(
+      output->childAt(projection.outputChannel) = BaseVector::wrapInDictionary(
           nullptr,
           Buffer::slice<vector_size_t>(
               batch.lookupResult->inputHits,
@@ -755,14 +1267,14 @@ RowVectorPtr IndexLookupJoin::produceOutputForInnerJoin(
           batch.input->childAt(projection.inputChannel));
     }
     for (const auto& projection : lookupOutputProjections_) {
-      output_->childAt(projection.outputChannel) =
+      output->childAt(projection.outputChannel) =
           batch.lookupResult->output->childAt(projection.inputChannel)
               ->slice(nextOutputResultRow_, numOutputRows);
     }
   }
   nextOutputResultRow_ += numOutputRows;
   VELOX_CHECK_LE(nextOutputResultRow_, batch.lookupResult->size());
-  return output_;
+  return output;
 }
 
 void IndexLookupJoin::fillOutputMatchRows(
@@ -775,7 +1287,7 @@ void IndexLookupJoin::fillOutputMatchRows(
       offset,
       offset + size,
       match ? bits::kNotNull : bits::kNull);
-  if (!includeMatchColumn_) {
+  if (!hasMarker_) {
     return;
   }
   VELOX_CHECK_NOT_NULL(rawMatchValues_);
@@ -803,26 +1315,38 @@ RowVectorPtr IndexLookupJoin::produceOutputForLeftJoin(
   VELOX_CHECK_NOT_NULL(rawLookupOutputNulls_);
   size_t numOutputRows{0};
   size_t totalMissedInputRows{0};
+
+  // Outputs up to 'numMisses' missed (unmatched) input rows into the current
+  // output batch, capped by the remaining output capacity. Updates
+  // numOutputRows, lastProcessedInputRow, and totalMissedInputRows.
+  const auto outputMissedRows = [&](vector_size_t numMisses) INLINE_LAMBDA {
+    const auto numToOutput =
+        std::min<vector_size_t>(numMisses, maxOutputRows - numOutputRows);
+    if (totalMissedInputRows == 0) {
+      ensureMatchColumn(maxOutputRows);
+      fillOutputMatchRows(0, maxOutputRows, true);
+    }
+    fillOutputMatchRows(numOutputRows, numToOutput, false);
+    for (vector_size_t i = 0; i < numToOutput; ++i) {
+      rawProbeOutputRowIndices_[numOutputRows++] = ++lastProcessedInputRow;
+    }
+    totalMissedInputRows += numToOutput;
+  };
+
   for (; numOutputRows < maxOutputRows &&
        nextOutputResultRow_ < batch.lookupResult->size();) {
     VELOX_CHECK_GE(
-        rawLookupInputHitIndices_[nextOutputResultRow_], lastProcessedInputRow);
+        rawLookupInputHitIndices_[nextOutputResultRow_],
+        lastProcessedInputRow,
+        "nextOutputResultRow_ {}, batch.lookupResult->size() {}",
+        nextOutputResultRow_,
+        batch.lookupResult->size());
     const vector_size_t numMissedInputRows =
         rawLookupInputHitIndices_[nextOutputResultRow_] -
         lastProcessedInputRow - 1;
     VELOX_CHECK_GE(numMissedInputRows, -1);
     if (numMissedInputRows > 0) {
-      if (totalMissedInputRows == 0) {
-        ensureMatchColumn(maxOutputRows);
-        fillOutputMatchRows(0, maxOutputRows, true);
-      }
-      const auto numOutputMissedInputRows = std::min<vector_size_t>(
-          numMissedInputRows, maxOutputRows - numOutputRows);
-      fillOutputMatchRows(numOutputRows, numOutputMissedInputRows, false);
-      for (auto i = 0; i < numOutputMissedInputRows; ++i) {
-        rawProbeOutputRowIndices_[numOutputRows++] = ++lastProcessedInputRow;
-      }
-      totalMissedInputRows += numOutputMissedInputRows;
+      outputMissedRows(numMissedInputRows);
       continue;
     }
 
@@ -833,6 +1357,17 @@ RowVectorPtr IndexLookupJoin::produceOutputForLeftJoin(
     ++nextOutputResultRow_;
     ++numOutputRows;
   }
+
+  // If splitOutput_ is false, include any trailing missed input rows.
+  if (!splitOutput_ && nextOutputResultRow_ == batch.lookupResult->size() &&
+      numOutputRows < maxOutputRows) {
+    const vector_size_t numRemainingInputRows =
+        batch.input->size() - lastProcessedInputRow - 1;
+    if (numRemainingInputRows > 0) {
+      outputMissedRows(numRemainingInputRows);
+    }
+  }
+
   VELOX_CHECK(
       numOutputRows == maxOutputRows ||
       nextOutputResultRow_ == batch.lookupResult->size());
@@ -850,24 +1385,24 @@ RowVectorPtr IndexLookupJoin::produceOutputForLeftJoin(
     return nullptr;
   }
 
-  prepareOutput(numOutputRows);
+  auto output = prepareOutput(numOutputRows);
   const auto numInputRows = lastProcessedInputRow - startProcessInputRow + 1;
   if (numInputRows == numOutputRows) {
     if (startProcessInputRow == 0 && numInputRows == batch.input->size()) {
       for (const auto& projection : probeOutputProjections_) {
-        output_->childAt(projection.outputChannel) =
+        output->childAt(projection.outputChannel) =
             batch.input->childAt(projection.inputChannel);
       }
     } else {
       for (const auto& projection : probeOutputProjections_) {
-        output_->childAt(projection.outputChannel) =
+        output->childAt(projection.outputChannel) =
             batch.input->childAt(projection.inputChannel)
                 ->slice(startProcessInputRow, numInputRows);
       }
     }
   } else {
     for (const auto& projection : probeOutputProjections_) {
-      output_->childAt(projection.outputChannel) = BaseVector::wrapInDictionary(
+      output->childAt(projection.outputChannel) = BaseVector::wrapInDictionary(
           nullptr,
           probeOutputRowMapping_,
           numOutputRows,
@@ -877,39 +1412,39 @@ RowVectorPtr IndexLookupJoin::produceOutputForLeftJoin(
 
   if (totalMissedInputRows > 0) {
     for (const auto& projection : lookupOutputProjections_) {
-      output_->childAt(projection.outputChannel) = BaseVector::wrapInDictionary(
+      output->childAt(projection.outputChannel) = BaseVector::wrapInDictionary(
           lookupOutputNulls_,
           lookupOutputRowMapping_,
           numOutputRows,
           batch.lookupResult->output->childAt(projection.inputChannel));
     }
-    if (includeMatchColumn_) {
-      output_->childAt(matchOutputChannel_.value()) = matchColumn_;
+    if (hasMarker_) {
+      output->childAt(matchOutputChannel_.value()) = matchColumn_;
     }
   } else {
     if (startOutputRow == 0 &&
         numOutputRows == batch.lookupResult->output->size()) {
       for (const auto& projection : lookupOutputProjections_) {
-        output_->childAt(projection.outputChannel) =
+        output->childAt(projection.outputChannel) =
             batch.lookupResult->output->childAt(projection.inputChannel);
       }
     } else {
       for (const auto& projection : lookupOutputProjections_) {
-        output_->childAt(projection.outputChannel) =
+        output->childAt(projection.outputChannel) =
             batch.lookupResult->output->childAt(projection.inputChannel)
                 ->slice(startOutputRow, numOutputRows);
       }
     }
-    if (includeMatchColumn_) {
-      output_->childAt(matchOutputChannel_.value()) =
+    if (hasMarker_) {
+      output->childAt(matchOutputChannel_.value()) =
           BaseVector::createConstant(BOOLEAN(), true, numOutputRows, pool());
     }
   }
-  return output_;
+  return output;
 }
 
 void IndexLookupJoin::ensureMatchColumn(vector_size_t maxOutputRows) {
-  if (!includeMatchColumn_) {
+  if (!hasMarker_) {
     return;
   }
   if (matchColumn_) {
@@ -925,7 +1460,7 @@ void IndexLookupJoin::ensureMatchColumn(vector_size_t maxOutputRows) {
 }
 
 void IndexLookupJoin::setMatchColumnSize(vector_size_t numOutputRows) {
-  if (!includeMatchColumn_) {
+  if (!hasMarker_) {
     return;
   }
   VELOX_CHECK_NOT_NULL(matchColumn_);
@@ -945,31 +1480,29 @@ RowVectorPtr IndexLookupJoin::produceRemainingOutputForLeftJoin(
       outputBatchSize_, batch.input->size() - startProcessInputRow);
   VELOX_CHECK_GT(numOutputRows, 0);
   VELOX_CHECK_LE(numOutputRows, batch.input->size());
-  prepareOutput(numOutputRows);
+  auto output = prepareOutput(numOutputRows);
   if (numOutputRows != batch.input->size()) {
     for (const auto& projection : probeOutputProjections_) {
-      output_->childAt(projection.outputChannel) =
+      output->childAt(projection.outputChannel) =
           batch.input->childAt(projection.inputChannel)
               ->slice(startProcessInputRow, numOutputRows);
     }
   } else {
     for (const auto& projection : probeOutputProjections_) {
-      output_->childAt(projection.outputChannel) =
+      output->childAt(projection.outputChannel) =
           batch.input->childAt(projection.inputChannel);
     }
   }
   for (const auto& projection : lookupOutputProjections_) {
-    output_->childAt(projection.outputChannel) = BaseVector::createNullConstant(
-        output_->type()->childAt(projection.outputChannel),
-        numOutputRows,
-        pool());
+    output->childAt(projection.outputChannel) = BaseVector::createNullConstant(
+        outputType_->childAt(projection.outputChannel), numOutputRows, pool());
   }
-  if (includeMatchColumn_) {
-    output_->childAt(matchOutputChannel_.value()) =
+  if (hasMarker_) {
+    output->childAt(matchOutputChannel_.value()) =
         BaseVector::createConstant(BOOLEAN(), false, numOutputRows, pool());
   }
   lastProcessedInputRow_ = lastProcessedInputRow + numOutputRows;
-  return output_;
+  return output;
 }
 
 void IndexLookupJoin::prepareOutputRowMappings(size_t outputBatchSize) {
@@ -1015,6 +1548,106 @@ void IndexLookupJoin::close() {
   lookupOutputNulls_ = nullptr;
 
   Operator::close();
+
+  closeIndexSplitTracer();
+}
+
+bool IndexLookupJoin::applyFilterOnLookupResult(InputBatchState& batch) {
+  VELOX_CHECK_NOT_NULL(batch.lookupResult);
+  if (!filter_) {
+    return true;
+  }
+  if (batch.lookupResult->size() == 0) {
+    return true;
+  }
+
+  const auto numResultRows = batch.lookupResult->size();
+
+  // Prepare filter input vector
+  filterRows_.resize(numResultRows);
+  filterRows_.setAll();
+  filterInput_ = createRowVector(
+      pool(), filterInputType_, static_cast<vector_size_t>(numResultRows));
+
+  // Populate filter input from probe input.
+  for (const auto& projection : filterProbeInputProjections_) {
+    // Get the probe input column and dictionary-wrap it with hit indices
+    filterInput_->childAt(projection.outputChannel) =
+        BaseVector::wrapInDictionary(
+            nullptr,
+            batch.lookupResult->inputHits,
+            numResultRows,
+            batch.input->childAt(projection.inputChannel));
+  }
+
+  // Populate filter input from lookup result.
+  for (const auto& projection : filterLookupInputProjections_) {
+    filterInput_->childAt(projection.outputChannel) =
+        batch.lookupResult->output->childAt(projection.inputChannel);
+  }
+
+  // Evaluate filter
+  filterResult_.resize(1);
+  EvalCtx evalCtx(operatorCtx_->execCtx(), filter_.get(), filterInput_.get());
+  filter_->eval(filterRows_, evalCtx, filterResult_);
+  decodedFilterResult_.decode(*filterResult_[0], filterRows_);
+
+  const auto indicesByteSize = numResultRows * sizeof(vector_size_t);
+  if (!filteredIndices_ || !filteredIndices_->isMutable() ||
+      filteredIndices_->capacity() < indicesByteSize) {
+    filteredIndices_ = allocateIndices(numResultRows, pool());
+  } else {
+    filteredIndices_->setSize(indicesByteSize);
+  }
+  auto* rawFilteredIndices = filteredIndices_->asMutable<vector_size_t>();
+
+  vector_size_t numPassed{0};
+  for (auto i = 0; i < numResultRows; ++i) {
+    if (!decodedFilterResult_.isNullAt(i) &&
+        decodedFilterResult_.valueAt<bool>(i)) {
+      rawFilteredIndices[numPassed++] = i;
+    }
+  }
+
+  if (numPassed == 0) {
+    finishLookupResult(batch);
+    return false;
+  }
+
+  if (numPassed == numResultRows) {
+    return true;
+  }
+
+  // Some rows passed - create filtered lookup result.
+  filteredIndices_->setSize(numPassed * sizeof(vector_size_t));
+
+  // Update the inputHits buffer.
+  auto* rawLookupInputHitIndices = batch.ensureInputHitsWritable(pool());
+  for (auto i = 0; i < numPassed; ++i) {
+    rawLookupInputHitIndices[i] =
+        rawLookupInputHitIndices_[rawFilteredIndices[i]];
+#ifdef NDEBUG
+    if (i > 0) {
+      VELOX_DCHECK_LE(
+          rawLookupInputHitIndices[i - 1], rawLookupInputHitIndices[i]);
+    }
+#endif
+  }
+  batch.lookupResult->inputHits->setSize(numPassed * sizeof(vector_size_t));
+  rawLookupInputHitIndices_ = rawLookupInputHitIndices;
+
+  // Create the filtered result vector.
+  auto filteredOutput = BaseVector::create<RowVector>(
+      batch.lookupResult->output->type(), numPassed, pool());
+  for (auto i = 0; i < batch.lookupResult->output->childrenSize(); ++i) {
+    filteredOutput->childAt(i) = BaseVector::wrapInDictionary(
+        nullptr,
+        filteredIndices_,
+        numPassed,
+        batch.lookupResult->output->childAt(i));
+  }
+  batch.lookupResult->output = std::move(filteredOutput);
+  return true;
 }
 
 void IndexLookupJoin::recordConnectorStats() {
@@ -1023,23 +1656,46 @@ void IndexLookupJoin::recordConnectorStats() {
     // in that case.
     return;
   }
-  auto lockedStats = stats_.wlock();
   auto connectorStats = indexSource_->runtimeStats();
   for (auto& [name, value] : connectorStats) {
-    lockedStats->runtimeStats.erase(name);
-    lockedStats->runtimeStats.emplace(name, std::move(value));
+    indexStatWriter_->setRuntimeStat(name, value);
   }
-  if (connectorStats.count(kConnectorLookupWallTime) != 0) {
-    const CpuWallTiming backgroundTiming{
-        static_cast<uint64_t>(connectorStats[kConnectorLookupWallTime].count),
-        static_cast<uint64_t>(connectorStats[kConnectorLookupWallTime].sum),
-        // NOTE: this might not be accurate as it doesn't include the time
-        // spent inside the index storage client.
-        static_cast<uint64_t>(connectorStats[kConnectorResultPrepareTime].sum) +
-            connectorStats[kClientRequestProcessTime].sum +
-            connectorStats[kClientResultProcessTime].sum};
-    lockedStats->backgroundTiming.clear();
-    lockedStats->backgroundTiming.add(backgroundTiming);
+
+  // Record lookup timing into the index stat writer. splitStats extracts these
+  // to populate the IndexSource node's addInputTiming.
+  if (connectorStats.count(std::string(kConnectorLookupWallTime)) != 0) {
+    const auto& lookupWallTime =
+        connectorStats[std::string(kConnectorLookupWallTime)];
+    indexStatWriter_->addRuntimeStat(
+        "lookupCount",
+        RuntimeCounter(
+            static_cast<int64_t>(lookupWallTime.count),
+            RuntimeCounter::Unit::kNone));
+    indexStatWriter_->addRuntimeStat(
+        "lookupWallNanos",
+        RuntimeCounter(
+            static_cast<int64_t>(lookupWallTime.sum),
+            RuntimeCounter::Unit::kNanos));
+    // NOTE: lookupCpuNanos may undercount CPU consumed on prefetch worker
+    // threads or async I/O completion handlers, since CpuWallTimer measures
+    // CPU on the calling thread only.
+    indexStatWriter_->addRuntimeStat(
+        "lookupCpuNanos",
+        RuntimeCounter(
+            static_cast<int64_t>(
+                connectorStats[std::string(kConnectorResultPrepareTime)].sum +
+                connectorStats[std::string(kClientRequestProcessTime)].sum +
+                connectorStats[std::string(kClientResultProcessTime)].sum),
+            RuntimeCounter::Unit::kNanos));
+  }
+  // Copy index source stats into the operator's own runtimeStats so they are
+  // visible through the task-level runtime stats path.
+  const auto indexSourceStats = indexStatWriter_->runtimeStats();
+  {
+    auto lockedStats = stats_.wlock();
+    for (const auto& [name, value] : indexSourceStats) {
+      lockedStats->runtimeStats[fmt::format("indexSource.{}", name)] = value;
+    }
   }
 }
 } // namespace facebook::velox::exec

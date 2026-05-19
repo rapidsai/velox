@@ -27,6 +27,10 @@
 
 namespace facebook::velox::dwio::common {
 
+struct ColumnMetrics;
+
+using ScanSpec = velox::common::ScanSpec;
+
 /// Generalized representation of a set of distinct values for dictionary
 /// encodings.
 struct DictionaryValues {
@@ -128,6 +132,10 @@ struct ScanState {
   RawScanState rawState;
 };
 
+inline bool isDense(const RowSet& rows) {
+  return rows.empty() || rows.size() == rows.back() + 1;
+}
+
 class SelectiveColumnReader {
  public:
   static constexpr uint64_t kStringBufferSize = 16 * 1024;
@@ -168,6 +176,14 @@ class SelectiveColumnReader {
   // constant between this and the next call to read.
   virtual void
   read(int64_t offset, const RowSet& rows, const uint64_t* incomingNulls) = 0;
+
+  /// Wraps read() to collect decode timing stats for leaf columns.
+  /// Only times primitive types to avoid double-counting in complex types
+  /// (struct/map/array) which recursively call children's readWithTiming.
+  void readWithTiming(
+      int64_t offset,
+      const RowSet& rows,
+      const uint64_t* incomingNulls);
 
   virtual uint64_t skip(uint64_t numValues) {
     return formatData_->skip(numValues);
@@ -241,7 +257,7 @@ class SelectiveColumnReader {
   uint64_t* mutableNulls(int32_t size) {
     if (!resultNulls_->unique()) {
       resultNulls_ = AlignedBuffer::allocate<bool>(
-          numValues_ + size, memoryPool_, bits::kNotNull);
+          numValues_ + size, pool_, bits::kNotNull);
       rawResultNulls_ = resultNulls_->asMutable<uint64_t>();
     }
     if (resultNulls_->capacity() * 8 < numValues_ + size) {
@@ -482,12 +498,19 @@ class SelectiveColumnReader {
     return false;
   }
 
-  StringView copyStringValueIfNeed(folly::StringPiece value) {
-    if (value.size() <= StringView::kInlineSize) {
+  StringView copyStringValueIfNeed(std::string_view value) {
+    if (value.size() <= StringView::kInlineSize ||
+        formatData().stringDecoderZeroCopy()) {
       return StringView(value);
     }
+
     auto* data = copyStringValue(value);
     return StringView(data, value.size());
+  }
+
+  void setStringBuffers(std::vector<BufferPtr> buffers) {
+    stringBuffers_ = std::move(buffers);
+    rawStringBuffer_ = nullptr;
   }
 
   virtual void setCurrentRowNumber(int64_t /*value*/) {
@@ -495,7 +518,7 @@ class SelectiveColumnReader {
   }
 
   memory::MemoryPool* memoryPool() const {
-    return memoryPool_;
+    return pool_;
   }
 
  protected:
@@ -581,11 +604,11 @@ class SelectiveColumnReader {
   // Checks consistency of nulls-related state.
   const uint64_t* shouldMoveNulls(const RowSet& rows);
 
-  void addStringValue(folly::StringPiece value);
+  void addStringValue(std::string_view value);
 
   // Copies 'value' to buffers owned by 'this' and returns the start of the
   // copy.
-  char* copyStringValue(folly::StringPiece value);
+  char* copyStringValue(std::string_view value);
 
   virtual bool hasDeletion() const {
     return false;
@@ -620,7 +643,7 @@ class SelectiveColumnReader {
     return scanSpec_->hasFilter() || hasDeletion();
   }
 
-  memory::MemoryPool* const memoryPool_;
+  memory::MemoryPool* const pool_;
 
   // The requested data type
   const TypePtr requestedType_;
@@ -635,6 +658,10 @@ class SelectiveColumnReader {
   // spec is assigned at construction and the contents may change at
   // run time based on adaptation. Owned by caller.
   velox::common::ScanSpec* const scanSpec_;
+
+  // Per-column metrics for timing stats. May be nullptr if collection is
+  // disabled.
+  ColumnMetrics* columnMetrics_{nullptr};
 
   // Row number after last read row, relative to the ORC stripe or Parquet
   // Rowgroup start.
@@ -732,13 +759,14 @@ class SelectiveColumnReader {
 };
 
 template <>
-inline void SelectiveColumnReader::addValue(const folly::StringPiece value) {
+inline void SelectiveColumnReader::addValue(const std::string_view value) {
   const uint64_t size = value.size();
-  if (size <= StringView::kInlineSize) {
+  if (formatData().stringDecoderZeroCopy() || size <= StringView::kInlineSize) {
     reinterpret_cast<StringView*>(rawValues_)[numValues_++] =
         StringView(value.data(), size);
     return;
   }
+
   if (rawStringBuffer_ && rawStringUsed_ + size <= rawStringSize_) {
     memcpy(rawStringBuffer_ + rawStringUsed_, value.data(), size);
     reinterpret_cast<StringView*>(rawValues_)[numValues_++] =
@@ -766,7 +794,7 @@ struct NoHook final : public ValueHook {
 
   void addValue(vector_size_t /*row*/, double /*value*/) final {}
 
-  void addValue(vector_size_t /*row*/, folly::StringPiece /*value*/) final {}
+  void addValue(vector_size_t /*row*/, std::string_view /*value*/) final {}
 };
 
 } // namespace facebook::velox::dwio::common

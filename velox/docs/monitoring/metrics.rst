@@ -93,13 +93,16 @@ Task Execution
        30 buckets. It is configured to report the latency at P50, P90, P99,
        and P100 percentiles.
    * - task_batch_process_time_ms
-     - Average
+     - Avg
      - Tracks the averaged task batch processing time. This only applies for
        sequential task execution mode.
    * - task_barrier_process_time_ms
      - Histogram
      - Tracks task barrier execution time in range of [0, 30s] with 30 buckets
        and each bucket with time window of 1s. We report P50, P90, P99, and P100.
+   * - task_splits_count
+     - Count
+     - The total number of splits received by all tasks.
 
 Memory Management
 -----------------
@@ -160,9 +163,6 @@ Memory Management
    * - task_memory_reclaim_wait_timeout_count
      - Count
      - The number of times that the task memory reclaim wait timeouts.
-   * - task_splits_count
-     - Count
-     - The total number of splits received by all tasks.
    * - memory_non_reclaimable_count
      - Count
      - The number of times that the memory reclaim fails because the operator is executing a
@@ -226,11 +226,11 @@ Memory Management
        arbitration operation in range of [0, 600s] with 20 buckets. It is configured
        to report the latency at P50, P90, P99 and P100 percentiles.
    * - arbitrator_free_capacity_bytes
-     - Average
+     - Avg
      - The average of total free memory capacity which is managed by the
        memory arbitrator.
    * - arbitrator_free_reserved_capacity_bytes
-     - Average
+     - Avg
      - The average of free memory capacity reserved to ensure each query has
        the minimal required capacity to run.
    * - memory_pool_initial_capacity_bytes
@@ -292,9 +292,12 @@ Cache
      - Avg
      - Max possible age of AsyncDataCache and SsdCache entries since the raw file
        was opened to load the cache.
-   * - memory_cache_num_entries
+   * - memory_cache_num_large_entries
      - Avg
-     - Total number of cache entries.
+     - Total number of large cache entries.
+   * - memory_cache_num_tiny_entries
+     - Avg
+     - Total number of tiny cache entries.
    * - memory_cache_num_empty_entries
      - Avg
      - Total number of cache entries that do not cache anything.
@@ -416,9 +419,15 @@ Cache
    * - ssd_cache_write_ssd_errors
      - Sum
      - Total number of error while writing to SSD cache files.
+   * - ssd_cache_write_no_space_errors
+     - Sum
+     - Total number of errors due to SSD no space for writes.
    * - ssd_cache_write_ssd_dropped
      - Sum
      - Total number of writes dropped due to no cache space.
+   * - ssd_cache_write_exceed_entry_limit
+     - Sum
+     - Total number of writes dropped due to entry limit exceeded.
    * - ssd_cache_write_checkpoint_errors
      - Sum
      - Total number of errors while writing SSD checkpoint file.
@@ -511,9 +520,9 @@ Spilling
      - The distribution of the amount of time spent on serializing rows for
        spilling in range of [0, 600s] with 20 buckets. It is configured to report
        the latency at P50, P90, P99, and P100 percentiles.
-   * - spill_disk_writes_count
+   * - spill_writes_count
      - Count
-     - The number of disk writes to spill rows.
+     - The number of Velox filesystem write calls to spill rows.
    * - spill_flush_time_ms
      - Histogram
      - The distribution of the amount of time spent on copy out serialized
@@ -619,6 +628,9 @@ Index Join
      - The distribution of index lookup result bytes in range of [0, 128MB] with
        128 buckets. It is configured to report the capacity at P50, P90, P99, and
        P100 percentiles.
+   * - index_lookup_error_result_count
+     - Count
+     - The number of results with error.
 
 Table Scan
 ----------
@@ -631,10 +643,10 @@ Table Scan
      - Type
      - Description
    * - table_scan_batch_process_time_ms
-     - Average
+     - Avg
      - Tracks the averaged table scan batch processing time in milliseconds.
    * - table_scan_batch_bytes
-     - Average
+     - Avg
      - Tracks the averaged table scan output batch size in bytes.
        with 512 buckets and reports P50, P90, P99, and P100
 

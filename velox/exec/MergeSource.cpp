@@ -80,14 +80,23 @@ class LocalMergeSource : public MergeSource {
     return queue_.withWLock([&](auto& queue) { return queue.started(future); });
   }
 
-  BlockingReason next(RowVectorPtr& data, ContinueFuture* future) override {
+  BlockingReason next(RowVectorPtr& data, ContinueFuture* future, bool& drained)
+      override {
+    drained = false;
     ScopedPromiseNotification notification(1);
-    return queue_.withWLock(
-        [&](auto& queue) { return queue.next(data, future, notification); });
+    return queue_.withWLock([&](auto& queue) {
+      return queue.next(data, future, drained, notification);
+    });
   }
 
-  BlockingReason enqueue(RowVectorPtr input, ContinueFuture* future) override {
+  BlockingReason
+  enqueue(RowVectorPtr input, ContinueFuture* future, bool drained) override {
     ScopedPromiseNotification notification(1);
+    if (drained) {
+      VELOX_CHECK_NULL(input);
+      queue_.withWLock([&](auto& queue) { queue.drain(notification); });
+      return BlockingReason::kNotBlocked;
+    }
     return queue_.withWLock([&](auto& queue) {
       return queue.enqueue(input, future, notification);
     });
@@ -118,12 +127,18 @@ class LocalMergeSource : public MergeSource {
     BlockingReason next(
         RowVectorPtr& data,
         ContinueFuture* future,
+        bool& drained,
         ScopedPromiseNotification& notification) {
       VELOX_CHECK(started_);
       data.reset();
 
       if (data_.empty()) {
         if (atEnd_) {
+          return BlockingReason::kNotBlocked;
+        }
+        if (drained_) {
+          drained = true;
+          drained_ = false;
           return BlockingReason::kNotBlocked;
         }
         consumerPromises_.emplace_back("LocalMergeSourceQueue::next");
@@ -138,6 +153,12 @@ class LocalMergeSource : public MergeSource {
 
       notifyProducers(notification);
       return BlockingReason::kNotBlocked;
+    }
+
+    void drain(ScopedPromiseNotification& notification) {
+      VELOX_CHECK(!atEnd_);
+      drained_ = true;
+      notifyConsumers(notification);
     }
 
     BlockingReason enqueue(
@@ -180,6 +201,7 @@ class LocalMergeSource : public MergeSource {
 
     bool started_{false};
     bool atEnd_{false};
+    bool drained_{false};
     boost::circular_buffer<RowVectorPtr> data_;
     std::vector<ContinuePromise> consumerPromises_;
     std::vector<ContinuePromise> producerPromises_;
@@ -198,15 +220,16 @@ class MergeExchangeSource : public MergeSource {
       memory::MemoryPool* pool,
       folly::Executor* executor)
       : mergeExchange_(mergeExchange),
-        client_(std::make_shared<ExchangeClient>(
-            mergeExchange->taskId(),
-            destination,
-            maxQueuedBytes,
-            1,
-            // Deliver right away to avoid blocking other sources
-            0,
-            pool,
-            executor)) {
+        client_(
+            std::make_shared<ExchangeClient>(
+                mergeExchange->taskId(),
+                destination,
+                maxQueuedBytes,
+                1,
+                // Deliver right away to avoid blocking other sources
+                0,
+                pool,
+                executor)) {
     client_->addRemoteTaskId(taskId);
     client_->noMoreRemoteTasks();
   }
@@ -221,7 +244,9 @@ class MergeExchangeSource : public MergeSource {
     VELOX_NYI();
   }
 
-  BlockingReason next(RowVectorPtr& data, ContinueFuture* future) override {
+  BlockingReason next(RowVectorPtr& data, ContinueFuture* future, bool& drained)
+      override {
+    drained = false;
     data.reset();
 
     if (atEnd_ && !currentPage_) {
@@ -277,16 +302,16 @@ class MergeExchangeSource : public MergeSource {
     }
   }
 
- private:
-  BlockingReason enqueue(RowVectorPtr input, ContinueFuture* future) override {
+  BlockingReason
+  enqueue(RowVectorPtr input, ContinueFuture* future, bool drained) override {
     VELOX_FAIL();
   }
 
+ private:
   MergeExchange* const mergeExchange_;
-
   std::shared_ptr<ExchangeClient> client_;
   std::unique_ptr<ByteInputStream> inputStream_;
-  std::unique_ptr<SerializedPage> currentPage_;
+  std::unique_ptr<SerializedPageBase> currentPage_;
   bool atEnd_ = false;
 };
 } // namespace

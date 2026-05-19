@@ -27,7 +27,6 @@
 #include <folly/hash/Hash.h>
 #include <glog/logging.h>
 
-#include "velox/functions/lib/string/StringCore.h"
 #include "velox/type/DecimalUtil.h"
 #include "velox/type/FloatingPointUtil.h"
 #include "velox/type/Type.h"
@@ -144,10 +143,15 @@ class SimpleVector : public BaseVector {
     stats_ = std::move(stats);
   }
 
+  // Type of value returned depends on size of T. If T can fit in a machine
+  // word, return by value, otherwise return by const reference. This is an
+  // optimization to avoid copying large types.
+  using TValueAt = std::conditional_t<sizeof(T) <= sizeof(void*), T, const T&>;
+
   // Concrete Vector types need to implement this themselves.
   // This method does not do bounds checking. When the value is null the return
   // value is technically undefined (currently implemented as default of T)
-  virtual const T valueAt(vector_size_t idx) const = 0;
+  virtual TValueAt valueAt(vector_size_t idx) const = 0;
 
   std::optional<int32_t> compare(
       const BaseVector* other,
@@ -305,33 +309,7 @@ class SimpleVector : public BaseVector {
   /// present. Returns computed value.
   template <typename U = T>
   typename std::enable_if_t<std::is_same_v<U, StringView>, bool>
-  computeAndSetIsAscii(const SelectivityVector& rows) {
-    if (rows.isSubset(*asciiInfo.readLockedAsciiComputedRows())) {
-      return asciiInfo.isAllAscii();
-    }
-    ensureIsAsciiCapacity();
-    bool isAllAscii = true;
-    rows.applyToSelected([&](auto row) {
-      if (!isNullAt(row)) {
-        auto string = valueAt(row);
-        isAllAscii &=
-            functions::stringCore::isAscii(string.data(), string.size());
-      }
-    });
-
-    // Set isAllAscii flag, it will unset if we encounter any utf.
-    auto wlockedAsciiComputedRows = asciiInfo.writeLockedAsciiComputedRows();
-    if (!wlockedAsciiComputedRows->hasSelections()) {
-      asciiInfo.setIsAllAscii(isAllAscii);
-    } else {
-      asciiInfo.setIsAllAscii(asciiInfo.isAllAscii() & isAllAscii);
-    }
-
-    wlockedAsciiComputedRows->select(rows);
-    asciiInfo.setAsciiComputedRowsEmpty(
-        !wlockedAsciiComputedRows->hasSelections());
-    return asciiInfo.isAllAscii();
-  }
+  computeAndSetIsAscii(const SelectivityVector& rows);
 
   /// Clears asciiness state.
   template <typename U = T>

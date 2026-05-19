@@ -18,6 +18,7 @@ add_executable(
   BufferedWriterSinkTest.cpp
   FileReaderUtil.cpp
 )
+velox_add_test_headers(velox_text_writer_test FileReaderUtil.h)
 
 add_test(
   NAME velox_text_writer_test
@@ -33,7 +34,6 @@ target_link_libraries(
   velox_dwio_text_reader_register
   velox_dwio_text_writer_register
   velox_link_libs
-  Boost::regex
   Folly::folly
   ${TEST_LINK_LIBS}
   GTest::gtest

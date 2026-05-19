@@ -17,8 +17,8 @@
 #include <fstream>
 #include "velox/common/base/Fs.h"
 #include "velox/common/base/tests/GTestUtils.h"
-#include "velox/exec/tests/utils/TempDirectoryPath.h"
-#include "velox/exec/tests/utils/TempFilePath.h"
+#include "velox/common/testutil/TempDirectoryPath.h"
+#include "velox/common/testutil/TempFilePath.h"
 #include "velox/functions/prestosql/types/HyperLogLogRegistration.h"
 #include "velox/functions/prestosql/types/HyperLogLogType.h"
 #include "velox/functions/prestosql/types/JsonRegistration.h"
@@ -29,6 +29,8 @@
 #include "velox/functions/prestosql/types/TimestampWithTimeZoneType.h"
 #include "velox/vector/fuzzer/VectorFuzzer.h"
 #include "velox/vector/tests/utils/VectorTestBase.h"
+
+using namespace facebook::velox::common::testutil;
 
 namespace facebook::velox::test {
 
@@ -124,7 +126,7 @@ class VectorSaverTest : public testing::Test, public VectorTestBase {
   // Writes the passed vector to file and reads it back, returns the read
   // vector.
   VectorPtr takeRoundTrip(const VectorPtr& vector) {
-    auto path = exec::test::TempFilePath::create();
+    auto path = TempFilePath::create();
 
     std::ofstream outputFile(path->getPath(), std::ofstream::binary);
     saveVector(*vector, outputFile);
@@ -143,7 +145,7 @@ class VectorSaverTest : public testing::Test, public VectorTestBase {
   }
 
   void testTypeRoundTrip(const TypePtr& type) {
-    auto path = exec::test::TempFilePath::create();
+    auto path = TempFilePath::create();
 
     std::ofstream outputFile(path->getPath(), std::ofstream::binary);
     saveType(type, outputFile);
@@ -352,8 +354,9 @@ TEST_F(VectorSaverTest, flatBoolean) {
   testRoundTrip(makeFlatVector<bool>({true, false, true, true, false}));
 
   // Some nulls.
-  testRoundTrip(makeNullableFlatVector<bool>(
-      {true, std::nullopt, true, std::nullopt, false}));
+  testRoundTrip(
+      makeNullableFlatVector<bool>(
+          {true, std::nullopt, true, std::nullopt, false}));
 
   // Empty vector.
   testRoundTrip(BaseVector::create(BOOLEAN(), 0, pool()));
@@ -363,8 +366,9 @@ TEST_F(VectorSaverTest, flatBoolean) {
       makeFlatVector<bool>(10'000, [](auto row) { return row % 7 == 2; }));
 
   // Long vector with nulls.
-  testRoundTrip(makeFlatVector<bool>(
-      10'000, [](auto row) { return row % 2 == 1; }, nullEvery(17)));
+  testRoundTrip(
+      makeFlatVector<bool>(
+          10'000, [](auto row) { return row % 2 == 1; }, nullEvery(17)));
 }
 
 TEST_F(VectorSaverTest, flatVarchar) {
@@ -566,14 +570,15 @@ TEST_F(VectorSaverTest, dictionaryArray) {
   auto offsets = makeEvenIndices(64);
   auto sizes = makeIndices(64, [](auto /* row */) { return 2; });
 
-  testRoundTrip(std::make_shared<ArrayVector>(
-      pool(),
-      ARRAY(INTEGER()),
-      makeNulls(64, nullEvery(7)),
-      64,
-      offsets,
-      sizes,
-      elementsVector));
+  testRoundTrip(
+      std::make_shared<ArrayVector>(
+          pool(),
+          ARRAY(INTEGER()),
+          makeNulls(64, nullEvery(7)),
+          64,
+          offsets,
+          sizes,
+          elementsVector));
 }
 
 TEST_F(VectorSaverTest, dictionaryMap) {
@@ -643,7 +648,7 @@ struct VectorSaverInfo {
 /// A demonstration of using VectorSaver to save 'current' vector being
 /// processed to disk in case of an exception.
 TEST_F(VectorSaverTest, exceptionContext) {
-  auto tempDirectory = exec::test::TempDirectoryPath::create();
+  auto tempDirectory = TempDirectoryPath::create();
 
   auto messageFunction = [](VeloxException::Type /*exceptionType*/,
                             auto* arg) -> std::string {
@@ -709,4 +714,13 @@ TEST_F(VectorSaverTest, multipleVectors) {
 
   ASSERT_EQ(out.str().size(), in.tellg());
 }
+TEST_F(VectorSaverTest, corruptStringSize) {
+  // The read<std::string> function reads int32_t size then resizes a string.
+  // A negative size must throw instead of crashing via std::terminate.
+  int32_t badSize = -1;
+  std::string data(reinterpret_cast<const char*>(&badSize), sizeof(badSize));
+  std::istringstream in(data);
+  VELOX_ASSERT_THROW(restoreVector(in, pool()), "");
+}
+
 } // namespace facebook::velox::test

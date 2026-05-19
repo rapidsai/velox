@@ -57,7 +57,7 @@ class TestRuntimeStatWriter : public BaseRuntimeStatWriter {
       std::unordered_map<std::string, RuntimeMetric>& stats)
       : stats_{stats} {}
 
-  void addRuntimeStat(const std::string& name, const RuntimeCounter& value)
+  void addRuntimeStat(std::string_view name, const RuntimeCounter& value)
       override {
     addOperatorRuntimeStats(name, value, stats_);
   }
@@ -118,6 +118,10 @@ struct TestParam {
         core::JoinTypeName::toName(joinType));
   }
 };
+
+inline void PrintTo(const TestParam& param, std::ostream* os) {
+  *os << param.toString();
+}
 
 struct TestParamsBuilder {
   std::vector<TestParam> getTestParams() {
@@ -269,7 +273,7 @@ class SpillerTest : public exec::test::RowContainerTestBase {
     rng_.seed(1);
     const bool asyncRead = folly::Random::oneIn(2);
     LOG(INFO) << "Async read " << asyncRead;
-    tempDirPath_ = exec::test::TempDirectoryPath::create(true);
+    tempDirPath_ = TempDirectoryPath::create(true);
     fs_ = filesystems::getFileSystem(tempDirPath_->getPath(), nullptr);
     faultyFs_ = static_cast<tests::utils::FaultyFileSystem*>(fs_.get());
     fsExecutor_ = std::make_unique<folly::CPUThreadPoolExecutor>(32);
@@ -331,15 +335,16 @@ class SpillerTest : public exec::test::RowContainerTestBase {
       bool ascending = true,
       bool makeError = false,
       uint64_t readBufferSize = 1 << 20) {
-    SCOPED_TRACE(fmt::format(
-        "spillType: {} numDuplicates: {} outputBatchSize: {} ascending: {} makeError: {}",
-        typeName(type_),
-        numDuplicates,
-        outputBatchSize,
-        ascending,
-        makeError));
+    SCOPED_TRACE(
+        fmt::format(
+            "spillType: {} numDuplicates: {} outputBatchSize: {} ascending: {} makeError: {}",
+            typeName(type_),
+            numDuplicates,
+            outputBatchSize,
+            ascending,
+            makeError));
     constexpr int32_t kNumRows = 5'000;
-    const auto prevGStats = common::globalSpillStats();
+    const auto prevGStats = globalSpillStats();
 
     setupSpillData(numKeys_, kNumRows, numDuplicates, [&](RowVectorPtr rows) {
       // Set ordinal so that the sorted order is unambiguous.
@@ -355,8 +360,8 @@ class SpillerTest : public exec::test::RowContainerTestBase {
       return;
     }
     // Verify the spilled file exist on file system.
-    auto stats = spiller_->stats();
-    const auto numSpilledFiles = stats.spilledFiles;
+    const auto& stats = spiller_->stats();
+    const auto numSpilledFiles = stats.spilledFiles.load();
     if (type_ == SpillerType::AGGREGATION_OUTPUT) {
       ASSERT_EQ(numSpilledFiles, 1);
     } else {
@@ -388,45 +393,50 @@ class SpillerTest : public exec::test::RowContainerTestBase {
 
     verifySortedSpillData(spillPartitionSet, outputBatchSize);
 
-    stats = spiller_->stats();
-    ASSERT_EQ(stats.spilledFiles, spilledFileSet.size());
-    ASSERT_EQ(stats.spilledPartitions, numPartitions_);
-    ASSERT_EQ(stats.spilledRows, kNumRows);
+    const auto& updatedStats = spiller_->stats();
+    ASSERT_EQ(updatedStats.spilledFiles.load(), spilledFileSet.size());
+    ASSERT_EQ(updatedStats.spilledPartitions.load(), numPartitions_);
+    ASSERT_EQ(updatedStats.spilledRows.load(), kNumRows);
 
-    ASSERT_EQ(stats.spilledBytes, totalSpilledBytes);
-    ASSERT_EQ(stats.spillReadBytes, totalSpilledBytes);
-    ASSERT_GT(stats.spillWriteTimeNanos, 0);
+    ASSERT_EQ(updatedStats.spilledBytes.load(), totalSpilledBytes);
+    ASSERT_EQ(updatedStats.spillReadBytes.load(), totalSpilledBytes);
+    ASSERT_GT(updatedStats.spillWriteTimeNanos.load(), 0);
     if (type_ == SpillerType::AGGREGATION_OUTPUT) {
-      ASSERT_EQ(stats.spillSortTimeNanos, 0);
+      ASSERT_EQ(updatedStats.spillSortTimeNanos.load(), 0);
     } else {
-      ASSERT_GT(stats.spillSortTimeNanos, 0);
+      ASSERT_GT(updatedStats.spillSortTimeNanos.load(), 0);
     }
-    ASSERT_GT(stats.spillExtractVectorTimeNanos, 0);
-    ASSERT_GT(stats.spillFlushTimeNanos, 0);
-    ASSERT_GT(stats.spillFillTimeNanos, 0);
-    ASSERT_GT(stats.spillSerializationTimeNanos, 0);
-    ASSERT_GT(stats.spillWrites, 0);
+    ASSERT_GT(updatedStats.spillExtractVectorTimeNanos.load(), 0);
+    ASSERT_GT(updatedStats.spillFlushTimeNanos.load(), 0);
+    ASSERT_GT(updatedStats.spillFillTimeNanos.load(), 0);
+    ASSERT_GT(updatedStats.spillSerializationTimeNanos.load(), 0);
+    ASSERT_GT(updatedStats.spillWrites.load(), 0);
 
-    const auto newGStats = common::globalSpillStats();
+    const auto newGStats = globalSpillStats();
     ASSERT_EQ(
-        prevGStats.spilledFiles + stats.spilledFiles, newGStats.spilledFiles);
+        prevGStats.spilledFiles + updatedStats.spilledFiles.load(),
+        newGStats.spilledFiles);
     ASSERT_EQ(
-        prevGStats.spilledRows + stats.spilledRows, newGStats.spilledRows);
+        prevGStats.spilledRows + updatedStats.spilledRows.load(),
+        newGStats.spilledRows);
     ASSERT_EQ(
-        prevGStats.spilledPartitions + stats.spilledPartitions,
+        prevGStats.spilledPartitions + updatedStats.spilledPartitions.load(),
         newGStats.spilledPartitions);
     ASSERT_EQ(
-        prevGStats.spilledBytes + stats.spilledBytes, newGStats.spilledBytes);
+        prevGStats.spilledBytes + updatedStats.spilledBytes.load(),
+        newGStats.spilledBytes);
     ASSERT_EQ(
-        prevGStats.spillReadBytes + stats.spillReadBytes,
+        prevGStats.spillReadBytes + updatedStats.spillReadBytes.load(),
         newGStats.spillReadBytes);
-    ASSERT_EQ(prevGStats.spillReads + stats.spillReads, newGStats.spillReads);
     ASSERT_EQ(
-        prevGStats.spillReadTimeNanos + stats.spillReadTimeNanos,
+        prevGStats.spillReads + updatedStats.spillReads.load(),
+        newGStats.spillReads);
+    ASSERT_EQ(
+        prevGStats.spillReadTimeNanos + updatedStats.spillReadTimeNanos.load(),
         newGStats.spillReadTimeNanos);
     ASSERT_EQ(
         prevGStats.spillDeserializationTimeNanos +
-            stats.spillDeserializationTimeNanos,
+            updatedStats.spillDeserializationTimeNanos.load(),
         newGStats.spillDeserializationTimeNanos);
     ASSERT_EQ(
         prevGStats.spillWriteTimeNanos + stats.spillWriteTimeNanos,
@@ -614,7 +624,8 @@ class SpillerTest : public exec::test::RowContainerTestBase {
       return tempDirPath_->getPath();
     };
     stats_.clear();
-    spillStats_ = folly::Synchronized<common::SpillStats>();
+    spillStats_ = folly::Synchronized<exec::SpillStats>();
+    spillIoStats_ = IoStats();
 
     spillConfig_.startPartitionBit = hashBits_.begin();
     spillConfig_.numPartitionBits = hashBits_.numBits();
@@ -635,7 +646,11 @@ class SpillerTest : public exec::test::RowContainerTestBase {
 
     if (type_ == SpillerType::NO_ROW_CONTAINER) {
       spiller_ = std::make_unique<NoRowContainerSpiller>(
-          rowType_, std::nullopt, hashBits_, &spillConfig_, &spillStats_);
+          rowType_,
+          std::nullopt,
+          hashBits_,
+          &spillConfig_,
+          spillStats_.wlock().operator->());
     } else if (type_ == SpillerType::SORT_INPUT) {
       const auto sortingKeys = SpillState::makeSortingKeys(
           compareFlags_.empty()
@@ -646,10 +661,13 @@ class SpillerTest : public exec::test::RowContainerTestBase {
           rowType_,
           sortingKeys,
           &spillConfig_,
-          &spillStats_);
+          spillStats_.wlock().operator->());
     } else if (type_ == SpillerType::SORT_OUTPUT) {
       spiller_ = std::make_unique<SortOutputSpiller>(
-          rowContainer_.get(), rowType_, &spillConfig_, &spillStats_);
+          rowContainer_.get(),
+          rowType_,
+          &spillConfig_,
+          spillStats_.wlock().operator->());
     } else if (type_ == SpillerType::HASH_BUILD) {
       spiller_ = std::make_unique<HashBuildSpiller>(
           joinType_,
@@ -658,7 +676,7 @@ class SpillerTest : public exec::test::RowContainerTestBase {
           rowType_,
           hashBits_,
           &spillConfig_,
-          &spillStats_);
+          spillStats_.wlock().operator->());
     } else if (type_ == SpillerType::AGGREGATION_INPUT) {
       const auto sortingKeys = SpillState::makeSortingKeys(
           compareFlags_.empty()
@@ -670,10 +688,13 @@ class SpillerTest : public exec::test::RowContainerTestBase {
           hashBits_,
           sortingKeys,
           &spillConfig_,
-          &spillStats_);
+          spillStats_.wlock().operator->());
     } else if (type_ == SpillerType::AGGREGATION_OUTPUT) {
       spiller_ = std::make_unique<AggregationOutputSpiller>(
-          rowContainer_.get(), rowType_, &spillConfig_, &spillStats_);
+          rowContainer_.get(),
+          rowType_,
+          &spillConfig_,
+          spillStats_.wlock().operator->());
     } else if (type_ == SpillerType::ROW_NUMBER_HASH_TABLE) {
       spiller_ = std::make_unique<RowNumberHashTableSpiller>(
           rowContainer_.get(),
@@ -681,7 +702,7 @@ class SpillerTest : public exec::test::RowContainerTestBase {
           rowType_,
           hashBits_,
           &spillConfig_,
-          &spillStats_);
+          spillStats_.wlock().operator->());
     } else {
       VELOX_UNREACHABLE("Unknown spiller type");
     }
@@ -714,11 +735,12 @@ class SpillerTest : public exec::test::RowContainerTestBase {
       // We make a merge reader that merges the spill files and the rows that
       // are still in the RowContainer.
       auto merge = spillPartition->createOrderedReader(
-          spillConfig_.readBufferSize, pool(), &spillStats_);
+          spillConfig_, pool(), spillStats_.wlock().operator->());
       ASSERT_TRUE(merge != nullptr);
       ASSERT_TRUE(
           spillPartition->createOrderedReader(
-              spillConfig_.readBufferSize, pool(), &spillStats_) == nullptr);
+              spillConfig_, pool(), spillStats_.wlock().operator->()) ==
+          nullptr);
 
       // We read the spilled data back and check that it matches the sorted
       // order of the partition.
@@ -865,14 +887,15 @@ class SpillerTest : public exec::test::RowContainerTestBase {
       ss << partitionId.toString() << " ";
     }
     ss << "]";
-    SCOPED_TRACE(fmt::format(
-        "Param: {}, numSpillers: {}, numBatchRows: {}, numAppendBatches: {}, targetFileSize: {}, spillPartitionIdSet: {}",
-        param_.toString(),
-        numSpillers,
-        numBatchRows,
-        numAppendBatches,
-        targetFileSize,
-        ss.str()));
+    SCOPED_TRACE(
+        fmt::format(
+            "Param: {}, numSpillers: {}, numBatchRows: {}, numAppendBatches: {}, targetFileSize: {}, spillPartitionIdSet: {}",
+            param_.toString(),
+            numSpillers,
+            numBatchRows,
+            numAppendBatches,
+            targetFileSize,
+            ss.str()));
 
     std::vector<std::vector<RowVectorPtr>> inputsByPartition(numPartitions_);
 
@@ -882,7 +905,7 @@ class SpillerTest : public exec::test::RowContainerTestBase {
     // them by partition.
     std::vector<std::unique_ptr<SpillerBase>> spillers;
     for (int iter = 0; iter < numSpillers; ++iter) {
-      const auto prevGStats = common::globalSpillStats();
+      const auto prevGStats = globalSpillStats();
       setupSpillData(
           numKeys_,
           (type_ != SpillerType::NO_ROW_CONTAINER) ? numBatchRows * 10 : 0,
@@ -963,7 +986,7 @@ class SpillerTest : public exec::test::RowContainerTestBase {
         ASSERT_EQ(stats.spillFillTimeNanos, 0);
       }
 
-      const auto newGStats = common::globalSpillStats();
+      const auto newGStats = globalSpillStats();
       ASSERT_EQ(
           prevGStats.spilledFiles + stats.spilledFiles, newGStats.spilledFiles);
       ASSERT_EQ(
@@ -1007,7 +1030,7 @@ class SpillerTest : public exec::test::RowContainerTestBase {
 
     // Spilled file stats should be updated after finalizing spiller.
     if (numAppendBatches > 0) {
-      ASSERT_GT(common::globalSpillStats().spilledFiles, 0);
+      ASSERT_GT(globalSpillStats().spilledFiles, 0);
     }
   }
 
@@ -1047,7 +1070,9 @@ class SpillerTest : public exec::test::RowContainerTestBase {
               spillConfig_.startPartitionBit,
               spillConfig_.numPartitionBits));
       auto reader = spillPartitionEntry.second->createUnorderedReader(
-          spillConfig_.readBufferSize, pool(), &spillStats_);
+          spillConfig_.readBufferSize,
+          pool(),
+          spillStats_.wlock().operator->());
       if (type_ == SpillerType::NO_ROW_CONTAINER) {
         // For hash probe type, we append each input vector as one batch in
         // spill file so that we can do one-to-one comparison.
@@ -1129,7 +1154,9 @@ class SpillerTest : public exec::test::RowContainerTestBase {
               spillConfig_.startPartitionBit,
               spillConfig_.numPartitionBits));
       auto reader = spillPartitionEntry.second->createUnorderedReader(
-          spillConfig_.readBufferSize, pool(), &spillStats_);
+          spillConfig_.readBufferSize,
+          pool(),
+          spillStats_.wlock().operator->());
       if (type_ == SpillerType::NO_ROW_CONTAINER) {
         // For hash probe type, we append each input vector as one batch in
         // spill file so that we can do one-to-one comparison.
@@ -1231,7 +1258,9 @@ class SpillerTest : public exec::test::RowContainerTestBase {
   std::vector<CompareFlags> compareFlags_;
   std::unique_ptr<SpillerBase> spiller_;
   common::SpillConfig spillConfig_;
-  folly::Synchronized<common::SpillStats> spillStats_;
+  folly::Synchronized<exec::SpillStats> spillStats_;
+  // Filesystem I/O stats for spill operations.
+  IoStats spillIoStats_;
 };
 
 struct AllTypesTestParam {
@@ -1573,7 +1602,7 @@ TEST_P(AggregationOutputOnly, basic) {
       ASSERT_EQ(spillPartitionSet.size(), 1);
       auto spillPartition = std::move(spillPartitionSet.begin()->second);
       auto merge = spillPartition->createOrderedReader(
-          spillConfig_.readBufferSize, pool(), &spillStats_);
+          spillConfig_, pool(), spillStats_.wlock().operator->());
 
       for (auto i = 0; i < expectedNumSpilledRows; ++i) {
         auto* stream = merge->next();
@@ -1687,7 +1716,7 @@ TEST_P(SortOutputOnly, basic) {
 
     const int expectedNumSpilledRows = numListedRows;
     auto merge = spillPartition->createOrderedReader(
-        spillConfig_.readBufferSize, pool(), &spillStats_);
+        spillConfig_, pool(), spillStats_.wlock().operator->());
     if (expectedNumSpilledRows == 0) {
       ASSERT_TRUE(merge == nullptr);
     } else {

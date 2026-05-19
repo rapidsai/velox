@@ -42,8 +42,7 @@ static int32_t typeKindSize(TypeKind kind) {
 __attribute__((__no_sanitize__("thread")))
 #endif
 #endif
-inline void
-setBit(char* bits, uint32_t idx) {
+inline void setBit(char* bits, uint32_t idx) {
   auto bitsAs8Bit = reinterpret_cast<uint8_t*>(bits);
   bitsAs8Bit[idx / 8] |= (1 << (idx % 8));
 }
@@ -136,15 +135,19 @@ RowContainer::RowContainer(
     bool hasNext,
     bool isJoinBuild,
     bool hasProbedFlag,
+    bool hasCountFlag,
     bool hasNormalizedKeys,
+    bool useListRowIndex,
     memory::MemoryPool* pool)
     : keyTypes_(keyTypes),
       nullableKeys_(nullableKeys),
       isJoinBuild_(isJoinBuild),
       hasNormalizedKeys_(hasNormalizedKeys),
+      useListRowIndex_(useListRowIndex),
       stringAllocator_(std::make_unique<HashStringAllocator>(pool)),
       accumulators_(accumulators),
-      rows_(pool) {
+      rows_(pool),
+      rowPointers_(StlAllocator<char*>(stringAllocator_.get())) {
   // Compute the layout of the payload row.  The row has keys, null flags,
   // accumulators, dependent fields. All fields are fixed width. If variable
   // width data is referenced, this is done with StringView(for VARCHAR) and
@@ -245,6 +248,10 @@ RowContainer::RowContainer(
     nextOffset_ = offset;
     offset += sizeof(void*);
   }
+  if (hasCountFlag) {
+    countOffset_ = offset;
+    offset += sizeof(int32_t);
+  }
   fixedRowSize_ = bits::roundUp(offset, alignment_);
   originalNormalizedKeySize_ = hasNormalizedKeys_
       ? bits::roundUp(sizeof(normalized_key_t), alignment_)
@@ -280,6 +287,10 @@ char* RowContainer::newRow() {
     if (normalizedKeySize_) {
       ++numRowsWithNormalizedKey_;
     }
+
+    if (useListRowIndex_) {
+      rowPointers_.push_back(row);
+    }
   }
   return initializeRow(row, false /* reuse */);
 }
@@ -314,6 +325,9 @@ char* RowContainer::initializeRow(char* row, bool reuse) {
     variableRowSize(row) = 0;
   }
   bits::clearBit(row, freeFlagOffset_);
+  if (countOffset_) {
+    countRef(row) = 1;
+  }
   return row;
 }
 
@@ -587,7 +601,7 @@ int32_t RowContainer::variableSizeAt(const char* row, column_index_t column)
   }
 
   const auto typeKind = typeKinds_[column];
-  if (typeKind == TypeKind::VARCHAR || typeKind == TypeKind::VARBINARY) {
+  if (is_string_kind(typeKind)) {
     return reinterpret_cast<const StringView*>(row + rowColumn.offset())
         ->size();
   } else {
@@ -613,7 +627,7 @@ int32_t RowContainer::extractVariableSizeAt(
   }
 
   const auto typeKind = typeKinds_[column];
-  if (typeKind == TypeKind::VARCHAR || typeKind == TypeKind::VARBINARY) {
+  if (is_string_kind(typeKind)) {
     const auto value = valueAt<StringView>(row, rowColumn.offset());
     const auto size = value.size();
     ::memcpy(output, &size, 4);
@@ -651,7 +665,7 @@ int32_t RowContainer::storeVariableSizeAt(
   // First 4 bytes is the size of the data.
   const auto size = *reinterpret_cast<const int32_t*>(data);
 
-  if (typeKind == TypeKind::VARCHAR || typeKind == TypeKind::VARBINARY) {
+  if (is_string_kind(typeKind)) {
     if (size > 0) {
       stringAllocator_->copyMultipart(
           StringView(data + 4, size), row, rowColumn.offset());
@@ -889,13 +903,11 @@ void RowContainer::hashTyped(
                       : BaseVector::kNullHash;
     } else {
       uint64_t hash;
-      if constexpr (Kind == TypeKind::VARCHAR || Kind == TypeKind::VARBINARY) {
+      if constexpr (is_string_kind(Kind)) {
         hash =
             folly::hasher<StringView>()(HashStringAllocator::contiguousString(
                 valueAt<StringView>(row, offset), storage));
-      } else if constexpr (
-          Kind == TypeKind::ROW || Kind == TypeKind::ARRAY ||
-          Kind == TypeKind::MAP) {
+      } else if constexpr (is_nested_kind(Kind)) {
         auto in = prepareRead(row, offset);
         hash = ContainerRowSerde::hash(in, type);
       } else if constexpr (typeProvidesCustomComparison) {
@@ -965,6 +977,8 @@ void RowContainer::clear() {
   hasDuplicateRows_ = false;
 
   rows_.clear();
+  rowPointers_.clear();
+  rowPointers_.shrink_to_fit();
   stringAllocator_->clear();
   numRows_ = 0;
   numRowsWithNormalizedKey_ = 0;
@@ -1026,7 +1040,8 @@ std::optional<int64_t> RowContainer::estimateRowSize() const {
   }
   int64_t freeBytes = rows_.freeBytes() + fixedRowSize_ * numFreeRows_;
   int64_t usedSize = rows_.allocatedBytes() - freeBytes +
-      stringAllocator_->retainedSize() - stringAllocator_->freeSpace();
+      stringAllocator_->retainedSize() - stringAllocator_->freeSpace() -
+      rowPointers_.capacity() * sizeof(char*);
   int64_t rowSize = usedSize / numRows_;
   VELOX_CHECK_GT(
       rowSize, 0, "Estimated row size of the RowContainer must be positive.");

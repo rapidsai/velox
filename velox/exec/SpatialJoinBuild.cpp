@@ -13,30 +13,39 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #include "velox/exec/SpatialJoinBuild.h"
+#include <limits>
+#include "velox/common/geospatial/GeometryConstants.h"
+#ifdef VELOX_ENABLE_GEO
+#include "velox/common/geospatial/GeometrySerde.h"
+#endif
+#include "velox/exec/OperatorType.h"
 #include "velox/exec/Task.h"
 
 namespace facebook::velox::exec {
 
-void SpatialJoinBridge::setData(std::vector<RowVectorPtr> buildVectors) {
+using velox::common::geospatial::GeometrySerializationType;
+
+void SpatialJoinBridge::setData(SpatialBuildResult buildResult) {
   std::vector<ContinuePromise> promises;
   {
     std::lock_guard<std::mutex> l(mutex_);
-    VELOX_CHECK(!buildVectors_.has_value(), "setData must be called only once");
-    buildVectors_ = std::move(buildVectors);
+    VELOX_CHECK(!buildResult_.has_value(), "setData must be called only once");
+    buildResult_ = std::move(buildResult);
     promises = std::move(promises_);
   }
   notify(std::move(promises));
 }
 
-std::optional<std::vector<RowVectorPtr>> SpatialJoinBridge::dataOrFuture(
+std::optional<SpatialBuildResult> SpatialJoinBridge::dataOrFuture(
     ContinueFuture* future) {
   std::lock_guard<std::mutex> l(mutex_);
   VELOX_CHECK(!cancelled_, "Getting data after the build side is aborted");
-  if (buildVectors_.has_value()) {
-    return buildVectors_;
+  if (buildResult_.has_value()) {
+    return buildResult_.value();
   }
-  promises_.emplace_back("SpatialJoinBridge::tableOrFuture");
+  promises_.emplace_back("SpatialJoinBridge::dataOrFuture");
   *future = promises_.back().getSemiFuture();
   return std::nullopt;
 }
@@ -50,7 +59,20 @@ SpatialJoinBuild::SpatialJoinBuild(
           nullptr,
           operatorId,
           joinNode->id(),
-          "SpatialJoinBuild") {}
+          OperatorType::kSpatialJoinBuild) {
+  const auto& buildType = joinNode->rightNode()->outputType();
+  buildGeometryChannel_ =
+      buildType->getChildIdx(joinNode->buildGeometry()->name());
+  VELOX_CHECK_EQ(
+      buildType->childAt(buildGeometryChannel_),
+      joinNode->buildGeometry()->type());
+  if (joinNode->radius().has_value()) {
+    auto radiusVar = joinNode->radius().value();
+    uint32_t radiusChannel = buildType->getChildIdx(radiusVar->name());
+    VELOX_CHECK_EQ(buildType->childAt(radiusChannel), radiusVar->type());
+    radiusChannel_ = radiusChannel;
+  }
+}
 
 void SpatialJoinBuild::addInput(RowVectorPtr input) {
   if (input->size() > 0) {
@@ -106,6 +128,88 @@ std::vector<RowVectorPtr> SpatialJoinBuild::mergeDataVectors() const {
   return merged;
 }
 
+Envelope SpatialJoinBuild::readEnvelope(
+    const StringView& geometryBytes,
+    double radius) {
+#ifdef VELOX_ENABLE_GEO
+  radius = std::max(radius, 0.0);
+  auto geosEnvelope =
+      common::geospatial::GeometryDeserializer::deserializeEnvelope(
+          geometryBytes);
+  if (geosEnvelope->isNull()) {
+    return Envelope::empty();
+  } else {
+    return Envelope::from(
+        geosEnvelope->getMinX() - radius,
+        geosEnvelope->getMinY() - radius,
+        geosEnvelope->getMaxX() + radius,
+        geosEnvelope->getMaxY() + radius);
+  }
+#else
+  // When VELOX_ENABLE_GEO is not set, return an envelope of infinite area
+  // to ensure all geometries are considered for spatial join
+  return Envelope::from(
+      -std::numeric_limits<double>::infinity(),
+      -std::numeric_limits<double>::infinity(),
+      std::numeric_limits<double>::infinity(),
+      std::numeric_limits<double>::infinity());
+#endif
+}
+
+SpatialIndex SpatialJoinBuild::buildSpatialIndex(
+    const std::vector<RowVectorPtr>& data,
+    column_index_t geometryIdx,
+    std::optional<column_index_t> radiusIdx) {
+  size_t numRows = 0;
+  for (auto& vector : data) {
+    numRows += vector->size();
+  }
+  std::vector<Envelope> envelopes;
+  // TODO: Chunk the data to avoid allocating a large vector.
+  envelopes.reserve(numRows);
+
+  DecodedVector radiusCol;
+  DecodedVector geometryCol;
+  vector_size_t offset = 0;
+  Envelope bounds = Envelope::empty();
+
+  for (auto& vector : data) {
+    const auto& rawGeometryCol =
+        vector->childAt(geometryIdx)->asChecked<SimpleVector<StringView>>();
+    geometryCol.decode(*rawGeometryCol);
+
+    auto constantZero = velox::BaseVector::createConstant(
+        velox::DOUBLE(), 0.0, vector->size(), pool());
+    if (radiusIdx.has_value()) {
+      const auto& rawRadiusCol =
+          vector->childAt(radiusIdx.value())->asChecked<SimpleVector<double>>();
+      radiusCol.decode(*rawRadiusCol);
+    } else {
+      radiusCol.decode(*constantZero);
+    }
+
+    // TODO: Make a selectivity vector based on nulls and use for DecodedVector.
+    for (vector_size_t i = 0; i < vector->size(); ++i) {
+      if (geometryCol.isNullAt(i) || radiusCol.isNullAt(i)) {
+        // If geometry or radius is null, it will not match the predicate and so
+        // we should skip the envelope.
+        continue;
+      }
+      double radius = radiusCol.valueAt<double>(i);
+      const StringView geometryBytes = geometryCol.valueAt<StringView>(i);
+      Envelope envelope = SpatialJoinBuild::readEnvelope(geometryBytes, radius);
+      if (FOLLY_UNLIKELY(envelope.isEmpty())) {
+        continue;
+      }
+      envelope.rowIndex = offset + geometryCol.index(i);
+      bounds.merge(envelope);
+      envelopes.push_back(std::move(envelope));
+    }
+    offset += vector->size();
+  }
+  return SpatialIndex(std::move(bounds), std::move(envelopes));
+}
+
 void SpatialJoinBuild::noMoreInput() {
   Operator::noMoreInput();
   std::vector<ContinuePromise> promises;
@@ -142,10 +246,17 @@ void SpatialJoinBuild::noMoreInput() {
   }
 
   dataVectors_ = mergeDataVectors();
+  SpatialIndex spatialIndex =
+      buildSpatialIndex(dataVectors_, buildGeometryChannel_, radiusChannel_);
+  SpatialBuildResult buildResult;
+  buildResult.spatialIndex =
+      std::make_shared<SpatialIndex>(std::move(spatialIndex));
+  buildResult.buildVectors = std::move(dataVectors_);
+
   operatorCtx_->task()
       ->getSpatialJoinBridge(
           operatorCtx_->driverCtx()->splitGroupId, planNodeId())
-      ->setData(std::move(dataVectors_));
+      ->setData(std::move(buildResult));
 }
 
 bool SpatialJoinBuild::isFinished() {

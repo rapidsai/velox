@@ -14,13 +14,15 @@
  * limitations under the License.
  */
 
+#include <folly/system/HardwareConcurrency.h>
+#include "velox/common/base/tests/GTestUtils.h"
 #include "velox/common/file/FileSystems.h"
+#include "velox/common/testutil/TempDirectoryPath.h"
 #include "velox/exec/Merge.h"
 #include "velox/exec/MergeSource.h"
 #include "velox/exec/SortBuffer.h"
 #include "velox/exec/Spill.h"
 #include "velox/exec/tests/utils/OperatorTestBase.h"
-#include "velox/exec/tests/utils/TempDirectoryPath.h"
 #include "velox/type/Type.h"
 #include "velox/vector/fuzzer/VectorFuzzer.h"
 #include "velox/vector/tests/utils/VectorTestBase.h"
@@ -33,6 +35,7 @@ using namespace facebook::velox;
 using namespace facebook::velox::memory;
 
 namespace facebook::velox::exec::test {
+using namespace facebook::velox::common::testutil;
 
 class MergerTest : public OperatorTestBase {
  protected:
@@ -100,11 +103,12 @@ class MergerTest : public OperatorTestBase {
       std::vector<std::unique_ptr<SpillReadFile>> spillReadFiles;
       spillReadFiles.reserve(spillFiles.size());
       for (const auto& spillFile : spillFiles) {
-        spillReadFiles.emplace_back(SpillReadFile::create(
-            spillFile,
-            spillConfig_.readBufferSize,
-            pool_.get(),
-            spillStats_.get()));
+        spillReadFiles.emplace_back(
+            SpillReadFile::create(
+                spillFile,
+                spillConfig_.readBufferSize,
+                pool_.get(),
+                spillStats_.get()));
       }
       spillReadFilesGroups.emplace_back(std::move(spillReadFiles));
     }
@@ -148,8 +152,9 @@ class MergerTest : public OperatorTestBase {
       uint64_t outputBatchBytes) const {
     std::vector<std::unique_ptr<SourceStream>> sourceStreams;
     for (const auto& source : sources) {
-      sourceStreams.push_back(std::make_unique<SourceStream>(
-          source.get(), sortingKeys_, outputBatchRows));
+      sourceStreams.push_back(
+          std::make_unique<SourceStream>(
+              source.get(), sortingKeys_, outputBatchRows));
     }
     return std::make_unique<SourceMerger>(
         inputType_,
@@ -291,7 +296,7 @@ class MergerTest : public OperatorTestBase {
   const RowTypePtr inputType_ = ROW({{"c0", BIGINT()}, {"c1", SMALLINT()}});
   const std::shared_ptr<folly::Executor> executor_{
       std::make_shared<folly::CPUThreadPoolExecutor>(
-          std::thread::hardware_concurrency())};
+          folly::available_concurrency())};
   const std::vector<column_index_t> sortColumnIndices_{0, 1};
   const std::vector<CompareFlags> sortCompareFlags_{
       CompareFlags{.ascending = true},
@@ -299,7 +304,7 @@ class MergerTest : public OperatorTestBase {
   const std::vector<SpillSortKey> sortingKeys_ =
       SpillState::makeSortingKeys(sortColumnIndices_, sortCompareFlags_);
   const std::shared_ptr<TempDirectoryPath> spillDirectory_ =
-      exec::test::TempDirectoryPath::create();
+      TempDirectoryPath::create();
   const common::SpillConfig spillConfig_{
       [&]() -> const std::string& { return spillDirectory_->getPath(); },
       [&](uint64_t) {},
@@ -316,10 +321,11 @@ class MergerTest : public OperatorTestBase {
       0,
       0,
       "none",
+      0,
       std::nullopt};
 
-  std::shared_ptr<folly::Synchronized<common::SpillStats>> spillStats_ =
-      std::make_shared<folly::Synchronized<common::SpillStats>>();
+  std::shared_ptr<exec::SpillStats> spillStats_ =
+      std::make_shared<exec::SpillStats>();
   tsan_atomic<bool> nonReclaimableSection_{false};
 };
 } // namespace facebook::velox::exec::test
@@ -419,4 +425,38 @@ TEST_F(MergerTest, spillMerger) {
     const auto expectedResults = makeExpectedResults(inputs, 16);
     checkResults(expectedResults, results);
   }
+}
+
+DEBUG_ONLY_TEST_F(MergerTest, spillMergerException) {
+  struct TestSetting {
+    size_t maxOutputRows;
+    size_t numSources;
+    size_t queueSize;
+
+    std::string debugString() const {
+      return fmt::format(
+          "maxOutputRows:{}, numStreams:{}, queueSize:{}",
+          maxOutputRows,
+          numSources,
+          queueSize);
+    }
+  };
+
+  std::atomic_int cnt{0};
+  const auto errorMessage = "ConcatFilesSpillBatchStream::nextBatch fail";
+  SCOPED_TESTVALUE_SET(
+      "facebook::velox::exec::ConcatFilesSpillBatchStream::nextBatch",
+      std::function<void(void*)>([&](void* /*unused*/) {
+        if (cnt++ == 11) {
+          VELOX_FAIL("ConcatFilesSpillBatchStream::nextBatch fail");
+        }
+      }));
+  const auto numSources = 5;
+  const auto queueSize = 2;
+  const auto sources = createMergeSources(numSources, queueSize);
+  auto [inputs, filesGroup] = generateInputs(numSources, 16);
+  const auto spillMerger =
+      createSpillMerger(std::move(filesGroup), 100, queueSize);
+  spillMerger->start();
+  VELOX_ASSERT_THROW(getOutputFromSpillMerger(spillMerger.get()), errorMessage);
 }

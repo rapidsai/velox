@@ -17,7 +17,6 @@
 #include "velox/exec/Aggregate.h"
 #include "velox/expression/FunctionSignature.h"
 #include "velox/functions/lib/aggregates/noisy_aggregation/NoisyCountSumAvgAccumulator.h"
-#include "velox/functions/prestosql/aggregates/AggregateNames.h"
 #include "velox/functions/prestosql/aggregates/NoisyHelperFunctionFactory.h"
 #include "velox/vector/FlatVector.h"
 
@@ -211,7 +210,7 @@ class NoisySumGaussianAggregate : public exec::Aggregate {
 } // namespace
 
 void registerNoisySumGaussianAggregate(
-    const std::string& prefix,
+    const std::vector<std::string>& names,
     bool withCompanionFunctions,
     bool overwrite) {
   // Helper function to create a signature builder with return and
@@ -236,99 +235,107 @@ void registerNoisySumGaussianAggregate(
     // Handle simple types.
     for (const auto& dataType : simpleDataTypes) {
       // Signature 1: (col, noise_scale)
-      signatures.push_back(createBuilder()
-                               .argumentType(dataType)
-                               .argumentType(noiseScaleType)
-                               .build());
+      signatures.push_back(
+          createBuilder()
+              .argumentType(dataType)
+              .argumentType(noiseScaleType)
+              .build());
       // Signature 2: (col, noise_scale, random_seed)
-      signatures.push_back(createBuilder()
-                               .argumentType(dataType)
-                               .argumentType(noiseScaleType)
-                               .argumentType(randomSeedType)
-                               .build());
+      signatures.push_back(
+          createBuilder()
+              .argumentType(dataType)
+              .argumentType(noiseScaleType)
+              .argumentType(randomSeedType)
+              .build());
 
       for (const auto& lowerBoundType : boundTypes) {
         for (const auto& upperBoundType : boundTypes) {
           // Signature 3: (col, noise_scale, lower_bound, upper_bound)
-          signatures.push_back(createBuilder()
-                                   .argumentType(dataType)
-                                   .argumentType(noiseScaleType)
-                                   .argumentType(lowerBoundType)
-                                   .argumentType(upperBoundType)
-                                   .build());
+          signatures.push_back(
+              createBuilder()
+                  .argumentType(dataType)
+                  .argumentType(noiseScaleType)
+                  .argumentType(lowerBoundType)
+                  .argumentType(upperBoundType)
+                  .build());
           // Signature 4: (col, noise_scale, lower_bound, upper_bound,
           // random_seed)
-          signatures.push_back(createBuilder()
-                                   .argumentType(dataType)
-                                   .argumentType(noiseScaleType)
-                                   .argumentType(lowerBoundType)
-                                   .argumentType(upperBoundType)
-                                   .argumentType(randomSeedType)
-                                   .build());
+          signatures.push_back(
+              createBuilder()
+                  .argumentType(dataType)
+                  .argumentType(noiseScaleType)
+                  .argumentType(lowerBoundType)
+                  .argumentType(upperBoundType)
+                  .argumentType(randomSeedType)
+                  .build());
         }
       }
     }
     // Handle decimal types separately.
     // Signature 1: (col, noise_scale)
-    signatures.push_back(exec::AggregateFunctionSignatureBuilder()
-                             .integerVariable("a_precision")
-                             .integerVariable("a_scale")
-                             .returnType("double")
-                             .intermediateType("varbinary")
-                             .argumentType("DECIMAL(a_precision, a_scale)")
-                             .argumentType(noiseScaleType)
-                             .build());
+    signatures.push_back(
+        exec::AggregateFunctionSignatureBuilder()
+            .integerVariable("a_precision")
+            .integerVariable("a_scale")
+            .returnType("double")
+            .intermediateType("varbinary")
+            .argumentType("DECIMAL(a_precision, a_scale)")
+            .argumentType(noiseScaleType)
+            .build());
     // Signature 2: (col, noise_scale, random_seed)
-    signatures.push_back(exec::AggregateFunctionSignatureBuilder()
-                             .integerVariable("a_precision")
-                             .integerVariable("a_scale")
-                             .returnType("double")
-                             .intermediateType("varbinary")
-                             .argumentType("DECIMAL(a_precision, a_scale)")
-                             .argumentType(noiseScaleType)
-                             .argumentType(randomSeedType)
-                             .build());
+    signatures.push_back(
+        exec::AggregateFunctionSignatureBuilder()
+            .integerVariable("a_precision")
+            .integerVariable("a_scale")
+            .returnType("double")
+            .intermediateType("varbinary")
+            .argumentType("DECIMAL(a_precision, a_scale)")
+            .argumentType(noiseScaleType)
+            .argumentType(randomSeedType)
+            .build());
 
     for (const auto& lowerBoundType : boundTypes) {
       for (const auto& upperBoundType : boundTypes) {
         // Signature 3: (col, noise_scale, lower_bound, upper_bound)
-        signatures.push_back(exec::AggregateFunctionSignatureBuilder()
-                                 .integerVariable("a_precision")
-                                 .integerVariable("a_scale")
-                                 .returnType("double")
-                                 .intermediateType("varbinary")
-                                 .argumentType("DECIMAL(a_precision, a_scale)")
-                                 .argumentType(noiseScaleType)
-                                 .argumentType(lowerBoundType)
-                                 .argumentType(upperBoundType)
-                                 .build());
+        signatures.push_back(
+            exec::AggregateFunctionSignatureBuilder()
+                .integerVariable("a_precision")
+                .integerVariable("a_scale")
+                .returnType("double")
+                .intermediateType("varbinary")
+                .argumentType("DECIMAL(a_precision, a_scale)")
+                .argumentType(noiseScaleType)
+                .argumentType(lowerBoundType)
+                .argumentType(upperBoundType)
+                .build());
         // Signature 4: (col, noise_scale, lower_bound, upper_bound,
         // random_seed)
-        signatures.push_back(exec::AggregateFunctionSignatureBuilder()
-                                 .integerVariable("a_precision")
-                                 .integerVariable("a_scale")
-                                 .returnType("double")
-                                 .intermediateType("varbinary")
-                                 .argumentType("DECIMAL(a_precision, a_scale)")
-                                 .argumentType(noiseScaleType)
-                                 .argumentType(lowerBoundType)
-                                 .argumentType(upperBoundType)
-                                 .argumentType(randomSeedType)
-                                 .build());
+        signatures.push_back(
+            exec::AggregateFunctionSignatureBuilder()
+                .integerVariable("a_precision")
+                .integerVariable("a_scale")
+                .returnType("double")
+                .intermediateType("varbinary")
+                .argumentType("DECIMAL(a_precision, a_scale)")
+                .argumentType(noiseScaleType)
+                .argumentType(lowerBoundType)
+                .argumentType(upperBoundType)
+                .argumentType(randomSeedType)
+                .build());
       }
     }
   }
 
-  auto name = prefix + kNoisySumGaussian;
   exec::registerAggregateFunction(
-      name,
+      names,
       signatures,
-      [name](
+      [names](
           core::AggregationNode::Step step,
           const std::vector<TypePtr>& argTypes,
           [[maybe_unused]] const TypePtr& resultType,
           [[maybe_unused]] const core::QueryConfig&)
           -> std::unique_ptr<exec::Aggregate> {
+        const std::string& name = names.front();
         VELOX_CHECK_GE(
             argTypes.size(), 2, "{} takes at least 2 arguments", name);
         VELOX_CHECK_LE(
@@ -339,7 +346,7 @@ void registerNoisySumGaussianAggregate(
         }
         return std::make_unique<NoisySumGaussianAggregate>(DOUBLE());
       },
-      {false /*orderSensitive*/, false /*companionFunction*/},
+      {.orderSensitive = false},
       withCompanionFunctions,
       overwrite);
 }

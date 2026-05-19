@@ -46,7 +46,9 @@ using TestRowType = variant;
 class ArraySortTest : public FunctionBaseTest,
                       public testing::WithParamInterface<TypeKind> {
  protected:
-  ArraySortTest() : numValues_(10), numVectors_(5) {}
+  ArraySortTest() : numValues_(10), numVectors_(5) {
+    options_.parseIntegerAsBigint = false;
+  }
 
   void SetUp() override;
 
@@ -224,7 +226,8 @@ class ArraySortTest : public FunctionBaseTest,
         break;
       default:
         VELOX_FAIL(
-            "Unsupported data type of sort_array: {}", mapTypeKindToName(kind));
+            "Unsupported data type of sort_array: {}",
+            TypeKindName::toName(kind));
     }
   }
 
@@ -367,7 +370,8 @@ void ArraySortTest::SetUp() {
         break;
       default:
         VELOX_FAIL(
-            "Unsupported data type of sort_array: {}", mapTypeKindToName(type));
+            "Unsupported data type of sort_array: {}",
+            TypeKindName::toName(type));
     }
   }
   ASSERT_LE(dataVectorsByType_.size(), kSupportedTypes.size());
@@ -610,7 +614,7 @@ TEST_F(ArraySortTest, unsupporteLambda) {
 
 TEST_F(ArraySortTest, failOnMapTypeSort) {
   static const std::string kErrorMessage =
-      "Scalar function signature is not supported"_sv;
+      "Scalar function signature is not supported";
   auto data = makeRowVector({BaseVector::createNullConstant(
       ARRAY(MAP(BIGINT(), VARCHAR())), 8, pool())});
   auto testFail = [&](const std::string& name) {

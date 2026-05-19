@@ -62,9 +62,10 @@ ExpressionFuzzerVerifier::ExpressionFuzzerVerifier(
     const std::unordered_map<std::string, std::shared_ptr<ArgValuesGenerator>>&
         argValuesGenerators)
     : options_(options),
-      queryCtx_(core::QueryCtx::create(
-          nullptr,
-          core::QueryConfig(options_.queryConfigs))),
+      queryCtx_(
+          core::QueryCtx::create(
+              nullptr,
+              core::QueryConfig(options_.queryConfigs))),
       execCtx_({pool_.get(), queryCtx_.get()}),
       verifier_(
           &execCtx_,
@@ -72,9 +73,10 @@ ExpressionFuzzerVerifier::ExpressionFuzzerVerifier(
            options_.reproPersistPath,
            options_.persistAndRunOnce},
           options_.expressionFuzzerOptions.referenceQueryRunner),
-      vectorFuzzer_(std::make_shared<VectorFuzzer>(
-          options_.vectorFuzzerOptions,
-          execCtx_.pool())),
+      vectorFuzzer_(
+          std::make_shared<VectorFuzzer>(
+              options_.vectorFuzzerOptions,
+              execCtx_.pool())),
       expressionFuzzer_(
           signatureMap,
           initialSeed,
@@ -175,7 +177,19 @@ ExpressionFuzzerVerifier::generateInput(
 
     // Finally create the input row.
     RowVectorPtr rowVector = vectorMaker.rowVector(names, children);
-    inputs.push_back({rowVector, SelectivityVector(vecSize)});
+    // Randomly deselect rows to exercise code paths that depend on the
+    // number of selected rows, such as the minRowsForPeeling threshold
+    // that suppresses expression peeling for small batches.
+    SelectivityVector activeRows(vecSize);
+    if (vectorFuzzer.coinToss(0.3)) {
+      for (vector_size_t i = 0; i < vecSize; ++i) {
+        if (vectorFuzzer.coinToss(0.5)) {
+          activeRows.setValid(i, false);
+        }
+      }
+      activeRows.updateBounds();
+    }
+    inputs.push_back({rowVector, activeRows});
   }
   // Return the input rows and the metadata.
   return {inputs, metadata};
@@ -327,7 +341,11 @@ void ExpressionFuzzerVerifier::retryWithTry(
     }
     // Re-evaluate the original expression on rows that didn't produce an
     // error (i.e. returned non-NULL results when evaluated with TRY).
-    inputsToRetry[i].activeRows = extractNonNullRows(tryResult.result);
+    // Intersect with the original activeRows to avoid including rows that
+    // were never evaluated (whose result values are uninitialized).
+    auto nonNullRows = extractNonNullRows(tryResult.result);
+    nonNullRows.intersect(inputsToRetry[i].activeRows);
+    inputsToRetry[i].activeRows = nonNullRows;
     if (inputsToRetry[i].activeRows.hasSelections()) {
       inputsToRetryWithoutErrors.push_back(std::move(inputsToRetry[i]));
     }

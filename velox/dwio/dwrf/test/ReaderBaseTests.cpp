@@ -16,7 +16,10 @@
 
 #include <gtest/gtest.h>
 #include <cstring>
+
 #include "velox/common/base/tests/GTestUtils.h"
+#include "velox/common/io/IoStatistics.h"
+#include "velox/dwio/common/Arena.h"
 #include "velox/dwio/common/InputStream.h"
 #include "velox/dwio/common/encryption/TestProvider.h"
 #include "velox/dwio/common/exception/Exception.h"
@@ -72,14 +75,14 @@ class EncryptedStatsTest : public Test {
     TestEncrypter encrypter;
     HiveTypeParser parser;
     auto type = parser.parse("struct<a:int,b:struct<a:int,b:int>,c:int,d:int>");
-    auto footer =
-        google::protobuf::Arena::CreateMessage<proto::Footer>(&arena_);
+    auto footer = ArenaCreate<proto::Footer>(&arena_);
+    auto footerWrapper = FooterWriteWrapper(footer);
     // add empty stats to the file
     for (size_t i = 0; i < 7; ++i) {
-      footer->add_statistics()->set_numberofvalues(i);
+      footerWrapper.addStatistics().setNumberOfValues(i);
     }
-    ProtoUtils::writeType(*type, *footer);
-    auto enc = footer->mutable_encryption();
+    ProtoUtils::writeType(*type, footerWrapper);
+    auto enc = footerWrapper.mutableEncryption();
     enc->set_keyprovider(proto::Encryption_KeyProvider_UNKNOWN);
     auto group = enc->add_encryptiongroups();
     group->add_nodes(1);
@@ -107,9 +110,11 @@ class EncryptedStatsTest : public Test {
         *readerPool_,
         std::make_unique<BufferedInput>(readFile, *readerPool_),
         std::make_unique<PostScript>(std::move(ps)),
-        footer,
+        footerWrapper.getDwrfPtr(),
         nullptr,
-        std::move(handler));
+        std::move(handler),
+        dataIoStats_,
+        metadataIoStats_);
   }
 
   void clearKey(uint32_t groupIdx) {
@@ -125,6 +130,10 @@ class EncryptedStatsTest : public Test {
   std::shared_ptr<MemoryPool> pool_;
   std::shared_ptr<MemoryPool> sinkPool_;
   std::shared_ptr<MemoryPool> readerPool_;
+  std::shared_ptr<facebook::velox::io::IoStatistics> dataIoStats_ =
+      std::make_shared<facebook::velox::io::IoStatistics>();
+  std::shared_ptr<facebook::velox::io::IoStatistics> metadataIoStats_ =
+      std::make_shared<facebook::velox::io::IoStatistics>();
 };
 
 TEST_F(EncryptedStatsTest, statistics) {
@@ -213,6 +222,10 @@ std::unique_ptr<ReaderBase> createCorruptedFileReader(
   auto readFile = std::make_shared<facebook::velox::InMemoryReadFile>(
       std::string(sink.data(), sink.size()));
   facebook::velox::dwio::common::ReaderOptions readerOpts{pool.get()};
+  readerOpts.setDataIoStats(
+      std::make_shared<facebook::velox::io::IoStatistics>());
+  readerOpts.setMetadataIoStats(
+      std::make_shared<facebook::velox::io::IoStatistics>());
   return std::make_unique<ReaderBase>(
       readerOpts, std::make_unique<BufferedInput>(readFile, *pool));
 }

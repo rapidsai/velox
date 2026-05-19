@@ -133,6 +133,16 @@ std::shared_ptr<const core::CallExpr> callExpr(
     std::vector<core::ExprPtr> params,
     std::optional<std::string> alias,
     const ParseOptions& options) {
+  // DuckDB parser requires IF to have 3 arguments: condition, then-clause, and
+  // else-clause. For example, `IF(a > b, 10)` doesn't parse correctly and must
+  // be written as `IF(a > b, 10, null)`. Remove the redundant else-clause.
+  if (name == "if") {
+    if (params.back()->is(core::IExpr::Kind::kConstant) &&
+        params.back()->as<core::ConstantExpr>()->type()->isUnknown()) {
+      params.pop_back();
+    }
+  }
+
   return std::make_shared<const core::CallExpr>(
       toFullFunctionName(name, options.functionPrefix),
       std::move(params),
@@ -259,6 +269,55 @@ std::shared_ptr<const core::ConstantExpr> tryParseInterval(
       INTERVAL_DAY_TIME(), Variant(value.value() * multiplier), alias);
 }
 
+// DuckDB parses struct literals {'x': 1, 'y': 2} as struct_pack(1 AS x, 2 AS
+// y) and ROW(1, 2) as row(1, 2). Folds into a ROW constant when all arguments
+// are constants. Returns nullptr otherwise.
+core::ExprPtr tryFoldRowConstant(
+    const std::vector<core::ExprPtr>& inputs,
+    const std::optional<std::string>& alias) {
+  std::vector<std::string> names;
+  std::vector<TypePtr> types;
+  std::vector<Variant> values;
+  names.reserve(inputs.size());
+  types.reserve(inputs.size());
+  values.reserve(inputs.size());
+  for (const auto& input : inputs) {
+    auto* constant = input->as<core::ConstantExpr>();
+    if (!constant) {
+      return nullptr;
+    }
+    names.push_back(constant->alias().value_or(""));
+    types.push_back(constant->type());
+    values.push_back(constant->value());
+  }
+  return std::make_shared<const core::ConstantExpr>(
+      ROW(std::move(names), std::move(types)),
+      Variant::row(std::move(values)),
+      alias);
+}
+
+// DuckDB parses [1, 2, 3] as list_value(1, 2, 3). Folds into an ARRAY constant
+// when all arguments are constants. Returns nullptr otherwise.
+core::ExprPtr tryFoldArrayConstant(
+    const std::vector<core::ExprPtr>& inputs,
+    const std::optional<std::string>& alias) {
+  std::vector<Variant> elements;
+  elements.reserve(inputs.size());
+  TypePtr elementType = UNKNOWN();
+  for (const auto& input : inputs) {
+    auto* constant = input->as<core::ConstantExpr>();
+    if (!constant) {
+      return nullptr;
+    }
+    elements.push_back(constant->value());
+    if (!constant->value().isNull()) {
+      elementType = constant->type();
+    }
+  }
+  return std::make_shared<const core::ConstantExpr>(
+      ARRAY(elementType), Variant::array(std::move(elements)), alias);
+}
+
 // Parse a function call (avg(a), func(1, b), etc).
 // Arithmetic operators also follow this path (a + b, a * b, etc).
 core::ExprPtr parseFunctionExpr(
@@ -276,6 +335,20 @@ core::ExprPtr parseFunctionExpr(
   if (params.size() == 1) {
     if (auto interval = tryParseInterval(func, params[0], getAlias(expr))) {
       return interval;
+    }
+  }
+
+  if (func == "struct_pack" || func == "row") {
+    if (auto rowConstant = tryFoldRowConstant(params, getAlias(expr))) {
+      return rowConstant;
+    }
+  }
+
+  // DuckDB parses [1, 2, 3] as list_value(1, 2, 3). Fold into an ARRAY
+  // constant when all arguments are constants.
+  if (func == "list_value") {
+    if (auto arrayConstant = tryFoldArrayConstant(params, getAlias(expr))) {
+      return arrayConstant;
     }
   }
 
@@ -327,10 +400,11 @@ core::ExprPtr parseConjunctionExpr(
       StringUtil::Lower(ExpressionTypeToOperator(expr.GetExpressionType()));
 
   if (conjExpr.children.size() < 2) {
-    throw std::invalid_argument(folly::sformat(
-        "Malformed conjunction expression "
-        "(expected at least 2 input columns, got {}).",
-        conjExpr.children.size()));
+    throw std::invalid_argument(
+        folly::sformat(
+            "Malformed conjunction expression "
+            "(expected at least 2 input columns, got {}).",
+            conjExpr.children.size()));
   }
 
   // DuckDB's parser returns conjunction involving multiple input in a flat
@@ -380,6 +454,10 @@ core::ExprPtr parseOperatorExpr(
         if (auto constantExpr =
                 dynamic_cast<ConstantExpression*>(child.get())) {
           auto& value = constantExpr->value;
+          if (value.type().id() == LogicalTypeId::INTEGER &&
+              options.parseIntegerAsBigint) {
+            value = Value::BIGINT(value.GetValue<int32_t>());
+          }
           if (options.parseDecimalAsDouble &&
               value.type().id() == duckdb::LogicalTypeId::DECIMAL) {
             value = Value::DOUBLE(value.GetValue<double>());
@@ -463,8 +541,9 @@ core::ExprPtr parseOperatorExpr(
     }
 
     if (options.parseInListAsArray) {
-      params.emplace_back(std::make_shared<const core::ConstantExpr>(
-          ARRAY(valueType), Variant::array(values), std::nullopt));
+      params.emplace_back(
+          std::make_shared<const core::ConstantExpr>(
+              ARRAY(valueType), Variant::array(values), std::nullopt));
     }
     auto inExpr = callExpr("in", std::move(params), getAlias(expr), options);
     // Translate COMPARE_NOT_IN into NOT(IN()).
@@ -595,6 +674,23 @@ core::ExprPtr parseCastExpr(
             getAlias(expr));
       }
     }
+
+    // DuckDB parses DATE '...' and '...'::date as cast(varchar as DATE).
+    // Fold into a DATE constant.
+    if (targetType->isDate() && constant->type()->isVarchar()) {
+      const auto& value = constant->value().value<TypeKind::VARCHAR>();
+      return std::make_shared<const core::ConstantExpr>(
+          DATE(),
+          Variant::create<TypeKind::INTEGER>(DATE()->toDays(value)),
+          getAlias(expr));
+    }
+
+    // ROW(1, 2)::struct(x bigint, y bigint) — re-type the ROW constant with
+    // the target type (which carries field names). Child types must match.
+    if (targetType->isRow() && targetType->equivalent(*constant->type())) {
+      return std::make_shared<const core::ConstantExpr>(
+          targetType, constant->value(), getAlias(expr));
+    }
   }
 
   const bool isTryCast = castExpr.try_cast;
@@ -693,7 +789,8 @@ std::unique_ptr<::duckdb::ParsedExpression> parseSingleExpression(
   auto parsed = parseExpression(exprString);
   VELOX_CHECK_EQ(
       1, parsed.size(), "Expected exactly one expression: {}.", exprString);
-  return std::move(parsed.front());
+  auto result = std::move(parsed.front());
+  return result;
 }
 } // namespace
 
@@ -753,7 +850,7 @@ bool isNullsFirst(
 }
 } // namespace
 
-OrderByClause parseOrderByExpr(const std::string& exprString) {
+parse::OrderByClause parseOrderByExpr(const std::string& exprString) {
   ParserOptions options;
   ParseOptions parseOptions;
   options.preserve_identifier_case = false;
@@ -775,49 +872,54 @@ OrderByClause parseOrderByExpr(const std::string& exprString) {
       .nullsFirst = nullsFirst};
 }
 
-AggregateExpr parseAggregateExpr(
+core::AggregateCallExprPtr parseAggregateExpr(
     const std::string& exprString,
     const ParseOptions& options) {
   auto parsedExpr = parseSingleExpression(exprString);
 
   auto& functionExpr = dynamic_cast<FunctionExpression&>(*parsedExpr);
 
-  AggregateExpr aggregateExpr;
-  aggregateExpr.expr = parseExpr(*parsedExpr, options);
-  aggregateExpr.distinct = functionExpr.distinct;
+  auto callExpr = parseExpr(*parsedExpr, options);
 
+  std::vector<core::SortKey> orderBy;
   if (functionExpr.order_bys) {
     for (const auto& orderByNode : functionExpr.order_bys->orders) {
-      const bool ascending = isAscending(orderByNode.type, exprString);
-      const bool nullsFirst = isNullsFirst(orderByNode.null_order, exprString);
-      aggregateExpr.orderBy.emplace_back(OrderByClause{
-          parseExpr(*orderByNode.expression, options), ascending, nullsFirst});
+      orderBy.push_back(
+          {parseExpr(*orderByNode.expression, options),
+           isAscending(orderByNode.type, exprString),
+           isNullsFirst(orderByNode.null_order, exprString)});
     }
   }
 
+  core::ExprPtr filter;
   if (functionExpr.filter) {
-    aggregateExpr.maskExpr = parseExpr(*functionExpr.filter, options);
+    filter = parseExpr(*functionExpr.filter, options);
   }
 
-  return aggregateExpr;
+  auto* call = callExpr->as<core::CallExpr>();
+  return std::make_shared<core::AggregateCallExpr>(
+      call->name(),
+      call->inputs(),
+      functionExpr.distinct,
+      std::move(filter),
+      std::move(orderBy),
+      callExpr->alias());
 }
 
 namespace {
+
+using WindowType = core::WindowCallExpr::WindowType;
+using BoundType = core::WindowCallExpr::BoundType;
+
 WindowType parseWindowType(const WindowExpression& expr) {
-  auto windowType = [&](const WindowBoundary& boundary) -> WindowType {
-    if (boundary == WindowBoundary::CURRENT_ROW_ROWS ||
+  auto isRows = [](const WindowBoundary& boundary) {
+    return boundary == WindowBoundary::CURRENT_ROW_ROWS ||
         boundary == WindowBoundary::EXPR_FOLLOWING_ROWS ||
-        boundary == WindowBoundary::EXPR_PRECEDING_ROWS) {
-      return WindowType::kRows;
-    }
-    return WindowType::kRange;
+        boundary == WindowBoundary::EXPR_PRECEDING_ROWS;
   };
 
-  auto startType = windowType(expr.start);
-  if (startType == WindowType::kRows) {
-    return startType;
-  }
-  return windowType(expr.end);
+  return (isRows(expr.start) || isRows(expr.end)) ? WindowType::kRows
+                                                  : WindowType::kRange;
 }
 
 BoundType parseBoundType(WindowBoundary boundary) {
@@ -841,29 +943,23 @@ BoundType parseBoundType(WindowBoundary boundary) {
   VELOX_UNREACHABLE();
 }
 
-} // namespace
-
-IExprWindowFunction parseWindowExpr(
+core::WindowCallExprPtr buildWindowCallExpr(
+    ParsedExpression& parsedExpr,
     const std::string& windowString,
     const ParseOptions& options) {
-  auto parsedExpr = parseSingleExpression(windowString);
-  VELOX_CHECK(
-      parsedExpr->IsWindow(),
-      "Invalid window function expression: {}",
-      windowString);
+  auto& windowExpr = dynamic_cast<WindowExpression&>(parsedExpr);
 
-  IExprWindowFunction windowIExpr;
-  auto& windowExpr = dynamic_cast<WindowExpression&>(*parsedExpr);
-  for (int i = 0; i < windowExpr.partitions.size(); i++) {
-    windowIExpr.partitionBy.push_back(
-        parseExpr(*(windowExpr.partitions[i].get()), options));
+  std::vector<core::ExprPtr> partitionKeys;
+  for (const auto& partition : windowExpr.partitions) {
+    partitionKeys.push_back(parseExpr(*partition, options));
   }
 
+  std::vector<core::SortKey> orderByKeys;
   for (const auto& orderByNode : windowExpr.orders) {
-    const bool ascending = isAscending(orderByNode.type, windowString);
-    const bool nullsFirst = isNullsFirst(orderByNode.null_order, windowString);
-    windowIExpr.orderBy.emplace_back(OrderByClause{
-        parseExpr(*orderByNode.expression, options), ascending, nullsFirst});
+    orderByKeys.push_back(
+        {parseExpr(*orderByNode.expression, options),
+         isAscending(orderByNode.type, windowString),
+         isNullsFirst(orderByNode.null_order, windowString)});
   }
 
   std::vector<core::ExprPtr> params;
@@ -880,32 +976,58 @@ IExprWindowFunction parseWindowExpr(
     params.emplace_back(parseExpr(*windowExpr.default_expr, options));
   }
 
-  auto func = normalizeFuncName(windowExpr.function_name);
-  windowIExpr.functionCall =
-      callExpr(func, std::move(params), getAlias(windowExpr), options);
-
-  windowIExpr.ignoreNulls = windowExpr.ignore_nulls;
-
-  windowIExpr.frame.type = parseWindowType(windowExpr);
-  windowIExpr.frame.startType = parseBoundType(windowExpr.start);
+  core::ExprPtr startValue;
   if (windowExpr.start_expr) {
-    windowIExpr.frame.startValue =
-        parseExpr(*windowExpr.start_expr.get(), options);
+    startValue = parseExpr(*windowExpr.start_expr, options);
+  }
+  core::ExprPtr endValue;
+  if (windowExpr.end_expr) {
+    endValue = parseExpr(*windowExpr.end_expr, options);
   }
 
-  windowIExpr.frame.endType = parseBoundType(windowExpr.end);
-  if (windowExpr.end_expr) {
-    windowIExpr.frame.endValue = parseExpr(*windowExpr.end_expr.get(), options);
+  auto endType = parseBoundType(windowExpr.end);
+  if (options.correctWindowFrameDefault && orderByKeys.empty() &&
+      endType == core::WindowCallExpr::BoundType::kCurrentRow) {
+    endType = core::WindowCallExpr::BoundType::kUnboundedFollowing;
   }
-  return windowIExpr;
+
+  return std::make_shared<core::WindowCallExpr>(
+      normalizeFuncName(windowExpr.function_name),
+      std::move(params),
+      std::move(partitionKeys),
+      std::move(orderByKeys),
+      core::WindowCallExpr::Frame{
+          parseWindowType(windowExpr),
+          parseBoundType(windowExpr.start),
+          std::move(startValue),
+          endType,
+          std::move(endValue)},
+      windowExpr.ignore_nulls,
+      getAlias(windowExpr));
 }
 
-std::string OrderByClause::toString() const {
-  return fmt::format(
-      "{} {} NULLS {}",
-      expr->toString(),
-      (ascending ? "ASC" : "DESC"),
-      (nullsFirst ? "FIRST" : "LAST"));
+} // namespace
+
+core::WindowCallExprPtr parseWindowExpr(
+    const std::string& windowString,
+    const ParseOptions& options) {
+  auto parsedExpr = parseSingleExpression(windowString);
+  VELOX_CHECK(
+      parsedExpr->IsWindow(),
+      "Invalid window function expression: {}",
+      windowString);
+
+  return buildWindowCallExpr(*parsedExpr, windowString, options);
+}
+
+core::ExprPtr parseScalarOrWindowExpr(
+    const std::string& exprString,
+    const ParseOptions& options) {
+  auto parsedExpr = parseSingleExpression(exprString);
+  if (parsedExpr->IsWindow()) {
+    return buildWindowCallExpr(*parsedExpr, exprString, options);
+  }
+  return parseExpr(*parsedExpr, options);
 }
 
 } // namespace facebook::velox::duckdb

@@ -61,6 +61,15 @@ class UniqueValue {
     return data_;
   }
 
+  std::string asString() const {
+    if (size_ <= sizeof(int64_t)) {
+      // String is stored inline in data_.
+      return std::string{reinterpret_cast<const char*>(&data_), size_};
+    }
+    // String is stored as a pointer in data_.
+    return std::string{reinterpret_cast<const char*>(data_), size_};
+  }
+
   void setData(int64_t data) {
     data_ = data;
   }
@@ -131,8 +140,15 @@ class VectorHasher {
   static constexpr int32_t kNoLimit = -1;
 
   VectorHasher(TypePtr type, column_index_t channel)
-      : channel_(channel), type_(std::move(type)), typeKind_(type_->kind()) {
-    if (typeKind_ == TypeKind::BOOLEAN) {
+      : channel_(channel),
+        type_(std::move(type)),
+        typeKind_(type_->kind()),
+        typeProvidesCustomComparison_(type_->providesCustomComparison()) {
+    if (!typeSupportsValueIds()) {
+      // Ensure any range or unique value based hashing is disabled.
+      setRangeOverflow();
+      setDistinctOverflow();
+    } else if (typeKind_ == TypeKind::BOOLEAN) {
       // We do not need samples to know the cardinality or limits of a bool
       // vector.
       hasRange_ = true;
@@ -235,14 +251,38 @@ class VectorHasher {
       ScratchMemory& scratchMemory,
       raw_vector<uint64_t>& result) const;
 
-  // Returns true if either range or distinct values have not overflowed.
+  // Returns true if either range or distinct values have not overflowed and the
+  // type doesn't support custom comparison.
   bool mayUseValueIds() const {
-    return hasRange_ || !distinctOverflow_;
+    return typeSupportsValueIds() && (hasRange_ || !distinctOverflow_);
   }
 
   // Returns an instance of the filter corresponding to a set of unique values.
   // Returns null if distinctOverflow_ is true.
   std::unique_ptr<common::Filter> getFilter(bool nullAllowed) const;
+
+  bool supportsBloomFilter() const {
+    if (typeProvidesCustomComparison_) {
+      return false;
+    }
+    switch (typeKind_) {
+      // Smaller integers would never overflow 100'000 distinct values.
+      case TypeKind::INTEGER:
+      case TypeKind::BIGINT:
+        return distinctOverflow_;
+      default:
+        return false;
+    }
+  }
+
+  void setBloomFilter(common::FilterPtr filter) {
+    VELOX_DCHECK(supportsBloomFilter());
+    bloomFilter_ = std::move(filter);
+  }
+
+  const common::FilterPtr& getBloomFilter() const {
+    return bloomFilter_;
+  }
 
   void resetStats() {
     uniqueValues_.clear();
@@ -284,8 +324,12 @@ class VectorHasher {
     return isRange_;
   }
 
-  static bool typeKindSupportsValueIds(TypeKind kind) {
-    switch (kind) {
+  bool typeSupportsValueIds() const {
+    if (typeProvidesCustomComparison_) {
+      return false;
+    }
+
+    switch (typeKind_) {
       case TypeKind::BOOLEAN:
       case TypeKind::TINYINT:
       case TypeKind::SMALLINT:
@@ -302,7 +346,7 @@ class VectorHasher {
 
   // Merges the value ids information of 'other' into 'this'. Ranges
   // and distinct values are unioned.
-  void merge(const VectorHasher& other);
+  void merge(const VectorHasher& other, size_t maxNumDistinct);
 
   // true if no values have been added.
   bool empty() const {
@@ -535,6 +579,13 @@ class VectorHasher {
 
   void setRangeOverflow();
 
+  inline void checkTypeSupportsValueIds() const {
+    VELOX_DCHECK(
+        typeSupportsValueIds(),
+        "Value IDs cannot be used, the type {} is not supported.",
+        type_->toString());
+  }
+
   static inline bool
   isNullAt(const char* group, int32_t nullByte, uint8_t nullMask) {
     return (group[nullByte] & nullMask) != 0;
@@ -551,6 +602,7 @@ class VectorHasher {
   const column_index_t channel_;
   const TypePtr type_;
   const TypeKind typeKind_;
+  const bool typeProvidesCustomComparison_;
 
   DecodedVector decoded_;
   raw_vector<uint64_t> cachedHashes_;
@@ -587,6 +639,8 @@ class VectorHasher {
   // Memory for unique string values.
   std::vector<std::string> uniqueValuesStorage_;
   uint64_t distinctStringsBytes_ = 0;
+
+  common::FilterPtr bloomFilter_;
 };
 
 template <>
@@ -600,14 +654,6 @@ bool VectorHasher::makeValueIdsForRows<TypeKind::VARCHAR>(
 
 template <>
 void VectorHasher::analyzeValue(StringView value);
-
-template <>
-inline bool VectorHasher::tryMapToRange(
-    const StringView* /*values*/,
-    const SelectivityVector& /*rows*/,
-    uint64_t* /*result*/) {
-  return false;
-}
 
 template <>
 inline uint64_t VectorHasher::valueId(StringView value) {
@@ -703,10 +749,12 @@ inline bool VectorHasher::tryMapToRange(
 }
 
 template <>
-bool VectorHasher::tryMapToRange(
+inline bool VectorHasher::tryMapToRange(
     const StringView* /*values*/,
     const SelectivityVector& /*rows*/,
-    uint64_t* /*result*/);
+    uint64_t* /*result*/) {
+  return false;
+}
 
 template <>
 bool VectorHasher::makeValueIdsFlatNoNulls<bool>(

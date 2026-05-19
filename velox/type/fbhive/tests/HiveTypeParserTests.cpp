@@ -21,6 +21,7 @@
 #include "gtest/gtest-test-part.h"
 #include "gtest/gtest.h"
 #include "velox/common/base/tests/GTestUtils.h"
+#include "velox/type/OpaqueCustomTypes.h"
 #include "velox/type/fbhive/HiveTypeParser.h"
 
 using facebook::velox::TypeKind;
@@ -128,7 +129,7 @@ TEST(FbHive, badParse) {
       "Unexpected token uniontype at < bigint , int, float");
   VELOX_ASSERT_THROW(parser.parse("badid"), "Unexpected token badid at ");
   VELOX_ASSERT_THROW(
-      parser.parse("struct<int, bigint>"), "Unexpected token  bigint>");
+      parser.parse("struct<int, bigint>"), "Unexpected token ' bigint>'");
   VELOX_ASSERT_THROW(parser.parse("list<>"), "Unexpected token list at <>");
   VELOX_ASSERT_THROW(
       parser.parse("map<>"), "wrong param count for map type def");
@@ -140,7 +141,7 @@ TEST(FbHive, badParse) {
   VELOX_ASSERT_THROW(
       parser.parse("map<int>"), "wrong param count for map type def");
   VELOX_ASSERT_THROW(
-      parser.parse("decimal<20, 10>"), "Unexpected token 20, 10>");
+      parser.parse("decimal<20, 10>"), "Unexpected token '20, 10>'");
   VELOX_ASSERT_THROW(parser.parse("decimal(20, 10>"), "Unexpected token ");
   VELOX_ASSERT_THROW(
       parser.parse("decimal(a, 10)"),
@@ -183,6 +184,8 @@ TEST(FbHive, parseOpaque) {
   HiveTypeParser parser;
   auto t = parser.parse("opaque<bar>");
   ASSERT_EQ(t->toString(), "OPAQUE<facebook::velox::type::fbhive::Foo>");
+  EXPECT_EQ(t->kind(), TypeKind::OPAQUE);
+  EXPECT_FALSE(customTypeExists("bar"));
   unregisterOpaqueType<Foo>("bar");
 }
 
@@ -194,5 +197,20 @@ TEST(FbHive, parseUnregisteredOpaque) {
       parser.parse("opaque<Foo>"),
       "Could not find type 'Foo'. Did you call registerOpaqueType?");
   unregisterOpaqueType<Foo>("bar");
+}
+
+struct CustomFoo {};
+constexpr char kCustomFooName[] = "CustomFoo";
+using CustomFooRegistrar = OpaqueCustomTypeRegister<CustomFoo, kCustomFooName>;
+
+TEST(FbHive, parseOpaqueCustomTypeReturnsSingleton) {
+  CustomFooRegistrar::registerType();
+  HiveTypeParser parser;
+  auto parsed = parser.parse("opaque<CustomFoo>");
+  // The parser must return the registered custom-type singleton so that
+  // pointer equality with the type produced by CustomType<TypeT> in UDF
+  // signatures holds.
+  EXPECT_EQ(parsed.get(), CustomFooRegistrar::singletonTypePtr().get());
+  CustomFooRegistrar::unregisterType();
 }
 } // namespace facebook::velox::type::fbhive

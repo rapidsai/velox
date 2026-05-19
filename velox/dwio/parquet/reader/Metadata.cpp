@@ -26,6 +26,20 @@ inline const T load(const char* ptr) {
   return ret;
 }
 
+inline std::optional<int64_t> decodeInt64Stat(const std::string& bytes) {
+  switch (bytes.size()) {
+    case sizeof(int64_t):
+      return load<int64_t>(bytes.data());
+    case sizeof(int32_t):
+      // Parquet stores Time types as int32_t (for milliseconds), but Velox's
+      // Time type is always int64_t, so we need to load sizeof(int32_t) and
+      // cast to int64_t.
+      return static_cast<int64_t>(load<int32_t>(bytes.data()));
+    default:
+      return std::nullopt;
+  }
+}
+
 template <typename T>
 inline std::optional<T> getMin(const thrift::Statistics& columnChunkStats) {
   return columnChunkStats.__isset.min_value
@@ -42,6 +56,24 @@ inline std::optional<T> getMax(const thrift::Statistics& columnChunkStats) {
       : (columnChunkStats.__isset.max
              ? std::optional<T>(load<T>(columnChunkStats.max.data()))
              : std::nullopt);
+}
+
+template <>
+inline std::optional<int64_t> getMin(
+    const thrift::Statistics& columnChunkStats) {
+  return columnChunkStats.__isset.min_value
+      ? decodeInt64Stat(columnChunkStats.min_value)
+      : (columnChunkStats.__isset.min ? decodeInt64Stat(columnChunkStats.min)
+                                      : std::nullopt);
+}
+
+template <>
+inline std::optional<int64_t> getMax(
+    const thrift::Statistics& columnChunkStats) {
+  return columnChunkStats.__isset.max_value
+      ? decodeInt64Stat(columnChunkStats.max_value)
+      : (columnChunkStats.__isset.max ? decodeInt64Stat(columnChunkStats.max)
+                                      : std::nullopt);
 }
 
 template <>
@@ -156,22 +188,16 @@ common::CompressionKind thriftCodecToCompressionKind(
   switch (codec) {
     case thrift::CompressionCodec::UNCOMPRESSED:
       return common::CompressionKind::CompressionKind_NONE;
-      break;
     case thrift::CompressionCodec::SNAPPY:
       return common::CompressionKind::CompressionKind_SNAPPY;
-      break;
     case thrift::CompressionCodec::GZIP:
       return common::CompressionKind::CompressionKind_GZIP;
-      break;
     case thrift::CompressionCodec::LZO:
       return common::CompressionKind::CompressionKind_LZO;
-      break;
     case thrift::CompressionCodec::LZ4:
       return common::CompressionKind::CompressionKind_LZ4;
-      break;
     case thrift::CompressionCodec::ZSTD:
       return common::CompressionKind::CompressionKind_ZSTD;
-      break;
     case thrift::CompressionCodec::LZ4_RAW:
       return common::CompressionKind::CompressionKind_LZ4;
     default:
@@ -321,8 +347,9 @@ FileMetaDataPtr::FileMetaDataPtr(const void* metadata) : ptr_(metadata) {}
 FileMetaDataPtr::~FileMetaDataPtr() = default;
 
 RowGroupMetaDataPtr FileMetaDataPtr::rowGroup(int i) const {
-  return RowGroupMetaDataPtr(reinterpret_cast<const void*>(
-      &thriftFileMetaDataPtr(ptr_)->row_groups[i]));
+  return RowGroupMetaDataPtr(
+      reinterpret_cast<const void*>(
+          &thriftFileMetaDataPtr(ptr_)->row_groups[i]));
 }
 
 int64_t FileMetaDataPtr::numRows() const {
@@ -356,7 +383,7 @@ std::string FileMetaDataPtr::keyValueMetadataValue(
       return thriftFileMetaDataPtr(ptr_)->key_value_metadata[i].value;
     }
   }
-  VELOX_FAIL(fmt::format("Input key {} is not in the key value metadata", key));
+  VELOX_FAIL("Input key {} is not in the key value metadata", key);
 }
 
 std::string FileMetaDataPtr::createdBy() const {

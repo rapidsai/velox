@@ -16,10 +16,13 @@
 #pragma once
 
 #include <fmt/format.h>
+#include <folly/container/F14Map.h>
+#include <folly/container/F14Set.h>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
+#include "velox/common/EnumDeclare.h"
 #include "velox/common/base/BitUtil.h"
 #include "velox/common/base/Exceptions.h"
 
@@ -39,7 +42,12 @@ class IExpr {
     kConstant = 4,
     kLambda = 5,
     kSubquery = 6,
+    kConcat = 7,
+    kAggregate = 8,
+    kWindow = 9,
   };
+
+  VELOX_DECLARE_EMBEDDED_ENUM_NAME(Kind)
 
   explicit IExpr(
       Kind kind,
@@ -51,6 +59,10 @@ class IExpr {
 
   Kind kind() const {
     return kind_;
+  }
+
+  std::string_view kindName() const {
+    return toName(kind_);
   }
 
   bool is(Kind kind) const {
@@ -82,7 +94,19 @@ class IExpr {
 
   virtual std::string toString() const = 0;
 
+  /// Returns a copy of this expression with the given inputs.
   virtual ExprPtr replaceInputs(std::vector<ExprPtr> newInputs) const = 0;
+
+  /// Returns a copy of this expression with the the new alias added.
+  ///
+  /// The last alias added will win if called multiple times. Throws in case the
+  /// subclass does not implement it.
+  virtual ExprPtr withAlias(const std::string& alias) const {
+    VELOX_FAIL("Unable to add alias to expression '{}'", *this);
+  }
+
+  /// Returns a copy of this expression with the alias removed.
+  virtual ExprPtr dropAlias() const = 0;
 
   size_t hash() const {
     size_t hash = localHash();
@@ -100,6 +124,10 @@ class IExpr {
   }
 
   virtual bool operator==(const IExpr& other) const = 0;
+
+  friend std::ostream& operator<<(std::ostream& os, const IExpr& expr) {
+    return os << expr.toString();
+  }
 
  protected:
   // Returns a hash that include values specific to the expression. Doesn't
@@ -148,4 +176,33 @@ struct IExprEqual {
   }
 };
 
+/// Hash set for ExprPtr using semantic equality (compares expression values,
+/// not pointers).
+using ExprSet = folly::F14FastSet<ExprPtr, IExprHash, IExprEqual>;
+
+/// Hash map with ExprPtr keys using semantic equality (compares expression
+/// values, not pointers).
+template <typename V>
+using ExprMap = folly::F14FastMap<ExprPtr, V, IExprHash, IExprEqual>;
+
 } // namespace facebook::velox::core
+
+template <>
+struct fmt::formatter<facebook::velox::core::IExpr>
+    : fmt::formatter<std::string> {
+  auto format(const facebook::velox::core::IExpr& expr, format_context& ctx)
+      const {
+    return fmt::formatter<std::string>::format(expr.toString(), ctx);
+  }
+};
+
+// For ExprPtr (shared_ptr)
+template <>
+struct fmt::formatter<facebook::velox::core::ExprPtr>
+    : fmt::formatter<std::string> {
+  auto format(const facebook::velox::core::ExprPtr& expr, format_context& ctx)
+      const {
+    return fmt::formatter<std::string>::format(
+        expr ? expr->toString() : "null", ctx);
+  }
+};

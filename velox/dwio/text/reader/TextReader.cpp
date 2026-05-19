@@ -15,13 +15,16 @@
  */
 
 #include "velox/dwio/text/reader/TextReader.h"
+
+#include <boost/algorithm/string/predicate.hpp>
+#include <string>
+
 #include "velox/common/encode/Base64.h"
 #include "velox/dwio/common/exception/Exceptions.h"
 #include "velox/type/fbhive/HiveTypeParser.h"
 
-#include <string>
-
 namespace facebook::velox::text {
+namespace {
 
 using common::CompressionKind;
 
@@ -29,16 +32,18 @@ using dwio::common::EOFError;
 using dwio::common::RowReader;
 using dwio::common::verify;
 
-using folly::AsciiCaseInsensitive;
-using folly::StringPiece;
-
-constexpr const char* kTextfileCompressionExtensionGzip = ".gz";
-constexpr const char* kTextfileCompressionExtensionDeflate = ".deflate";
-constexpr const char* kTextfileCompressionExtensionZst = ".zst";
+static constexpr std::string_view kTextfileCompressionExtensionGzip{".gz"};
+static constexpr std::string_view kTextfileCompressionExtensionDeflate{
+    ".deflate"};
+static constexpr std::string_view kTextfileCompressionExtensionZst{".zst"};
+static constexpr std::string_view kTextfileCompressionExtensionLz4{".lz4"};
+static constexpr std::string_view kTextfileCompressionExtensionLzo{".lzo"};
+static constexpr std::string_view kTextfileCompressionExtensionSnappy{
+    ".snappy"};
 
 static std::string emptyString = std::string();
 
-namespace {
+constexpr const int32_t kDecompressionBufferFactor = 3;
 
 void resizeVector(
     BaseVector* FOLLY_NULLABLE data,
@@ -91,24 +96,24 @@ void resizeVector(
   }
 }
 
-bool endsWith(const std::string& str, const std::string& suffix) {
-  return str.size() >= suffix.size() &&
-      str.compare(str.size() - suffix.size(), suffix.size(), suffix) == 0;
-}
-
 void setCompressionSettings(
     const std::string& filename,
     CompressionKind& kind,
     dwio::common::compression::CompressionOptions& compressionOptions) {
-  if (endsWith(filename, kTextfileCompressionExtensionGzip)) {
+  if (filename.ends_with(kTextfileCompressionExtensionLz4) ||
+      filename.ends_with(kTextfileCompressionExtensionLzo) ||
+      filename.ends_with(kTextfileCompressionExtensionSnappy)) {
+    VELOX_FAIL("Unsupported compression extension for file: {}", filename);
+  }
+  if (filename.ends_with(kTextfileCompressionExtensionGzip)) {
     kind = CompressionKind::CompressionKind_GZIP;
     compressionOptions.format.zlib.windowBits =
         15; // 2^15-byte deflate window size
-  } else if (endsWith(filename, kTextfileCompressionExtensionDeflate)) {
+  } else if (filename.ends_with(kTextfileCompressionExtensionDeflate)) {
     kind = CompressionKind::CompressionKind_ZLIB;
     compressionOptions.format.zlib.windowBits =
         -15; // raw deflate, 2^15-byte window size
-  } else if (endsWith(filename, kTextfileCompressionExtensionZst)) {
+  } else if (filename.ends_with(kTextfileCompressionExtensionZst)) {
     kind = CompressionKind::CompressionKind_ZSTD;
   } else {
     kind = CompressionKind::CompressionKind_NONE;
@@ -156,20 +161,17 @@ TextRowReader::TextRowReader(
           std::make_shared<dwio::common::DataBuffer<char>>(contents_->pool)} {
   // Seek to first line at or after the specified region.
   if (contents_->compression == CompressionKind::CompressionKind_NONE) {
-    /**
-     * TODO: Inconsistent row skipping behavior (kept for Presto compatibility)
-     *
-     * Issue: When reading from byte offset > 0, we skip rows inclusively at the
-     * start position, but when reading from byte 0, no rows are skipped. This
-     * creates inconsistent behavior where a row at the boundary may be skipped
-     * when it should be included.
-     *
-     * Example: If pos_ = 10 is the first byte of row 2, that entire row gets
-     * skipped, even though it should be read.
-     *
-     * Proposed fix: streamPosition_ = (pos_ == 0) ? 0 : --pos_;
-     * This would skip rows exclusively of pos_, ensuring consistent behavior.
-     */
+    // TODO: Inconsistent row skipping behavior (kept for Presto compatibility)
+    // Issue: When reading from byte offset > 0, we skip rows inclusively at the
+    // start position, but when reading from byte 0, no rows are skipped. This
+    // creates inconsistent behavior where a row at the boundary may be skipped
+    // when it should be included.
+    //
+    // Example: If pos_ = 10 is the first byte of row 2, that entire row gets
+    // skipped, even though it should be read.
+    //
+    // Proposed fix: streamPosition_ = (pos_ == 0) ? 0 : --pos_;
+    // This would skip rows exclusively of pos_, ensuring consistent behavior.
     const auto streamPosition_ = pos_;
 
     contents_->inputStream = contents_->input->read(
@@ -191,34 +193,15 @@ TextRowReader::TextRowReader(
     }
     limit_ = std::numeric_limits<uint64_t>::max();
 
-    /**
-     * The output buffer for decompression is allocated based on the
-     * uncompressed length of the stream.
-     *
-     * For decompressors other than ZlibDecompressor, the uncompressed length is
-     * obtained via getDecompressedLength, and blockSize serves only as a
-     * fallbak when getDecompressedLength fails to return a valid length.
-     *
-     * ZlibDecompressor does not implement getDecompressedLength because the
-     * DEFLATE algorithm used by zlib does not inherently includes the
-     * uncompressed length in the compressed stream. As a result, blockSize is
-     * used to set z_stream.avail_out during decompression to ensure enough
-     * buffer allocated for the output. Since zlib requires avail_out to be a
-     * uInt (unsigned int), blockSize is set to std::numeric_limits<unsigned
-     * int>::max() for full compatibility.
-     */
-    const auto blockSize =
-        (contents_->compression == CompressionKind::CompressionKind_ZLIB ||
-         contents_->compression == CompressionKind::CompressionKind_GZIP)
-        ? std::numeric_limits<unsigned int>::max()
-        : std::numeric_limits<uint64_t>::max();
-
     contents_->inputStream = contents_->input->loadCompleteFile();
     auto name = contents_->inputStream->getName();
     contents_->decompressedInputStream = createDecompressor(
         contents_->compression,
         std::move(contents_->inputStream),
-        blockSize,
+        // An estimated value used as the output buffer size for the zlib
+        // decompressor, and as the fallback value of the decompressed length
+        // for other decompressors.
+        kDecompressionBufferFactor * contents_->fileLength,
         contents_->pool,
         contents_->compressionOptions,
         fmt::format("Text Reader: Stream {}", name),
@@ -274,34 +257,27 @@ uint64_t TextRowReader::next(
       DelimType delim = DelimTypeNone;
       const auto& ct = t->childAt(i);
       const auto& rct = reqT->childAt(i);
-      auto childVector = rowVecPtr->childAt(i).get();
+      BaseVector* childVector = nullptr;
 
       if (isSelectedField(ct)) {
+        childVector = rowVecPtr->childAt(i).get();
         ++colIndex;
       } else if (colIndex < reqChildCount && !projectSelectedType) {
-        // not selected and not projecting: set to null
-        if (childVector != nullptr) {
-          rowVecPtr->setNull(i, true);
-          childVector = nullptr;
-        }
+        // Not selected and not projecting: discard the child by setting it to
+        // nullptr. The projectColumns() function will later filter out unneeded
+        // columns based on the ScanSpec.
+        rowVecPtr->childAt(i) = nullptr;
         ++colIndex;
       } else {
-        // not selected and projecting: just discard the field
-        childVector = nullptr;
+        // Not selected and projecting: discard the child. Same reasoning as
+        // above.
+        rowVecPtr->childAt(i) = nullptr;
       }
 
       resizeVector(childVector, rowsRead);
       readElement(ct->type(), rct->type(), childVector, rowsRead, delim);
     }
 
-    // set null property
-    for (uint64_t i = colIndex; i < reqChildCount; i++) {
-      auto childVector = rowVecPtr->childAt(i).get();
-
-      if (childVector != nullptr) {
-        rowVecPtr->setNull(static_cast<vector_size_t>(i), true);
-      }
-    }
     (void)skipLine();
     ++currentRow_;
     ++rowsRead;
@@ -504,11 +480,9 @@ TextRowReader::getString(TextRowReader& th, bool& isNull, DelimType& delim) {
   bool wasEscaped = false;
   th.ownedString_.clear();
 
-  /**
-  Processing has to be done character by characater instad of chunk by chunk.
-  This is to avoid edge case handling if escape character(s) are cut off at
-  the end of the chunk.
-  */
+  // Processing has to be done character by characater instad of chunk by chunk.
+  // This is to avoid edge case handling if escape character(s) are cut off at
+  // the end of the chunk.
   while (true) {
     auto v = th.getByteOptimized(delim);
     if (!th.isNone(delim)) {
@@ -559,16 +533,22 @@ TextRowReader::getString(TextRowReader& th, bool& isNull, DelimType& delim) {
   return th.ownedString_;
 }
 
-uint8_t TextRowReader::getByte(DelimType& delim) {
-  setNone(delim);
-  auto v = getByteUnchecked(delim);
-  if (isNone(delim)) {
-    if (v == '\r') {
-      v = getByteUnchecked<true>(delim); // always returns '\n' in this case
-    }
-    delim = getDelimType(v);
+template <class T>
+void TextRowReader::setValueFromString(
+    const std::string& str,
+    BaseVector* data,
+    vector_size_t insertionRow,
+    std::function<std::optional<T>(const std::string&)> convert) {
+  if ((atEOF_ && atSOL_) || data == nullptr) {
+    return;
   }
-  return v;
+  auto flatVector = data->asChecked<FlatVector<T>>();
+  auto result = str.empty() ? std::nullopt : convert(str);
+  if (result) {
+    flatVector->set(insertionRow, *result);
+  } else {
+    flatVector->setNull(insertionRow, true);
+  }
 }
 
 uint8_t TextRowReader::getByteOptimized(DelimType& delim) {
@@ -610,48 +590,6 @@ DelimType TextRowReader::getDelimType(uint8_t v) {
     }
   }
   return delim;
-}
-
-template <bool skipLF>
-char TextRowReader::getByteUnchecked(DelimType& delim) {
-  if (atEOL_) {
-    if (!skipLF) {
-      delim = DelimTypeEOR; // top level EOR
-    }
-    return '\n';
-  }
-
-  try {
-    char v;
-    if (!unreadData_.empty()) {
-      v = unreadData_[0];
-      unreadData_.erase(0, 1);
-    } else {
-      contents_->inputStream->readFully(&v, 1);
-    }
-    pos_++;
-
-    // only when previous char == '\r'
-    if (skipLF) {
-      if (v != '\n') {
-        pos_--;
-        return '\n';
-      }
-    } else {
-      atSOL_ = false;
-    }
-    return v;
-  } catch (EOFError&) {
-  } catch (std::runtime_error& e) {
-    if (std::string(e.what()).find("Short read of") != 0 && !skipLF) {
-      throw;
-    }
-  }
-  if (!skipLF) {
-    setEOF();
-    delim = DelimTypeEOR;
-  }
-  return '\n';
 }
 
 template <bool skipLF>
@@ -854,8 +792,8 @@ T TextRowReader::getInteger(TextRowReader& th, bool& isNull, DelimType& delim) {
 
 namespace {
 
-static const StringView trueStringView = StringView{"TRUE"};
-static const StringView falseStringView = StringView{"FALSE"};
+static constexpr std::string_view kTrueStringView{"TRUE"};
+static constexpr std::string_view kFalseStringView{"FALSE"};
 
 } // namespace
 
@@ -870,21 +808,21 @@ bool TextRowReader::getBoolean(
   if (isNull) {
     return false;
   }
-  if (str.compare(trueStringView) == 0) {
+  if (str.compare(kTrueStringView) == 0) {
     return true;
   }
-  if (str.compare(falseStringView) == 0) {
+  if (str.compare(kFalseStringView) == 0) {
     return false;
   }
 
   switch (str.size()) {
     case 4:
-      if (StringPiece(str).equals("TRUE", AsciiCaseInsensitive())) {
+      if (boost::algorithm::iequals(str, kTrueStringView)) {
         return true;
       }
       break;
     case 5:
-      if (StringPiece(str).equals("FALSE", AsciiCaseInsensitive())) {
+      if (boost::algorithm::iequals(str, kFalseStringView)) {
         return false;
       }
       break;
@@ -898,11 +836,11 @@ bool TextRowReader::getBoolean(
 
 namespace {
 
-static const StringView NaNStringView = StringView{"NaN"};
-static const StringView InfinityStringView = StringView{"Infinity"};
-static const StringView ShortInfinityStringView = StringView{"Inf"};
-static const StringView NegInfinityStringView = StringView{"-Infinity"};
-static const StringView ShortNegInfinityStringView = StringView{"-Inf"};
+static constexpr std::string_view kNaNStringView{"NaN"};
+static constexpr std::string_view kInfinityStringView{"Infinity"};
+static constexpr std::string_view kShortInfinityStringView{"Inf"};
+static constexpr std::string_view kNegInfinityStringView{"-Infinity"};
+static constexpr std::string_view kShortNegInfinityStringView{"-Inf"};
 
 bool unacceptableFloatingPoint(std::string& s) {
   for (int i = 0; i < s.size(); ++i) {
@@ -912,18 +850,14 @@ bool unacceptableFloatingPoint(std::string& s) {
     }
   }
 
-  bool isNaN =
-      StringPiece(s).equals(StringPiece(NaNStringView), AsciiCaseInsensitive());
+  bool isNaN = boost::algorithm::iequals(s, kNaNStringView);
 
-  bool isInf = StringPiece(s).equals(
-      StringPiece(InfinityStringView), AsciiCaseInsensitive());
-  bool isShortInf = StringPiece(s).equals(
-      StringPiece(ShortInfinityStringView), AsciiCaseInsensitive());
+  bool isInf = boost::algorithm::iequals(s, kInfinityStringView);
+  bool isShortInf = boost::algorithm::iequals(s, kShortInfinityStringView);
 
-  bool isNegInf = StringPiece(s).equals(
-      StringPiece(NegInfinityStringView), AsciiCaseInsensitive());
-  bool isShortNegInf = StringPiece(s).equals(
-      StringPiece(ShortNegInfinityStringView), AsciiCaseInsensitive());
+  bool isNegInf = boost::algorithm::iequals(s, kNegInfinityStringView);
+  bool isShortNegInf =
+      boost::algorithm::iequals(s, kShortNegInfinityStringView);
 
   return (!isNaN && !isInf && !isShortInf && !isNegInf && !isShortNegInf);
 }
@@ -1052,8 +986,19 @@ void TextRowReader::readElement(
               getInteger<int32_t>, data, insertionRow, delim);
           break;
         case TypeKind::INTEGER:
-          putValue<int32_t, int32_t>(
-              getInteger<int32_t>, data, insertionRow, delim);
+          if (reqT->isDate()) {
+            const std::string& str = getString(*this, isNull, delim);
+            setValueFromString<int32_t>(
+                str,
+                data,
+                insertionRow,
+                [](const std::string& s) -> std::optional<int32_t> {
+                  return DATE()->toDays(s);
+                });
+          } else {
+            putValue<int32_t, int32_t>(
+                getInteger<int32_t>, data, insertionRow, delim);
+          }
           break;
         default:
           VELOX_FAIL(
@@ -1065,10 +1010,61 @@ void TextRowReader::readElement(
       break;
 
     case TypeKind::BIGINT:
-      putValue<int64_t, int64_t>(
-          getInteger<int64_t>, data, insertionRow, delim);
+      if (reqT->isShortDecimal()) {
+        const std::string& str = getString(*this, isNull, delim);
+        auto decimalParams = getDecimalPrecisionScale(*reqT);
+        const auto precision = decimalParams.first;
+        const auto scale = decimalParams.second;
+        setValueFromString<int64_t>(
+            str,
+            data,
+            insertionRow,
+            [precision, scale](const std::string& s) -> std::optional<int64_t> {
+              int64_t v = 0;
+              const auto status = DecimalUtil::castFromString(
+                  StringView(s.data(), static_cast<int32_t>(s.size())),
+                  precision,
+                  scale,
+                  v);
+              return status.ok() ? std::optional<int64_t>(v) : std::nullopt;
+            });
+      } else {
+        putValue<int64_t, int64_t>(
+            getInteger<int64_t>, data, insertionRow, delim);
+      }
       break;
 
+    case TypeKind::HUGEINT: {
+      const std::string& str = getString(*this, isNull, delim);
+      if (reqT->isLongDecimal()) {
+        auto decimalParams = getDecimalPrecisionScale(*reqT);
+        const auto precision = decimalParams.first;
+        const auto scale = decimalParams.second;
+        setValueFromString<int128_t>(
+            str,
+            data,
+            insertionRow,
+            [precision,
+             scale](const std::string& s) -> std::optional<int128_t> {
+              int128_t v = 0;
+              const auto status = DecimalUtil::castFromString(
+                  StringView(s.data(), static_cast<int32_t>(s.size())),
+                  precision,
+                  scale,
+                  v);
+              return status.ok() ? std::optional<int128_t>(v) : std::nullopt;
+            });
+      } else {
+        setValueFromString<int128_t>(
+            str,
+            data,
+            insertionRow,
+            [](const std::string& s) -> std::optional<int128_t> {
+              return HugeInt::parse(s);
+            });
+      }
+      break;
+    }
     case TypeKind::SMALLINT:
       switch (reqT->kind()) {
         case TypeKind::BIGINT:
@@ -1637,19 +1633,6 @@ std::unique_ptr<RowReader> TextReader::createRowReader(
 
 uint64_t TextReader::getFileLength() const {
   return contents_->fileLength;
-}
-
-uint64_t TextReader::getMemoryUse() {
-  uint64_t memory = std::min(
-      uint64_t(contents_->fileLength),
-      contents_->input->getInputStream()->getNaturalReadSize());
-
-  // Decompressor needs a buffer.
-  if (contents_->compression != CompressionKind::CompressionKind_NONE) {
-    memory *= 3;
-  }
-
-  return memory;
 }
 
 } // namespace facebook::velox::text

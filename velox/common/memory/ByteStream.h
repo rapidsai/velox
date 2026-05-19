@@ -259,6 +259,8 @@ class BufferInputStream : public ByteInputStream {
     return ranges_;
   }
 
+  // The byte ranges backing this stream. Guaranteed to be non-empty after
+  // construction.
   std::vector<ByteRange> ranges_;
 };
 
@@ -361,9 +363,10 @@ class ByteOutputStream {
     }
 
     if (current_->position + sizeof(T) * values.size() > current_->size) {
-      appendStringView(std::string_view(
-          reinterpret_cast<const char*>(&values[0]),
-          values.size() * sizeof(T)));
+      appendStringView(
+          std::string_view(
+              reinterpret_cast<const char*>(&values[0]),
+              values.size() * sizeof(T)));
       return;
     }
     auto* target = current_->buffer + current_->position;
@@ -414,7 +417,7 @@ class ByteOutputStream {
         auto* buffer = current_->buffer + (position >> 3);
         auto value = folly::loadUnaligned<uint64_t>(buffer);
         value = (value & mask) | (bits[0] << offset);
-        folly::storeUnaligned(buffer, value);
+        folly::storeUnaligned<uint64_t>(buffer, value);
         current_->position += end;
         return;
       }
@@ -537,9 +540,10 @@ class AppendWindow {
   ~AppendWindow() noexcept {
     if (scratchPtr_.size()) {
       try {
-        stream_.appendStringView(std::string_view(
-            reinterpret_cast<const char*>(scratchPtr_.get()),
-            scratchPtr_.size() * sizeof(T)));
+        stream_.appendStringView(
+            std::string_view(
+                reinterpret_cast<const char*>(scratchPtr_.get()),
+                scratchPtr_.size() * sizeof(T)));
       } catch (const std::exception& e) {
         // This is impossible because construction ensures there is space for
         // the bytes in the stream.

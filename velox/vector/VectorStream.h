@@ -128,12 +128,12 @@ class IterativeVectorSerializer {
 
   /// Defines the exported runtime stats.
   /// The number of bytes before compression.
-  static inline const std::string kCompressionInputBytes{
+  static constexpr std::string_view kCompressionInputBytes{
       "compressionInputBytes"};
   /// The number of bytes after compression.
-  static inline const std::string kCompressedBytes{"compressedBytes"};
+  static constexpr std::string_view kCompressedBytes{"compressedBytes"};
   /// The number of bytes that skip in-efficient compression.
-  static inline const std::string kCompressionSkippedBytes{
+  static constexpr std::string_view kCompressionSkippedBytes{
       "compressionSkippedBytes"};
 
   /// Returns serializer-dependent counters, e.g. about compression, data
@@ -190,7 +190,13 @@ class RowIterator {
 
   virtual bool hasNext() const = 0;
 
-  virtual std::unique_ptr<std::string> next() = 0;
+  virtual std::unique_ptr<std::string> nextRow() = 0;
+
+  /// Returns a batch of serialized rows as string views. Reads up to maxRows
+  /// from the source stream. The returned views are valid until the next call
+  /// to nextBatch or object destruction. This method provides better
+  /// performance for bulk operations compared to repeated nextRow() calls.
+  virtual std::vector<std::string_view> nextBatch(size_t maxRows) = 0;
 
  protected:
   ByteInputStream* const source_;
@@ -231,9 +237,12 @@ class VectorSerde {
     /// than this causes subsequent compression attempts to be skipped. The more
     /// times compression misses the target the less frequently it is tried.
     float minCompressionRatio{0.8};
+
+    /// Minimum page size to attempt compression.
+    int32_t minCompressionPageSizeBytes{0};
   };
 
-  Kind kind() const {
+  const std::string& kind() const {
     return kind_;
   }
 
@@ -346,9 +355,9 @@ class VectorSerde {
   }
 
  protected:
-  explicit VectorSerde(Kind kind) : kind_(kind) {}
+  explicit VectorSerde(std::string kind) : kind_(std::move(kind)) {}
 
-  const Kind kind_;
+  const std::string kind_;
 };
 
 std::ostream& operator<<(std::ostream& out, VectorSerde::Kind kind);
@@ -366,16 +375,16 @@ VectorSerde* getVectorSerde();
 /// Register/deregister a named vector serde. `serdeName` is a handle that
 /// allows users to register multiple serde formats.
 void registerNamedVectorSerde(
-    VectorSerde::Kind kind,
+    const std::string& kind,
     std::unique_ptr<VectorSerde> serdeToRegister);
-void deregisterNamedVectorSerde(VectorSerde::Kind kind);
+void deregisterNamedVectorSerde(const std::string& kind);
 
 /// Check if a named vector serde has been registered with `serdeName` as a
 /// handle.
-bool isRegisteredNamedVectorSerde(VectorSerde::Kind kind);
+bool isRegisteredNamedVectorSerde(const std::string& kind);
 
 /// Get the vector serde identified by `serdeName`. Throws if not found.
-VectorSerde* getNamedVectorSerde(VectorSerde::Kind kind);
+VectorSerde* getNamedVectorSerde(const std::string& kind);
 
 class VectorStreamGroup : public StreamArena {
  public:
@@ -500,6 +509,22 @@ folly::IOBuf rowVectorToIOBuf(
     vector_size_t rangeEnd,
     memory::MemoryPool& pool,
     VectorSerde* serde = nullptr);
+
+/// Convenience function to serialize a single rowVector into an IOBuf using
+/// BatchVectorSerializer, which preserves encodings of input vectors.
+folly::IOBuf rowVectorToIOBufBatch(
+    const RowVectorPtr& rowVector,
+    memory::MemoryPool& pool,
+    VectorSerde* serde = nullptr,
+    const VectorSerde::Options* options = nullptr);
+
+/// Same as above but serializes up until row `rangeEnd`.
+folly::IOBuf rowVectorToIOBufBatch(
+    const RowVectorPtr& rowVector,
+    vector_size_t rangeEnd,
+    memory::MemoryPool& pool,
+    VectorSerde* serde = nullptr,
+    const VectorSerde::Options* options = nullptr);
 
 /// Convenience function to deserialize an IOBuf into a rowVector. If `serde` is
 /// nullptr, use the default installed serializer.

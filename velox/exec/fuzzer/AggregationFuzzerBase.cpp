@@ -18,10 +18,10 @@
 #include <boost/random/uniform_int_distribution.hpp>
 #include "velox/common/base/Fs.h"
 #include "velox/common/base/VeloxException.h"
+#include "velox/common/testutil/TempDirectoryPath.h"
 #include "velox/connectors/hive/HiveConnectorSplit.h"
 #include "velox/dwio/dwrf/writer/Writer.h"
 #include "velox/exec/Spill.h"
-#include "velox/exec/tests/utils/TempDirectoryPath.h"
 #include "velox/expression/SignatureBinder.h"
 #include "velox/expression/fuzzer/ArgumentTypeFuzzer.h"
 #include "velox/vector/VectorSaver.h"
@@ -85,13 +85,15 @@ DEFINE_bool(
 
 namespace facebook::velox::exec::test {
 
+using namespace facebook::velox::common::testutil;
+
 int32_t AggregationFuzzerBase::randInt(int32_t min, int32_t max) {
   return boost::random::uniform_int_distribution<int32_t>(min, max)(rng_);
 }
 
 bool AggregationFuzzerBase::isSupportedType(const TypePtr& type) const {
   // Date / IntervalDayTime/ Unknown are not currently supported by DWRF.
-  if (type->isDate() || type->isIntervalDayTime() || type->isUnKnown()) {
+  if (type->isDate() || type->isIntervalDayTime() || type->isUnknown()) {
     return false;
   }
 
@@ -303,8 +305,9 @@ std::vector<RowVectorPtr> AggregationFuzzerBase::generateInputData(
       children.push_back(vectorFuzzer_.fuzz(inputType->childAt(j), size));
     }
 
-    input.push_back(std::make_shared<RowVector>(
-        pool_.get(), inputType, nullptr, size, std::move(children)));
+    input.push_back(
+        std::make_shared<RowVector>(
+            pool_.get(), inputType, nullptr, size, std::move(children)));
   }
 
   if (generator != nullptr) {
@@ -404,16 +407,18 @@ std::vector<RowVectorPtr> AggregationFuzzerBase::generateInputDataWithRowNumber(
         // values. This is done to introduce some repetition of key values for
         // windowing.
         auto baseVector = vectorFuzzer_.fuzz(types[i], numPartitions);
-        children.push_back(BaseVector::wrapInDictionary(
-            partitionNulls, partitionIndices, size, baseVector));
+        children.push_back(
+            BaseVector::wrapInDictionary(
+                partitionNulls, partitionIndices, size, baseVector));
       } else if (
           windowFrameBoundsSet.find(names[i]) != windowFrameBoundsSet.end()) {
         // Frame bound columns cannot have NULLs.
         children.push_back(vectorFuzzer_.fuzzNotNull(types[i], size));
       } else if (sortingKeySet.find(names[i]) != sortingKeySet.end()) {
         auto baseVector = vectorFuzzer_.fuzz(types[i], numPeerGroups);
-        children.push_back(BaseVector::wrapInDictionary(
-            sortingNulls, sortingIndices, size, baseVector));
+        children.push_back(
+            BaseVector::wrapInDictionary(
+                sortingNulls, sortingIndices, size, baseVector));
       } else {
         children.push_back(vectorFuzzer_.fuzz(types[i], size));
       }
@@ -495,7 +500,7 @@ velox::fuzzer::ResultOrError AggregationFuzzerBase::execute(
 
     int32_t spillPct{0};
     if (injectSpill) {
-      spillDirectory = exec::test::TempDirectoryPath::create();
+      spillDirectory = TempDirectoryPath::create();
       builder.spillDirectory(spillDirectory->getPath())
           .config(core::QueryConfig::kSpillEnabled, "true")
           .config(core::QueryConfig::kAggregationSpillEnabled, "true")

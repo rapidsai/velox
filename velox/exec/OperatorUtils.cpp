@@ -14,8 +14,10 @@
  * limitations under the License.
  */
 #include "velox/exec/OperatorUtils.h"
+#include "velox/exec/PartitionedOutput.h"
 #include "velox/exec/VectorHasher.h"
 #include "velox/expression/EvalCtx.h"
+#include "velox/serializers/PrestoSerializer.h"
 #include "velox/vector/ConstantVector.h"
 #include "velox/vector/FlatVector.h"
 #include "velox/vector/LazyVector.h"
@@ -101,7 +103,11 @@ void gatherCopy(
     const std::vector<const RowVector*>& sources,
     const std::vector<vector_size_t>& sourceIndices,
     column_index_t sourceChannel) {
-  if (target->isScalar()) {
+  const bool flattenSources =
+      std::all_of(sources.begin(), sources.end(), [](const auto& source) {
+        return source->isFlatEncoding();
+      });
+  if (target->isScalar() && flattenSources) {
     VELOX_DYNAMIC_SCALAR_TYPE_DISPATCH(
         scalarGatherCopy,
         target->type()->kind(),
@@ -124,7 +130,14 @@ bool shouldAggregateRuntimeMetric(const std::string& name) {
       "dataSourceAddSplitWallNanos",
       "dataSourceLazyWallNanos",
       "queuedWallNanos",
-      "flushTimes"};
+      "flushTimes",
+      "driverCpuTimeNanos",
+      "ioWaitWallNanos",
+      "storageReadWallNanos",
+      "ssdCacheReadWallNanos",
+      "cacheWaitWallNanos",
+      "coalescedSsdLoadWallNanos",
+      "coalescedStorageLoadWallNanos"};
   if (metricNames.contains(name)) {
     return true;
   }
@@ -457,21 +470,21 @@ std::string makeOperatorSpillPath(
 }
 
 void setOperatorRuntimeStats(
-    const std::string& name,
+    std::string_view name,
     const RuntimeCounter& value,
     std::unordered_map<std::string, RuntimeMetric>& stats) {
-  stats[name] = RuntimeMetric(value.unit);
-  stats[name].addValue(value.value);
+  auto [it, _] =
+      stats.insert_or_assign(std::string(name), RuntimeMetric(value.unit));
+  it->second.addValue(value.value);
 }
 
 void addOperatorRuntimeStats(
-    const std::string& name,
+    std::string_view name,
     const RuntimeCounter& value,
     std::unordered_map<std::string, RuntimeMetric>& stats) {
-  auto statIt = stats.find(name);
-  if (UNLIKELY(statIt == stats.end())) {
-    statIt = stats.insert(std::pair(name, RuntimeMetric(value.unit))).first;
-  } else {
+  auto [statIt, inserted] =
+      stats.emplace(std::string(name), RuntimeMetric(value.unit));
+  if (!inserted) {
     VELOX_CHECK_EQ(statIt->second.unit, value.unit);
   }
   statIt->second.addValue(value.value);
@@ -569,4 +582,21 @@ std::unique_ptr<Operator> BlockedOperatorFactory::toOperator(
   }
   return nullptr;
 }
+
+std::unique_ptr<VectorSerde::Options> getVectorSerdeOptions(
+    common::CompressionKind compressionKind,
+    const std::string& kind,
+    std::optional<float> minCompressionRatio,
+    int32_t minCompressionPageSizeBytes) {
+  std::unique_ptr<VectorSerde::Options> options = kind == "Presto"
+      ? std::make_unique<serializer::presto::PrestoVectorSerde::PrestoOptions>()
+      : std::make_unique<VectorSerde::Options>();
+  options->compressionKind = compressionKind;
+  if (minCompressionRatio.has_value()) {
+    options->minCompressionRatio = minCompressionRatio.value();
+  }
+  options->minCompressionPageSizeBytes = minCompressionPageSizeBytes;
+  return options;
+}
+
 } // namespace facebook::velox::exec

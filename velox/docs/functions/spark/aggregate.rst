@@ -10,16 +10,24 @@ General Aggregate Functions
 .. spark:function:: avg(x) -> double|decimal
 
     Returns the average (arithmetic mean) of all non-null input values.
-    When x is of type DECIMAL, the result type is DECIMAL,
-    and the intermediate results are varbinarys or (sum, count) pairs represented as row(decimal, bigint).
+    When ``x`` is of type DECIMAL(p, s), the result type is DECIMAL(p + 4, s + 4),
+    and the intermediate results are (sum, count) pairs represented as ROW(DECIMAL(p + 10, s), BIGINT).
+    The current implementation for DECIMAL matches Spark avg's default behavior with spark.sql.decimalOperations.allowPrecisionLoss=true.
     For all other input types, the result type is DOUBLE,
-    and the intermediate results are (sum, count) pairs represented as row(double, bigint).
-    When all inputs are nulls, the intermediate result is row(0, 0),
+    and the intermediate results are (sum, count) pairs represented as ROW(DOUBLE, BIGINT).
+    When all inputs are nulls, the intermediate result is ROW(0, 0),
     and the final result is null.
 
 .. spark:function:: bit_xor(x) -> bigint
 
     Returns the bitwise XOR of all non-null input values, or null if none.
+
+.. spark:function:: bitmap_construct_agg(position) -> varbinary
+
+    Builds a fixed-size 4096-byte (32768-bit) bitmap by setting bits at the
+    specified positions. Input positions must be BIGINT values in [0, 32767].
+    Null inputs are ignored. Returns an all-zeros bitmap for empty or all-null
+    input (this is a non-nullable aggregate).
 
 .. spark:function:: bloom_filter_agg(hash, estimatedNumItems, numBits) -> varbinary
 
@@ -55,13 +63,23 @@ General Aggregate Functions
 
 .. spark:function:: collect_list(x) -> array<[same as x]>
 
-    Returns an array created from the input ``x`` elements. Ignores null
-    inputs, and returns an empty array when all inputs are null.
+    Returns an array created from the input ``x`` elements. By default,
+    ignores null inputs and returns an empty array when all inputs are null.
 
-.. spark:function:: collect_set(x) -> array<[same as x]>
+    When the configuration property ``spark.collect_list.ignore_nulls`` is set
+    to ``false``, null values are included in the output array (RESPECT NULLS
+    behavior). In this mode, an all-null input produces an array of nulls
+    instead of an empty array.
 
-    Returns an array consisting of all unique values from the input ``x`` elements excluding NULLs.
-    NaN values are considered distinct. Returns empty array if input is empty or all NULL.
+.. spark:function:: collect_set(x [, ignoreNulls]) -> array<[same as x]>
+
+    Returns an array consisting of all unique values from the input ``x`` elements.
+    When ``ignoreNulls`` is ``true``, null inputs are excluded and an all-null
+    input returns an empty array. NaN values are considered distinct.
+
+    When ``ignoreNulls`` is set to ``false`` (RESPECT NULLS), null values are
+    included in the result set. In this mode, an all-null input produces an
+    array containing a single null instead of an empty array.
 
     Example::
 

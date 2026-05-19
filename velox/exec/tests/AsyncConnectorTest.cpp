@@ -13,8 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include <folly/experimental/FunctionScheduler.h>
+#include <folly/executors/FunctionScheduler.h>
 #include "velox/connectors/Connector.h"
+#include "velox/connectors/ConnectorRegistry.h"
 #include "velox/exec/PlanNodeStats.h"
 #include "velox/exec/tests/utils/OperatorTestBase.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
@@ -60,7 +61,8 @@ class TestSplit : public connector::ConnectorSplit {
       return ContinueFuture::makeEmpty();
     }
 
-    auto [promise, future] = makeVeloxContinuePromiseContract();
+    auto [promise, future] =
+        makeVeloxContinuePromiseContract("TestSplit::touch");
 
     promise_ = std::move(promise);
     scheduler_.addFunction(
@@ -126,7 +128,7 @@ class TestDataSource : public connector::DataSource {
     return 0;
   }
 
-  std::unordered_map<std::string, RuntimeCounter> runtimeStats() override {
+  std::unordered_map<std::string, RuntimeMetric> getRuntimeStats() override {
     return {};
   }
 
@@ -186,11 +188,12 @@ class AsyncConnectorTest : public OperatorTestBase {
             std::unordered_map<std::string, std::string>()),
         nullptr,
         nullptr);
-    connector::registerConnector(testConnector);
+    connector::ConnectorRegistry::global().insert(
+        testConnector->connectorId(), testConnector);
   }
 
   void TearDown() override {
-    connector::unregisterConnector(kTestConnectorId);
+    connector::ConnectorRegistry::global().erase(kTestConnectorId);
     OperatorTestBase::TearDown();
   }
 };

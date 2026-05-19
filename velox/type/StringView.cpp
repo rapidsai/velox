@@ -15,11 +15,14 @@
  */
 
 #include "velox/type/StringView.h"
+
+#include <folly/dynamic.h>
+
 #include "velox/common/base/SimdUtil.h"
 
 namespace facebook::velox {
-
 namespace {
+
 int32_t linearSearchSimple(
     StringView key,
     const StringView* strings,
@@ -134,4 +137,9 @@ int32_t StringView::linearSearch(
   return linearSearchSimple(key, strings, indices, numStrings);
 #endif
 }
+
+StringView::operator folly::dynamic() const {
+  return folly::dynamic(folly::StringPiece(data(), size()));
+}
+
 } // namespace facebook::velox

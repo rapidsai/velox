@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include "velox/common/io/IoStatistics.h"
 #include "velox/dwio/common/SeekableInputStream.h"
 #include "velox/dwio/common/compression/Compression.h"
 
@@ -30,13 +31,15 @@ class PagedInputStream : public dwio::common::SeekableInputStream {
       const dwio::common::encryption::Decrypter* decrypter,
       const std::string& streamDebugInfo,
       bool useRawDecompression = false,
-      size_t compressedLength = 0)
+      size_t compressedLength = 0,
+      io::IoCounter* decompressCounter = nullptr)
       : input_(std::move(inStream)),
         pool_(memPool),
         inputBuffer_(pool_),
         decompressor_{std::move(decompressor)},
         decrypter_{decrypter},
-        streamDebugInfo_{streamDebugInfo} {
+        streamDebugInfo_{streamDebugInfo},
+        decompressCounter_{decompressCounter} {
     DWIO_ENSURE(
         decompressor_ || decrypter_,
         "one of decompressor or decryptor is required");
@@ -56,7 +59,7 @@ class PagedInputStream : public dwio::common::SeekableInputStream {
   // NOTE: This always returns true.
   bool SkipInt64(int64_t count) override;
 
-  google::protobuf::int64 ByteCount() const override {
+  int64_t ByteCount() const override {
     return bytesReturned_ + pendingSkip_;
   }
 
@@ -87,13 +90,15 @@ class PagedInputStream : public dwio::common::SeekableInputStream {
       memory::MemoryPool& memPool,
       const std::string& streamDebugInfo,
       bool useRawDecompression = false,
-      size_t compressedLength = 0)
+      size_t compressedLength = 0,
+      io::IoCounter* decompressCounter = nullptr)
       : input_(std::move(inStream)),
         pool_(memPool),
         inputBuffer_(pool_),
         decompressor_{nullptr},
         decrypter_{nullptr},
-        streamDebugInfo_{streamDebugInfo} {
+        streamDebugInfo_{streamDebugInfo},
+        decompressCounter_{decompressCounter} {
     DWIO_ENSURE(
         !useRawDecompression || compressedLength > 0,
         "For raw decompression, compressedLength should be greater than zero");
@@ -182,6 +187,11 @@ class PagedInputStream : public dwio::common::SeekableInputStream {
 
   // Stream Debug Info
   const std::string streamDebugInfo_;
+
+ protected:
+  // Owned by ColumnReaderStatistics. Valid for the lifetime of this stream
+  // because ColumnReaderStatistics outlives all streams within a DwrfRowReader.
+  io::IoCounter* const decompressCounter_{nullptr};
 };
 
 } // namespace facebook::velox::dwio::common::compression

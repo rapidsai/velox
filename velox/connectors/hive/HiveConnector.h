@@ -34,6 +34,8 @@ class HiveConnector : public Connector {
       std::shared_ptr<const config::ConfigBase> config,
       folly::Executor* executor);
 
+  const config::ConfigProvider* configProvider() const override;
+
   bool canAddDynamicFilter() const override {
     return true;
   }
@@ -44,21 +46,28 @@ class HiveConnector : public Connector {
       const connector::ColumnHandleMap& columnHandles,
       ConnectorQueryCtx* connectorQueryCtx) override;
 
-#ifdef VELOX_ENABLE_BACKWARD_COMPATIBILITY
-  bool supportsSplitPreload() override {
-    return true;
-  }
-#else
   bool supportsSplitPreload() const override {
     return true;
   }
-#endif
+
+  bool supportsIndexLookup() const override {
+    return true;
+  }
 
   std::unique_ptr<DataSink> createDataSink(
       RowTypePtr inputType,
       ConnectorInsertTableHandlePtr connectorInsertTableHandle,
       ConnectorQueryCtx* connectorQueryCtx,
       CommitStrategy commitStrategy) override;
+
+  std::shared_ptr<IndexSource> createIndexSource(
+      const RowTypePtr& inputType,
+      const std::vector<std::shared_ptr<core::IndexLookupCondition>>&
+          joinConditions,
+      const RowTypePtr& outputType,
+      const ConnectorTableHandlePtr& tableHandle,
+      const ColumnHandleMap& columnHandles,
+      ConnectorQueryCtx* connectorQueryCtx) override;
 
   folly::Executor* ioExecutor() const override {
     return ioExecutor_;
@@ -95,7 +104,7 @@ class HiveConnectorFactory : public ConnectorFactory {
       const std::string& id,
       std::shared_ptr<const config::ConfigBase> config,
       folly::Executor* ioExecutor = nullptr,
-      folly::Executor* cpuExecutor = nullptr) override {
+      [[maybe_unused]] folly::Executor* cpuExecutor = nullptr) override {
     return std::make_shared<HiveConnector>(id, config, ioExecutor);
   }
 };

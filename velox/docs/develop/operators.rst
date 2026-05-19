@@ -56,10 +56,12 @@ ValuesNode                  Values                                           Y
 LocalMergeNode              LocalMerge
 LocalPartitionNode          LocalPartition and LocalExchange
 EnforceSingleRowNode        EnforceSingleRow
+EnforceDistinctNode         EnforceDistinct or StreamingEnforceDistinct
 AssignUniqueIdNode          AssignUniqueId
 WindowNode                  Window
 RowNumberNode               RowNumber
 TopNRowNumberNode           TopNRowNumber
+MixedUnionNode              MixedUnion
 ==========================  ==============================================   ===========================
 
 Plan Nodes
@@ -547,6 +549,10 @@ and emitting results.
      - Join type: inner, left, right, full, left semi filter, left semi project, right semi filter, right semi project, anti. You can read about different join types in this `blog post <https://dataschool.com/how-to-teach-people-sql/sql-join-types-explained-visually/>`_.
    * - nullAware
      - Applies to anti and semi project joins only. Indicates whether the join semantic is IN (nullAware = true) or EXISTS (nullAware = false).
+   * - nullAsValue
+     - Optional. When true, join keys use IS NOT DISTINCT FROM semantics where NULL equals NULL. Used to implement SQL set operations (EXCEPT, INTERSECT, EXCEPT ALL, INTERSECT ALL). Mutually exclusive with nullAware.
+   * - useHashTableCache
+     - Optional. Used only by Presto-on-Spark. When true, enables caching of the hash table built for broadcast joins so that subsequent tasks can reuse it.
    * - leftKeys
      - Columns from the left hand side input that are part of the equality condition. At least one must be specified.
    * - rightKeys
@@ -850,6 +856,35 @@ values set to null. If input contains more than one row raises an exception.
 
 Used for queries with non-correlated sub-queries.
 
+EnforceDistinctNode
+~~~~~~~~~~~~~~~~~~~
+
+The EnforceDistinct operator ensures that input rows have unique values for
+specified key columns. It passes through all input rows unchanged, but throws
+an exception with a custom error message if any duplicate key values are
+detected. This is useful for validating uniqueness constraints at runtime,
+such as ensuring a correlated scalar subquery returns at most one row per group.
+
+When preGroupedKeys equals distinctKeys (i.e., input is clustered on the
+distinct keys), the streaming implementation is used which requires only O(1)
+memory. Otherwise, the hash-based implementation is used which requires O(n)
+memory to track all unique key combinations seen so far.
+
+.. list-table::
+   :widths: 10 30
+   :align: left
+   :header-rows: 1
+
+   * - Property
+     - Description
+   * - distinctKeys
+     - List of columns that must have unique values.
+   * - preGroupedKeys
+     - Optional subset of distinctKeys that input is already clustered on. When
+       equal to distinctKeys, uses streaming enforcement with O(1) memory.
+   * - errorMessage
+     - Error message to include in the exception when duplicates are found.
+
 AssignUniqueIdNode
 ~~~~~~~~~~~~~~~~~~
 
@@ -947,7 +982,7 @@ results available before seeing all input.
 TopNRowNumberNode
 ~~~~~~~~~~~~~~~~~
 
-An optimized version of a WindowNode with a single row_number function and a
+An optimized version of a WindowNode with a single row_number, rank or dense_rank function and a
 limit over sorted partitions.
 
 Partitions the input using specified partitioning keys and maintains up to
@@ -955,11 +990,11 @@ a 'limit' number of top rows for each partition. After receiving all input,
 assigns row numbers within each partition starting from 1.
 
 This operator accumulates state: a hash table mapping partition keys to a list
-of top 'limit' rows within that partition.  Returning the row numbers as
+of top 'limit' rows within that partition.  Returning the row number or rank as
 a column in the output is optional. This operator supports spilling as well.
 
 This operator is logically equivalent to a WindowNode followed by
-FilterNode(row_number <= limit), but it uses less memory and CPU.
+FilterNode(rank/row_number <= limit), but it uses less memory and CPU.
 
 .. list-table::
   :widths: 10 30
@@ -985,6 +1020,11 @@ MarkDistinctNode
 The MarkDistinct operator is used to produce aggregate mask columns for aggregations over distinct values, e.g. agg(DISTINCT a).
 Mask is a boolean column set to true for a subset of input rows that collectively represent a set of unique values of 'distinctKeys'.
 
+This operator supports spilling. The spill mechanism follows the same pattern as RowNumber: when memory pressure
+triggers spilling, the hash table contents and future input are partitioned and written to disk. During restore,
+each partition's hash table is rebuilt from the spilled data, preserving knowledge of which keys were already seen.
+Disabled by default; enable with `mark_distinct_spill_enabled` configuration property.
+
 .. list-table::
   :widths: 10 30
   :align: left
@@ -996,6 +1036,35 @@ Mask is a boolean column set to true for a subset of input rows that collectivel
     - Name of the output mask column.
   * - distinctKeys
     - Names of grouping keys.
+
+MixedUnionNode
+~~~~~~~~~~~~~~
+
+The mixed union operation combines data from multiple input sources concurrently,
+producing a single output stream that interleaves rows from all sources. It does
+not enforce a sort order but does attempt to mix input sources according to
+specified ratios; after exhaustion it continues with remaining sources.
+
+All sources must produce the same output schema.
+
+MixedUnion runs single-threaded. Each source runs on its own pipeline and feeds
+data into the MixedUnion operator via a merge source queue.
+
+This operator performs a UNION ALL. It does not deduplicate rows.
+
+.. list-table::
+  :widths: 10 30
+  :align: left
+  :header-rows: 1
+
+  * - Property
+    - Description
+  * - sources
+    - Two or more input plan nodes. All sources must have the same output type.
+  * - batchSizesPerSource
+    - Optional list of per-source batch sizes that controls how many rows are
+      taken from each source when mixing. If not specified or set to zero for a
+      source, a default batch size is used.
 
 Examples
 --------
@@ -1059,3 +1128,41 @@ ALL.
 .. image:: images/local-exchange.png
     :width: 400
     :align: center
+
+GPU Operators (cuDF)
+--------------------
+
+When cuDF is enabled, CPU operators are replaced with GPU equivalents at
+pipeline construction time via the ``OperatorAdapterRegistry``. For example,
+``FilterProject`` becomes ``CudfFilterProject``, ``Aggregation`` becomes
+``CudfGroupby`` or ``CudfReduce``, and ``HashJoin`` becomes
+``CudfHashJoinBuild``/``CudfHashJoinProbe``.
+
+Adapter operators are automatically inserted at GPU/CPU boundaries:
+
+* ``CudfFromVelox`` — inserted before a GPU operator when the preceding
+  operator produces CPU data (host-to-device conversion).
+* ``CudfToVelox`` — inserted after a GPU operator when the next operator
+  or the pipeline output requires CPU data (device-to-host conversion).
+
+Adapter operators use synthetic planNodeIds (e.g. ``4-to-velox``) at runtime,
+but redirect their stats to the parent plan node via ``setStatSplitter``.
+This means they appear in ``printPlanWithStats`` output as operator-type
+breakdown lines under their parent node (the same mechanism used by
+``HashBuild``/``HashProbe`` under ``HashJoinNode``).
+
+All cuDF operators extend ``CudfOperatorBase``, which provides:
+
+* Template method pattern (``doAddInput``/``doGetOutput``/``doClose``)
+* NVTX profiling ranges
+
+GPU operators are identified by their ``Cudf`` prefix in operator type names
+(e.g. ``CudfFilterProject``, ``CudfLocalPartition``, ``CudfReduceFINAL``).
+Operators without this prefix (e.g. ``LocalExchange``) run on CPU.
+``TableScan`` uses the cuDF GPU parquet reader via the connector layer but
+is not itself a ``CudfOperatorBase`` subclass.
+
+In stats output, "Cpu time" and "Wall time" for GPU operators reflect the
+host-side duration of ``addInput``/``getOutput`` calls, which includes
+enqueuing GPU work and synchronizing. These are not GPU hardware execution
+times.

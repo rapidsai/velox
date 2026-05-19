@@ -66,7 +66,6 @@ class RowVector : public BaseVector {
             rowType->nameOf(i),
             i,
             type->childAt(i)->toString());
-        BaseVector::inMemoryBytes_ += child->inMemoryBytes();
       }
     }
     updateContainsLazyNotLoaded();
@@ -184,15 +183,7 @@ class RowVector : public BaseVector {
         nullCount_);
   }
 
-  uint64_t retainedSize() const override {
-    auto size = BaseVector::retainedSize();
-    for (auto& child : children_) {
-      if (child) {
-        size += child->retainedSize();
-      }
-    }
-    return size;
-  }
+  void transferOrCopyTo(velox::memory::MemoryPool* pool) override;
 
   uint64_t estimateFlatSize() const override;
 
@@ -293,6 +284,16 @@ class RowVector : public BaseVector {
       vector_size_t count,
       vector_size_t childSize);
 
+  uint64_t retainedSizeImpl(uint64_t& totalStringBufferSize) const override {
+    auto size = BaseVector::retainedSizeImpl();
+    for (auto& child : children_) {
+      if (child) {
+        size += child->retainedSize(totalStringBufferSize);
+      }
+    }
+    return size;
+  }
+
   const size_t childrenSize_;
   mutable std::vector<VectorPtr> children_;
 
@@ -371,6 +372,8 @@ struct ArrayVectorBase : BaseVector {
     offsets_->asMutable<vector_size_t>()[i] = offset;
     sizes_->asMutable<vector_size_t>()[i] = size;
   }
+
+  void transferOrCopyTo(velox::memory::MemoryPool* pool) override;
 
   /// Check if there is any overlapping [offset, size] ranges.
   bool hasOverlappingRanges() const {
@@ -464,10 +467,11 @@ class ArrayVector : public ArrayVectorBase {
             nullCount,
             std::move(offsets),
             std::move(lengths)),
-        elements_(BaseVector::getOrCreateEmpty(
-            std::move(elements),
-            type->childAt(0),
-            pool)) {
+        elements_(
+            BaseVector::getOrCreateEmpty(
+                std::move(elements),
+                type->childAt(0),
+                pool)) {
     VELOX_CHECK_EQ(type->kind(), TypeKind::ARRAY);
     VELOX_CHECK(
         elements_->type()->kindEquals(type->childAt(0)),
@@ -521,10 +525,7 @@ class ArrayVector : public ArrayVectorBase {
         nullCount_);
   }
 
-  uint64_t retainedSize() const override {
-    return BaseVector::retainedSize() + offsets_->capacity() +
-        sizes_->capacity() + elements_->retainedSize();
-  }
+  void transferOrCopyTo(velox::memory::MemoryPool* pool) override;
 
   uint64_t estimateFlatSize() const override;
 
@@ -552,6 +553,11 @@ class ArrayVector : public ArrayVectorBase {
   void validate(const VectorValidateOptions& options) const override;
 
  private:
+  uint64_t retainedSizeImpl(uint64_t& totalStringBufferSize) const override {
+    return BaseVector::retainedSizeImpl() + offsets_->capacity() +
+        sizes_->capacity() + elements_->retainedSize(totalStringBufferSize);
+  }
+
   VectorPtr elements_;
 };
 
@@ -580,14 +586,16 @@ class MapVector : public ArrayVectorBase {
             nullCount,
             std::move(offsets),
             std::move(sizes)),
-        keys_(BaseVector::getOrCreateEmpty(
-            std::move(keys),
-            type->childAt(0),
-            pool)),
-        values_(BaseVector::getOrCreateEmpty(
-            std::move(values),
-            type->childAt(1),
-            pool)),
+        keys_(
+            BaseVector::getOrCreateEmpty(
+                std::move(keys),
+                type->childAt(0),
+                pool)),
+        values_(
+            BaseVector::getOrCreateEmpty(
+                std::move(values),
+                type->childAt(1),
+                pool)),
         sortedKeys_{sortedKeys} {
     VELOX_CHECK_EQ(type->kind(), TypeKind::MAP);
 
@@ -666,10 +674,7 @@ class MapVector : public ArrayVectorBase {
         sortedKeys_);
   }
 
-  uint64_t retainedSize() const override {
-    return BaseVector::retainedSize() + offsets_->capacity() +
-        sizes_->capacity() + keys_->retainedSize() + values_->retainedSize();
-  }
+  void transferOrCopyTo(velox::memory::MemoryPool* pool) override;
 
   uint64_t estimateFlatSize() const override;
 
@@ -740,6 +745,12 @@ class MapVector : public ArrayVectorBase {
   template <TypeKind kKeyTypeKind>
   std::shared_ptr<MapVector> updateImpl(
       const folly::Range<DecodedVector*>& others) const;
+
+  uint64_t retainedSizeImpl(uint64_t& totalStringBufferSize) const override {
+    return BaseVector::retainedSizeImpl() + offsets_->capacity() +
+        sizes_->capacity() + keys_->retainedSize(totalStringBufferSize) +
+        values_->retainedSize(totalStringBufferSize);
+  }
 
   VectorPtr keys_;
   VectorPtr values_;

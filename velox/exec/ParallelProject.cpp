@@ -17,6 +17,7 @@
 #include "velox/exec/ParallelProject.h"
 #include "velox/common/base/AsyncSource.h"
 #include "velox/exec/Operator.h"
+#include "velox/exec/OperatorType.h"
 #include "velox/exec/Task.h"
 
 namespace facebook::velox::exec {
@@ -30,7 +31,7 @@ ParallelProject::ParallelProject(
           node->outputType(),
           operatorId,
           node->id(),
-          "ParallelProject"),
+          OperatorType::kParallelProject),
       node_(node) {}
 
 namespace {
@@ -139,8 +140,9 @@ RowVectorPtr ParallelProject::getOutput() {
   std::vector<VectorPtr> results(outputType_->size());
 
   for (auto i = 0; i < work_.size(); ++i) {
-    pending.push_back(std::make_shared<AsyncSource<WorkResult>>(
-        [i, &results, this]() { return doWork(i, results); }));
+    pending.push_back(
+        std::make_shared<AsyncSource<WorkResult>>(
+            [i, &results, this]() { return doWork(i, results); }));
     auto item = pending.back();
     operatorCtx_->task()->queryCtx()->executor()->add(
         [item]() { item->prepare(); });

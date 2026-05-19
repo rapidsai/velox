@@ -25,7 +25,7 @@ std::unique_ptr<dwio::common::FormatData> ParquetParams::toFormatData(
     const std::shared_ptr<const dwio::common::TypeWithId>& type,
     const common::ScanSpec& /*scanSpec*/) {
   return std::make_unique<ParquetData>(
-      type, metaData_, pool(), sessionTimezone_);
+      type, metaData_, pool(), runtimeStatistics(), sessionTimezone_);
 }
 
 void ParquetData::filterRowGroups(
@@ -128,6 +128,7 @@ dwio::common::PositionProvider ParquetData::seekToRowGroup(int64_t index) {
       type_,
       metadata.compression(),
       metadata.totalCompressedSize(),
+      stats_,
       sessionTimezone_);
   return dwio::common::PositionProvider(empty);
 }
@@ -137,7 +138,8 @@ std::pair<int64_t, int64_t> ParquetData::getRowGroupRegion(
   auto rowGroup = fileMetaDataPtr_.rowGroup(index);
 
   VELOX_CHECK_GT(rowGroup.numColumns(), 0);
-  auto fileOffset = rowGroup.hasFileOffset() ? rowGroup.fileOffset()
+  auto fileOffset = (rowGroup.hasFileOffset() && rowGroup.fileOffset() != 0)
+      ? rowGroup.fileOffset()
       : rowGroup.columnChunk(0).hasDictionaryPageOffset()
       ? rowGroup.columnChunk(0).dictionaryPageOffset()
       : rowGroup.columnChunk(0).dataPageOffset();

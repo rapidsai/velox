@@ -16,6 +16,8 @@
 
 #include "velox/core/ITypedExpr.h"
 
+#include "velox/common/EnumDefine.h"
+
 namespace facebook::velox::core {
 
 namespace {
@@ -35,4 +37,14 @@ const auto& exprKindNames() {
 } // namespace
 
 VELOX_DEFINE_ENUM_NAME(ExprKind, exprKindNames);
+
+size_t ITypedExprHasher::operator()(const ITypedExpr* expr) const {
+  return expr->hash();
+}
+
+bool ITypedExprComparer::operator()(
+    const ITypedExpr* lhs,
+    const ITypedExpr* rhs) const {
+  return *lhs == *rhs;
+}
 } // namespace facebook::velox::core

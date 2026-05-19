@@ -150,7 +150,7 @@ TEST_F(CountAggregationTest, mask) {
               "SELECT k, count(c) FILTER (where m) FROM tmp GROUP BY k");
   auto taskStats = toPlanStats(task->taskStats());
   auto partialStats = taskStats.at(partialNodeId).customStats;
-  EXPECT_LT(0, partialStats.at("abandonedPartialAggregation").count);
+  EXPECT_LT(0, partialStats.at("abandonedPartialAggregationRows").sum);
 }
 
 TEST_F(CountAggregationTest, distinct) {
@@ -213,8 +213,9 @@ TEST_F(CountAggregationTest, distinct) {
                         {"c0"}, {fmt::format("count(distinct {})", input)})
                     .planNode();
     AssertQueryBuilder(plan, duckDbQueryRunner_)
-        .assertResults(fmt::format(
-            "SELECT c0, count(distinct {}) FROM tmp GROUP BY 1", input));
+        .assertResults(
+            fmt::format(
+                "SELECT c0, count(distinct {}) FROM tmp GROUP BY 1", input));
   };
 
   testGroupBy("c1");

@@ -30,12 +30,12 @@
 #include <fmt/format.h>
 #include <folly/Indestructible.h>
 #include <folly/String.h>
-#include <folly/experimental/symbolizer/StackTrace.h>
+#include <folly/debugging/symbolizer/StackTrace.h>
 
 #include "velox/common/process/ProcessBase.h"
 
 #ifdef __linux__
-#include <folly/experimental/symbolizer/Symbolizer.h> // @manual
+#include <folly/debugging/symbolizer/Symbolizer.h> // @manual
 #include <folly/fibers/FiberManager.h> // @manual
 #endif
 
@@ -96,7 +96,7 @@ const std::vector<std::string>& StackTrace::toStrVector() const {
     btVector_.reserve(btPtrs_.size());
     for (auto ptr : btPtrs_) {
       auto framename = translateFrame(ptr);
-      if (folly::StringPiece(framename).startsWith(*myname)) {
+      if (framename.starts_with(*myname)) {
         continue; // ignore frames in the StackTrace class
       }
       btVector_.push_back(fmt::format("# {:<2d} {}", frame++, framename));

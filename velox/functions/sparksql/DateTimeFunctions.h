@@ -435,6 +435,7 @@ struct GetTimestampFunction {
       } else {
         invalidFormat_ = true;
       }
+      isConstantTimeFormat_ = true;
     }
   }
 
@@ -780,6 +781,51 @@ struct WeekdayFunction {
 };
 
 template <typename T>
+struct DayNameFunction {
+  VELOX_DEFINE_FUNCTION_TYPES(T);
+
+  static constexpr std::string_view kDayNames[] =
+      {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+
+  FOLLY_ALWAYS_INLINE void call(
+      out_type<Varchar>& result,
+      const arg_type<Date>& date) {
+    // Based on the fact that the Unix epoch is Thursday.
+    auto dayOfWeek = (4 + date) % 7;
+    if (dayOfWeek < 0) {
+      dayOfWeek += 7;
+    }
+    result.append(StringView(kDayNames[dayOfWeek]));
+  }
+};
+
+template <typename T>
+struct MonthNameFunction {
+  VELOX_DEFINE_FUNCTION_TYPES(T);
+
+  static constexpr std::string_view kMonthNames[] = {
+      "Jan",
+      "Feb",
+      "Mar",
+      "Apr",
+      "May",
+      "Jun",
+      "Jul",
+      "Aug",
+      "Sep",
+      "Oct",
+      "Nov",
+      "Dec"};
+
+  FOLLY_ALWAYS_INLINE void call(
+      out_type<Varchar>& result,
+      const arg_type<Date>& date) {
+    const auto tm = getDateTime(date);
+    result.append(kMonthNames[tm.tm_mon]);
+  }
+};
+
+template <typename T>
 struct NextDayFunction {
   VELOX_DEFINE_FUNCTION_TYPES(T);
 
@@ -960,37 +1006,40 @@ struct SecondsToTimestampFunction {
   VELOX_DEFINE_FUNCTION_TYPES(TExec);
 
   template <typename T>
-  FOLLY_ALWAYS_INLINE void call(out_type<Timestamp>& result, T seconds) {
+  FOLLY_ALWAYS_INLINE bool call(out_type<Timestamp>& result, T seconds) {
     if constexpr (std::is_integral_v<T>) {
       result = Timestamp(static_cast<int64_t>(seconds), 0);
+      return true;
     } else {
+      if (FOLLY_UNLIKELY(!std::isfinite(seconds))) {
+        return false;
+      }
+
       // Cast to double and check bounds to prevent ensuing overflow.
       const double secondsD = static_cast<double>(seconds);
 
       if (secondsD >= kMaxSecondsD) {
         result = Timestamp(kMaxSeconds, kMaxNanoseconds);
-        return;
-      }
-      if (secondsD <= kMinSecondsD) {
+      } else if (secondsD <= kMinSecondsD) {
         result = Timestamp(kMinSeconds, kMinNanoseconds);
-        return;
+      } else {
+        // Scale to microseconds and truncate toward zero.
+        const double microsD = secondsD * Timestamp::kMicrosecondsInSecond;
+        const int64_t micros = static_cast<int64_t>(microsD);
+
+        // Split into whole seconds and remaining microseconds.
+        int64_t wholeSeconds = micros / Timestamp::kMicrosecondsInSecond;
+        int64_t remainingMicros = micros % Timestamp::kMicrosecondsInSecond;
+        if (remainingMicros < 0) {
+          wholeSeconds -= 1;
+          remainingMicros += Timestamp::kMicrosecondsInSecond;
+        }
+
+        const int64_t nano =
+            remainingMicros * Timestamp::kNanosecondsInMicrosecond;
+        result = Timestamp(wholeSeconds, nano);
       }
-
-      // Scale to microseconds and truncate toward zero.
-      const double microsD = secondsD * Timestamp::kMicrosecondsInSecond;
-      const int64_t micros = static_cast<int64_t>(microsD);
-
-      // Split into whole seconds and remaining microseconds.
-      int64_t wholeSeconds = micros / util::kMicrosPerSec;
-      int64_t remainingMicros = micros % util::kMicrosPerSec;
-      if (remainingMicros < 0) {
-        wholeSeconds -= 1;
-        remainingMicros += util::kMicrosPerSec;
-      }
-
-      const int64_t nano =
-          remainingMicros * Timestamp::kNanosecondsInMicrosecond;
-      result = Timestamp(wholeSeconds, nano);
+      return true;
     }
   }
 
@@ -1050,11 +1099,12 @@ template <typename T>
 struct TimestampAddFunction {
   VELOX_DEFINE_FUNCTION_TYPES(T);
 
+  template <typename TInput>
   FOLLY_ALWAYS_INLINE void initialize(
       const std::vector<TypePtr>& /*inputTypes*/,
       const core::QueryConfig& config,
       const arg_type<Varchar>* unitString,
-      const int32_t* /*value*/,
+      const TInput* /*value*/,
       const arg_type<Timestamp>* /*timestamp*/) {
     VELOX_USER_CHECK_NOT_NULL(unitString);
     std::string unitStr(*unitString);
@@ -1068,10 +1118,11 @@ struct TimestampAddFunction {
     sessionTimeZone_ = getTimeZoneFromConfig(config);
   }
 
+  template <typename TInput>
   FOLLY_ALWAYS_INLINE void call(
       out_type<Timestamp>& result,
       const arg_type<Varchar>& /*unitString*/,
-      const int32_t value,
+      const TInput value,
       const arg_type<Timestamp>& timestamp) {
     const auto unit = unit_.value();
     result = addToTimestamp(unit, value, timestamp, sessionTimeZone_);
@@ -1080,6 +1131,127 @@ struct TimestampAddFunction {
  private:
   const tz::TimeZone* sessionTimeZone_ = nullptr;
   std::optional<DateTimeUnit> unit_ = std::nullopt;
+};
+
+template <typename TExec>
+struct MonthsBetweenFunction {
+  VELOX_DEFINE_FUNCTION_TYPES(TExec);
+
+  FOLLY_ALWAYS_INLINE void initialize(
+      const std::vector<TypePtr>& /*inputTypes*/,
+      const core::QueryConfig& config,
+      const arg_type<Timestamp>* /*timestamp1*/,
+      const arg_type<Timestamp>* /*timestamp2*/,
+      const arg_type<bool>* /*roundOff*/) {
+    sessionTimeZone_ = getTimeZoneFromConfig(config);
+  }
+
+  FOLLY_ALWAYS_INLINE void call(
+      out_type<double>& result,
+      const arg_type<Timestamp>& timestamp1,
+      const arg_type<Timestamp>& timestamp2,
+      const arg_type<bool>& roundOff) {
+    const auto dateTime1 = getDateTime(timestamp1, sessionTimeZone_);
+    const auto dateTime2 = getDateTime(timestamp2, sessionTimeZone_);
+    result = monthsBetween(dateTime1, dateTime2, roundOff);
+  }
+
+ private:
+  FOLLY_ALWAYS_INLINE bool isEndDayOfMonth(const std::tm& tm) {
+    return tm.tm_mday == util::getMaxDayOfMonth(getYear(tm), getMonth(tm));
+  }
+
+  FOLLY_ALWAYS_INLINE double
+  monthsBetween(const std::tm& tm1, const std::tm& tm2, bool roundOff) {
+    const double monthDiff =
+        (tm1.tm_year - tm2.tm_year) * kMonthInYear + tm1.tm_mon - tm2.tm_mon;
+    if (tm1.tm_mday == tm2.tm_mday ||
+        (isEndDayOfMonth(tm1) && isEndDayOfMonth(tm2))) {
+      return monthDiff;
+    }
+    const auto secondsInDay1 = tm1.tm_hour * kSecondsInHour +
+        tm1.tm_min * kSecondsInMinute + tm1.tm_sec;
+    const auto secondsInDay2 = tm2.tm_hour * kSecondsInHour +
+        tm2.tm_min * kSecondsInMinute + tm2.tm_sec;
+    const auto secondsDiff = (tm1.tm_mday - tm2.tm_mday) * kSecondsInDay +
+        secondsInDay1 - secondsInDay2;
+    const auto diff =
+        monthDiff + static_cast<double>(secondsDiff) / kSecondsInMonth;
+    if (roundOff) {
+      return round(diff * kRoundingPrecision) / kRoundingPrecision;
+    }
+    return diff;
+  }
+
+  // Precision factor for 8 decimal places rounding.
+  static constexpr int64_t kRoundingPrecision = 1e8;
+  static constexpr int64_t kSecondsInMonth = kSecondsInDay * 31;
+  const tz::TimeZone* sessionTimeZone_ = nullptr;
+};
+
+template <typename T>
+struct DateFormatFunction {
+  VELOX_DEFINE_FUNCTION_TYPES(T);
+
+  FOLLY_ALWAYS_INLINE void initialize(
+      const std::vector<TypePtr>& /*inputTypes*/,
+      const core::QueryConfig& config,
+      const arg_type<Timestamp>* /*timestamp*/,
+      const arg_type<Varchar>* formatString) {
+    legacyFormatter_ = config.sparkLegacyDateFormatter();
+    sessionTimeZone_ = getTimeZoneFromConfig(config);
+    if (formatString != nullptr) {
+      auto formatter = detail::initializeFormatter(
+          std::string_view(*formatString), legacyFormatter_);
+      if (formatter) {
+        formatter_ = formatter;
+        maxResultSize_ = formatter_->maxResultSize(sessionTimeZone_);
+      } else {
+        invalidFormat_ = true;
+      }
+      isConstFormat_ = true;
+    }
+  }
+
+  FOLLY_ALWAYS_INLINE bool call(
+      out_type<Varchar>& result,
+      const arg_type<Timestamp>& timestamp,
+      const arg_type<Varchar>& formatString) {
+    if (invalidFormat_) {
+      return false;
+    }
+    if (!isConstFormat_) {
+      auto formatter = detail::initializeFormatter(
+          std::string_view(formatString), legacyFormatter_);
+      if (!formatter) {
+        return false;
+      }
+      formatter_ = formatter;
+      maxResultSize_ = formatter_->maxResultSize(sessionTimeZone_);
+    }
+
+    format(timestamp, sessionTimeZone_, maxResultSize_, result);
+    return true;
+  }
+
+ private:
+  FOLLY_ALWAYS_INLINE void format(
+      const Timestamp& timestamp,
+      const tz::TimeZone* timeZone,
+      uint32_t maxResultSize,
+      out_type<Varchar>& result) const {
+    result.reserve(maxResultSize);
+    const auto resultSize =
+        formatter_->format(timestamp, timeZone, maxResultSize, result.data());
+    result.resize(resultSize);
+  }
+
+  const tz::TimeZone* sessionTimeZone_{nullptr};
+  std::shared_ptr<DateTimeFormatter> formatter_;
+  bool isConstFormat_{false};
+  bool legacyFormatter_{false};
+  bool invalidFormat_{false};
+  uint32_t maxResultSize_;
 };
 
 } // namespace facebook::velox::functions::sparksql

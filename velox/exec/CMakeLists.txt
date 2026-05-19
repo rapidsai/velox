@@ -19,14 +19,14 @@ velox_add_library(
   AggregateCompanionSignatures.cpp
   AggregateFunctionRegistry.cpp
   AggregateInfo.cpp
-  AggregationMasks.cpp
   AggregateWindow.cpp
+  AggregationMasks.cpp
   ArrowStream.cpp
   AssignUniqueId.cpp
   BlockingReason.cpp
   CallbackSink.cpp
-  ContainerRowSerde.cpp
   ColumnStatsCollector.cpp
+  ContainerRowSerde.cpp
   DistinctAggregations.cpp
   Driver.cpp
   EnforceSingleRow.cpp
@@ -34,6 +34,7 @@ velox_add_library(
   ExchangeClient.cpp
   ExchangeQueue.cpp
   ExchangeSource.cpp
+  SerializedPage.cpp
   Expand.cpp
   FilterProject.cpp
   GroupId.cpp
@@ -44,57 +45,66 @@ velox_add_library(
   HashPartitionFunction.cpp
   HashProbe.cpp
   HashTable.cpp
+  HashTableCache.cpp
   IndexLookupJoin.cpp
+  IndexLookupJoinBridge.cpp
   JoinBridge.cpp
   Limit.cpp
   LocalPartition.cpp
   LocalPlanner.cpp
   MarkDistinct.cpp
+  MarkSorted.cpp
+  EnforceDistinct.cpp
   MemoryReclaimer.cpp
   Merge.cpp
   MergeJoin.cpp
   MergeSource.cpp
+  MixedUnion.cpp
   NestedLoopJoinBuild.cpp
   NestedLoopJoinProbe.cpp
+  SpatialIndex.cpp
   SpatialJoinBuild.cpp
   SpatialJoinProbe.cpp
   Operator.cpp
+  OperatorTraceCtx.cpp
+  OperatorTraceReader.cpp
+  OperatorTraceScan.cpp
+  OperatorTraceWriter.cpp
   OperatorUtils.cpp
   OrderBy.cpp
   OutputBuffer.cpp
   OutputBufferManager.cpp
-  OperatorTraceReader.cpp
-  OperatorTraceScan.cpp
-  OperatorTraceWriter.cpp
   ParallelProject.cpp
-  TaskStructs.cpp
-  TaskTraceReader.cpp
-  TaskTraceWriter.cpp
-  Trace.cpp
-  TraceUtil.cpp
-  PartitionedOutput.cpp
   PartitionFunction.cpp
   PartitionStreamingWindowBuild.cpp
+  PartitionedOutput.cpp
   PlanNodeStats.cpp
   PrefixSort.cpp
   ProbeOperatorState.cpp
-  RowsStreamingWindowBuild.cpp
+  SubPartitionedSortWindowBuild.cpp
   RowContainer.cpp
   RowNumber.cpp
-  ScaledScanController.cpp
+  RowsStreamingWindowBuild.cpp
   ScaleWriterLocalPartition.cpp
+  ScaledScanController.cpp
   SortBuffer.cpp
-  SortedAggregations.cpp
   SortWindowBuild.cpp
+  SortedAggregations.cpp
+  SpatialJoinBuild.cpp
+  SpatialJoinProbe.cpp
   Spill.cpp
   SpillFile.cpp
   Spiller.cpp
   StreamingAggregation.cpp
+  StreamingEnforceDistinct.cpp
   Strings.cpp
   TableScan.cpp
   TableWriteMerge.cpp
   TableWriter.cpp
   Task.cpp
+  TaskStructs.cpp
+  TaskTraceReader.cpp
+  TaskTraceWriter.cpp
   TopN.cpp
   TopNRowNumber.cpp
   Unnest.cpp
@@ -104,36 +114,153 @@ velox_add_library(
   WindowBuild.cpp
   WindowFunction.cpp
   WindowPartition.cpp
+  HEADERS
+  AddressableNonNullValueList.h
+  Aggregate.h
+  AdaptivePrefetch.h
+  AggregateCompanionAdapter.h
+  AggregateCompanionSignatures.h
+  AggregateFunctionRegistry.h
+  AggregateInfo.h
+  AggregateWindow.h
+  AggregationMasks.h
+  ArrowStream.h
+  AssignUniqueId.h
+  BarrierSplit.h
+  BlockingReason.h
+  CallbackSink.h
+  ColumnStatsCollector.h
+  ContainerRowSerde.h
+  DistinctAggregations.h
+  Driver.h
+  DriverStats.h
+  EnforceDistinct.h
+  EnforceSingleRow.h
+  Exchange.h
+  ExchangeClient.h
+  ExchangeQueue.h
+  ExchangeSource.h
+  Expand.h
+  FilterProject.h
+  GroupId.h
+  GroupingSet.h
+  HashAggregation.h
+  HashBitRange.h
+  HashBuild.h
+  HashJoinBridge.h
+  HashPartitionFunction.h
+  HashProbe.h
+  HashTable.h
+  HashTableCache.h
+  HilbertIndex.h
+  IndexLookupJoin.h
+  IndexLookupJoinBridge.h
+  JoinBridge.h
+  Limit.h
+  LocalPartition.h
+  LocalPlanner.h
+  MarkDistinct.h
+  MarkSorted.h
+  MemoryReclaimer.h
+  Merge.h
+  MergeJoin.h
+  MergeSource.h
+  MixedUnion.h
+  NestedLoopJoinBuild.h
+  NestedLoopJoinProbe.h
+  OneWayStatusFlag.h
+  Operator.h
+  OperatorStats.h
+  OperatorTraceCtx.h
+  OperatorTraceReader.h
+  OperatorTraceScan.h
+  OperatorTraceWriter.h
+  OperatorType.h
+  OperatorUtils.h
+  OrderBy.h
+  OutputBuffer.h
+  OutputBufferManager.h
+  ParallelProject.h
+  PartitionFunction.h
+  PartitionStreamingWindowBuild.h
+  PartitionedOutput.h
+  PlanNodeStats.h
+  PrefixSort.h
+  ProbeOperatorState.h
+  RoundRobinPartitionFunction.h
+  RowContainer.h
+  RowNumber.h
+  RowsStreamingWindowBuild.h
+  ScaleWriterLocalPartition.h
+  ScaledScanController.h
+  SerializedPage.h
+  SetAccumulator.h
+  SimpleAggregateAdapter.h
+  SortBuffer.h
+  SortWindowBuild.h
+  SortedAggregations.h
+  SpatialIndex.h
+  SpatialJoinBuild.h
+  SpatialJoinProbe.h
+  Spill.h
+  SpillFile.h
+  Spiller.h
+  Split.h
+  StreamingAggregation.h
+  StreamingEnforceDistinct.h
+  Strings.h
+  SubPartitionedSortWindowBuild.h
+  TableScan.h
+  TableWriteMerge.h
+  TableWriter.h
+  Task.h
+  TaskStats.h
+  TaskStructs.h
+  TaskTraceReader.h
+  TaskTraceWriter.h
+  TopN.h
+  TopNRowNumber.h
+  TraceUtil.h
+  Unnest.h
+  UnorderedStreamReader.h
+  Values.h
+  VectorHasher-inl.h
+  VectorHasher.h
+  Window.h
+  WindowBuild.h
+  WindowFunction.h
+  WindowPartition.h
 )
+
+velox_add_library(velox_exec_spill_stats SpillStats.cpp HEADERS SpillStats.h)
+velox_link_libraries(velox_exec_spill_stats velox_common_base velox_file Folly::folly)
 
 velox_link_libraries(
   velox_exec
-  velox_file
-  velox_core
-  velox_vector
-  velox_connector
-  velox_expression
-  velox_time
-  velox_common_base
-  velox_test_util
   velox_arrow_bridge
+  velox_common_base
   velox_common_compression
+  velox_core
+  velox_connector
+  velox_connector_registry
+  velox_exec_spill_stats
+  velox_expression
+  velox_file
+  velox_presto_serializer
+  velox_trace
+  velox_time
+  velox_test_util
+  velox_vector
 )
 
-velox_add_library(velox_cursor Cursor.cpp)
-velox_link_libraries(
-  velox_cursor
-  velox_core
-  velox_exception
-  velox_expression
-  velox_dwio_common
-  velox_dwio_dwrf_reader
-  velox_dwio_dwrf_writer
-  velox_type_fbhive
-  velox_presto_serializer
-  velox_functions_prestosql
-  velox_aggregates
-)
+if(VELOX_ENABLE_GEO)
+  velox_compile_definitions(velox_exec PRIVATE VELOX_ENABLE_GEO)
+  velox_link_libraries(velox_exec velox_common_geospatial_serde)
+endif()
+
+velox_add_library(velox_cursor Cursor.cpp HEADERS Cursor.h)
+
+velox_link_libraries(velox_cursor velox_core velox_exception velox_expression)
 
 if(${VELOX_BUILD_TESTING})
   add_subdirectory(fuzzer)
@@ -147,3 +274,9 @@ if(${VELOX_ENABLE_BENCHMARKS})
 endif()
 
 add_subdirectory(prefixsort)
+add_subdirectory(rpc)
+add_subdirectory(trace)
+
+velox_add_library(velox_aggregate_util INTERFACE HEADERS AggregateUtil.h)
+
+velox_add_library(velox_operator_type INTERFACE HEADERS OperatorType.h)

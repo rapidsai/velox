@@ -234,6 +234,14 @@ struct Varchar {
   Varchar() {}
 };
 
+struct TimestampUtcT {
+  using type = Timestamp;
+
+  static constexpr const char* typeName = "timestamp utc";
+};
+
+using TimestampUtc = CustomType<TimestampUtcT>;
+
 // Type to use for inputs and outputs of simple functions with BigintEnum types.
 // E.g. arg_type<BigintEnum<E1>> and out_type<BigintEnum<E1>>.
 template <typename E>
@@ -298,6 +306,13 @@ struct CppToType<Varbinary> : public CppToTypeBase<TypeKind::VARBINARY> {};
 template <>
 struct CppToType<Date> : public CppToTypeBase<TypeKind::INTEGER> {};
 
+template <>
+struct CppToType<TimestampUtc> : public CppToTypeBase<TypeKind::TIMESTAMP> {
+  static auto create() {
+    return TimestampUtcType::get();
+  }
+};
+
 template <typename T>
 struct CppToType<Generic<T>> : public CppToTypeBase<TypeKind::UNKNOWN> {};
 
@@ -354,18 +369,29 @@ template <>
 struct SimpleTypeTrait<Varbinary> : public TypeTraits<TypeKind::VARBINARY> {};
 
 template <>
-struct SimpleTypeTrait<Date> : public SimpleTypeTrait<int32_t> {
+struct SimpleTypeTrait<Date> : public TypeTraits<TypeKind::INTEGER> {
   static constexpr const char* name = "DATE";
 };
 
 template <>
-struct SimpleTypeTrait<IntervalDayTime> : public SimpleTypeTrait<int64_t> {
+struct SimpleTypeTrait<IntervalDayTime> : public TypeTraits<TypeKind::BIGINT> {
   static constexpr const char* name = "INTERVAL DAY TO SECOND";
 };
 
 template <>
-struct SimpleTypeTrait<IntervalYearMonth> : public SimpleTypeTrait<int32_t> {
+struct SimpleTypeTrait<IntervalYearMonth>
+    : public TypeTraits<TypeKind::INTEGER> {
   static constexpr const char* name = "INTERVAL YEAR TO MONTH";
+};
+
+template <>
+struct SimpleTypeTrait<Time> : public TypeTraits<TypeKind::BIGINT> {
+  static constexpr const char* name = "TIME";
+};
+
+template <>
+struct SimpleTypeTrait<TimeMicroUtc> : public TypeTraits<TypeKind::BIGINT> {
+  static constexpr const char* name = "TIME MICRO UTC";
 };
 
 template <typename T, bool comparable, bool orderable>
@@ -401,7 +427,7 @@ struct SimpleTypeTrait<CustomType<T, providesCustomComparison>>
   static constexpr bool isFixedWidth = physical_t::isFixedWidth;
 
   // This is different than the physical type name.
-  static constexpr char* name = T::typeName;
+  static constexpr const char* name = T::typeName;
 };
 
 /// MaterializeType template.
@@ -462,14 +488,14 @@ template <>
 struct MaterializeType<Varchar> {
   using nullable_t = std::string;
   using null_free_t = std::string;
-  static constexpr bool requiresMaterialization = false;
+  static constexpr bool requiresMaterialization = true;
 };
 
 template <>
 struct MaterializeType<Varbinary> {
   using nullable_t = std::string;
   using null_free_t = std::string;
-  static constexpr bool requiresMaterialization = false;
+  static constexpr bool requiresMaterialization = true;
 };
 
 } // namespace facebook::velox

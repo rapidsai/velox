@@ -21,13 +21,13 @@
 #include "folly/dynamic.h"
 #include "velox/common/base/tests/GTestUtils.h"
 #include "velox/common/file/FileSystems.h"
+#include "velox/common/testutil/TempDirectoryPath.h"
 #include "velox/connectors/hive/HiveConnector.h"
 #include "velox/exec/OperatorTraceReader.h"
 #include "velox/exec/PartitionFunction.h"
-#include "velox/exec/TraceUtil.h"
 #include "velox/exec/tests/utils/HiveConnectorTestBase.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
-#include "velox/exec/tests/utils/TempDirectoryPath.h"
+#include "velox/exec/trace/TraceUtil.h"
 #include "velox/serializers/PrestoSerializer.h"
 #include "velox/tool/trace/PartitionedOutputReplayer.h"
 
@@ -36,17 +36,15 @@ using namespace facebook::velox::core;
 using namespace facebook::velox::common;
 using namespace facebook::velox::exec;
 using namespace facebook::velox::exec::test;
+using namespace facebook::velox::common::testutil;
 
 namespace facebook::velox::tool::trace::test {
 class PartitionedOutputReplayerTest
     : public HiveConnectorTestBase,
-      public testing::WithParamInterface<VectorSerde::Kind> {
+      public testing::WithParamInterface<std::string> {
  public:
-  static std::vector<VectorSerde::Kind> getTestParams() {
-    const std::vector<VectorSerde::Kind> kinds(
-        {VectorSerde::Kind::kPresto,
-         VectorSerde::Kind::kCompactRow,
-         VectorSerde::Kind::kUnsafeRow});
+  static std::vector<std::string> getTestParams() {
+    const std::vector<std::string> kinds({"Presto", "CompactRow", "UnsafeRow"});
     return kinds;
   }
 
@@ -114,7 +112,8 @@ class PartitionedOutputReplayerTest
               std::to_string(8UL << 20)},
              {core::QueryConfig::kMaxOutputBufferSize,
               std::to_string(8UL << 20)}}),
-        Task::ExecutionMode::kParallel);
+        Task::ExecutionMode::kParallel,
+        exec::Consumer{});
     return task;
   }
 
@@ -162,7 +161,7 @@ TEST_P(PartitionedOutputReplayerTest, defaultConsumer) {
                       "",
                       0,
                       executor_.get())
-                      .run(false));
+                      .run(false, false));
 }
 
 TEST_P(PartitionedOutputReplayerTest, basic) {
@@ -237,8 +236,8 @@ TEST_P(PartitionedOutputReplayerTest, basic) {
         });
 
     // Verified that the trace summary has been written properly.
-    const auto taskTraceDir =
-        exec::trace::getTaskTraceDirectory(traceRoot, *originalTask);
+    const auto taskTraceDir = exec::trace::getTaskTraceDirectory(
+        traceRoot, originalTask->queryCtx()->queryId(), originalTask->taskId());
     originalTask.reset();
 
     {
@@ -259,7 +258,7 @@ TEST_P(PartitionedOutputReplayerTest, basic) {
           [&](auto partition, auto page) {
             replayedPartitionedResults[partition].push_back(std::move(page));
           })
-          .run(false);
+          .run(false, false);
 
       ASSERT_EQ(replayedPartitionedResults.size(), testParam.numPartitions);
       for (uint32_t partition = 0; partition < testParam.numPartitions;

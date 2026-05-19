@@ -14,15 +14,16 @@
  * limitations under the License.
  */
 
+#include "velox/common/testutil/TempDirectoryPath.h"
 #include "velox/exec/Task.h"
 #include "velox/exec/tests/utils/AssertQueryBuilder.h"
 #include "velox/exec/tests/utils/HiveConnectorTestBase.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
-#include "velox/exec/tests/utils/TempDirectoryPath.h"
 
 using namespace facebook::velox::exec;
 
 namespace facebook::velox::exec::test {
+using namespace facebook::velox::common::testutil;
 namespace {
 
 std::unordered_map<std::string, std::unordered_map<core::PlanNodeId, int64_t>>
@@ -131,10 +132,11 @@ class SplitListenerTest : public HiveConnectorTestBase {
     std::vector<std::shared_ptr<connector::ConnectorSplit>> splits;
     splits.reserve(filePaths_.size());
     for (const auto& filePath : filePaths_) {
-      splits.emplace_back(connector::hive::HiveConnectorSplitBuilder(filePath)
-                              .connectorId(kHiveConnectorId)
-                              .fileFormat(dwio::common::FileFormat::DWRF)
-                              .build());
+      splits.emplace_back(
+          connector::hive::HiveConnectorSplitBuilder(filePath)
+              .connectorId(kHiveConnectorId)
+              .fileFormat(dwio::common::FileFormat::DWRF)
+              .build());
     }
     return splits;
   }

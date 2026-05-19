@@ -28,7 +28,16 @@ using namespace dwio::common;
 template <typename DataT>
 class SelectiveDecimalColumnReader : public SelectiveColumnReader {
  public:
+  // requestedType is the DECIMAL type to materialize values as. It must be a
+  // decimal type. Hive's ORC writer always records DECIMAL(38, 18) in the
+  // file footer regardless of the metastore-declared precision/scale; the
+  // per-row scale at which each value was actually written lives in the
+  // SECONDARY (a.k.a. NANO_DATA) stream. The reader uses
+  // requestedType.scale() (the table-schema scale) as the target scale and
+  // rescales each value from its per-row scale, so the output matches what
+  // table consumers expect even when the file footer scale differs.
   SelectiveDecimalColumnReader(
+      const TypePtr& requestedType,
       const std::shared_ptr<const TypeWithId>& fileType,
       DwrfParams& params,
       common::ScanSpec& scanSpec);
@@ -49,7 +58,24 @@ class SelectiveDecimalColumnReader : public SelectiveColumnReader {
 
  private:
   template <bool kDense>
-  void readHelper(RowSet rows);
+  void readHelper(const common::Filter* filter, RowSet rows);
+
+  // Process IsNull and IsNotNull filters.
+  void processNulls(bool isNull, const RowSet& rows, const uint64_t* rawNulls);
+
+  // Process filters on decimal values.
+  void processFilter(
+      const common::Filter* filter,
+      const RowSet& rows,
+      const uint64_t* rawNulls);
+
+  // Dispatch to the respective filter processing based on the filter type.
+  void process(
+      const common::Filter* filter,
+      const RowSet& rows,
+      const uint64_t* rawNulls);
+
+  void fillDecimals();
 
   std::unique_ptr<IntDecoder<true>> valueDecoder_;
   std::unique_ptr<IntDecoder<true>> scaleDecoder_;
