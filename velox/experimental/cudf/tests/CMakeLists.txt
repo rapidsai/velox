@@ -141,7 +141,8 @@ velox_add_cudf_test(
 velox_add_cudf_test(
   NAME velox_cudf_interop_test
   SOURCES Main.cpp InteropTest.cpp
-  LIBS ${CUDF_TEST_DEFAULT_LIBS}
+  LIBS ${CUDF_TEST_DEFAULT_LIBS} velox_vector_fuzzer fmt::fmt
+  TIMEOUT 3000
 )
 
 velox_add_cudf_test(

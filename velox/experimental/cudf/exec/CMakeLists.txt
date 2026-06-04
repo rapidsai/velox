@@ -55,6 +55,7 @@ target_link_libraries(
     arrow
     velox_arrow_bridge
     velox_common_base
+    velox_cudf_exec_util
     velox_cudf_expression
     velox_cudf_hive_connector
     velox_cudf_iceberg_connector
@@ -64,3 +65,5 @@ target_link_libraries(
 )
 
 target_compile_options(velox_cudf_exec PRIVATE -Wno-missing-field-initializers)
+
+add_subdirectory(util)
