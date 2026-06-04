@@ -32,4 +32,8 @@ target_link_libraries(
   PUBLIC cudf::cudf velox_cudf_expression
 )
 
+if(VELOX_ENABLE_ABFS)
+  target_link_libraries(velox_cudf_hive_connector PRIVATE velox_abfs)
+endif()
+
 add_subdirectory(iceberg)

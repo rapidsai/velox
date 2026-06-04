@@ -236,7 +236,7 @@ void CudfSplitReader::setupCudfDataSource() {
     VELOX_CHECK_NOT_NULL(fileHandleCachePtr.get());
   } catch (const VeloxRuntimeError& e) {
     LOG(WARNING) << fmt::format(
-        "Failed to generate file handle cache for file {}, falling back to kvikio data source for CudfSplitReader",
+        "Failed to generate file handle cache for file. Falling back to KvikIO. Path: {}",
         split_->filePath);
     dataSource_ = std::move(
         cudf::io::make_datasources(cudf::io::source_info{split_->filePath})
@@ -262,7 +262,7 @@ void CudfSplitReader::setupCudfDataSource() {
           executor_);
   if (not bufferedInput) {
     LOG(WARNING) << fmt::format(
-        "Failed to create buffered input source for file {}, falling back to kvikio data source for CudfSplitReader",
+        "Failed to create buffered input data source for file. Falling back to the KvikIO. Path: {}",
         split_->filePath);
     dataSource_ = std::move(
         cudf::io::make_datasources(cudf::io::source_info{split_->filePath})
