@@ -36,20 +36,19 @@ namespace {
 
 static constexpr int32_t kDefaultMinExchangeOutputBatchBytes{2 << 20}; // 2 MB.
 
-class ExchangeClientTest
-    : public testing::Test,
-      public velox::test::VectorTestBase,
-      public testing::WithParamInterface<VectorSerde::Kind> {
+class ExchangeClientTest : public testing::Test,
+                           public velox::test::VectorTestBase,
+                           public testing::WithParamInterface<std::string> {
  protected:
   static void SetUpTestCase() {
     memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
-    if (!isRegisteredNamedVectorSerde(VectorSerde::Kind::kPresto)) {
+    if (!isRegisteredNamedVectorSerde("Presto")) {
       serializer::presto::PrestoVectorSerde::registerNamedVectorSerde();
     }
-    if (!isRegisteredNamedVectorSerde(VectorSerde::Kind::kCompactRow)) {
+    if (!isRegisteredNamedVectorSerde("CompactRow")) {
       serializer::CompactRowVectorSerde::registerNamedVectorSerde();
     }
-    if (!isRegisteredNamedVectorSerde(VectorSerde::Kind::kUnsafeRow)) {
+    if (!isRegisteredNamedVectorSerde("UnsafeRow")) {
       serializer::spark::UnsafeRowVectorSerde::registerNamedVectorSerde();
     }
   }
@@ -85,13 +84,15 @@ class ExchangeClientTest
         executor_.get(), core::QueryConfig{std::move(config)});
     queryCtx->testingOverrideMemoryPool(
         memory::memoryManager()->addRootPool(queryCtx->queryId()));
-    auto plan = test::PlanBuilder().values({}).planNode();
+    auto plan =
+        test::PlanBuilder().values(std::vector<RowVectorPtr>{}).planNode();
     return Task::create(
         taskId,
         core::PlanFragment{plan},
         0,
         std::move(queryCtx),
-        Task::ExecutionMode::kParallel);
+        Task::ExecutionMode::kParallel,
+        exec::Consumer{});
   }
 
   int32_t enqueue(
@@ -108,9 +109,9 @@ class ExchangeClientTest
     return pageSize;
   }
 
-  std::vector<std::unique_ptr<SerializedPage>>
+  std::vector<std::unique_ptr<SerializedPageBase>>
   fetchPages(int consumerId, ExchangeClient& client, int32_t numPages) {
-    std::vector<std::unique_ptr<SerializedPage>> allPages;
+    std::vector<std::unique_ptr<SerializedPageBase>> allPages;
     for (auto i = 0; i < numPages; ++i) {
       bool atEnd{false};
       ContinueFuture future;
@@ -138,7 +139,7 @@ class ExchangeClientTest
 
   static void enqueue(
       ExchangeQueue& queue,
-      std::unique_ptr<SerializedPage> page) {
+      std::unique_ptr<SerializedPageBase> page) {
     std::vector<ContinuePromise> promises;
     {
       std::lock_guard<std::mutex> l(queue.mutex());
@@ -149,17 +150,17 @@ class ExchangeClientTest
     }
   }
 
-  static std::unique_ptr<SerializedPage> makePage(uint64_t size) {
+  static std::unique_ptr<SerializedPageBase> makePage(uint64_t size) {
     auto ioBuf = folly::IOBuf::create(size);
     ioBuf->append(size);
-    return std::make_unique<SerializedPage>(std::move(ioBuf), nullptr, 1);
+    return std::make_unique<PrestoSerializedPage>(std::move(ioBuf), nullptr, 1);
   }
 
   folly::Executor* executor() const {
     return executor_.get();
   }
 
-  VectorSerde::Kind serdeKind_;
+  std::string serdeKind_;
   std::unique_ptr<folly::CPUThreadPoolExecutor> executor_;
   std::shared_ptr<OutputBufferManager> bufferManager_;
 };
@@ -588,7 +589,7 @@ TEST_P(ExchangeClientTest, acknowledge) {
   SCOPED_TESTVALUE_SET(
       "facebook::velox::exec::test::LocalExchangeSource::pause",
       std::function<void(void*)>(([&numberOfAcknowledgeRequests](void*) {
-        numberOfAcknowledgeRequests++;
+        ++numberOfAcknowledgeRequests;
       })));
 
   {
@@ -609,10 +610,11 @@ TEST_P(ExchangeClientTest, acknowledge) {
     client->addRemoteTaskId(sourceTaskId);
     client->noMoreRemoteTasks();
 
-    ASSERT_TRUE(std::move(future)
-                    .via(executor())
-                    .wait(std::chrono::seconds{10})
-                    .isReady());
+    ASSERT_TRUE(
+        std::move(future)
+            .via(executor())
+            .wait(std::chrono::seconds{10})
+            .isReady());
 
 #ifndef NDEBUG
     // The client knew there is more data available but could not fetch any more
@@ -663,7 +665,7 @@ TEST_P(ExchangeClientTest, acknowledge) {
     int attempts = 100;
     bool outputBuffersEmpty;
     while (attempts > 0) {
-      attempts--;
+      --attempts;
       outputBuffersEmpty = bufferManager_->getUtilization(sourceTaskId) == 0;
       if (outputBuffersEmpty) {
         break;
@@ -689,10 +691,11 @@ TEST_P(ExchangeClientTest, acknowledge) {
   pages = client->next(1, 1, &atEnd, &dequeueEndOfDataFuture);
   ASSERT_EQ(0, pages.size());
 
-  ASSERT_TRUE(std::move(dequeueEndOfDataFuture)
-                  .via(executor())
-                  .wait(std::chrono::seconds{10})
-                  .isReady());
+  ASSERT_TRUE(
+      std::move(dequeueEndOfDataFuture)
+          .via(executor())
+          .wait(std::chrono::seconds{10})
+          .isReady());
   pages = client->next(1, 1, &atEnd, &dequeueEndOfDataFuture);
   ASSERT_EQ(0, pages.size());
   ASSERT_TRUE(atEnd);
@@ -976,13 +979,197 @@ TEST_P(ExchangeClientTest, minOutputBatchBytesMultipleConsumers) {
   client->close();
 }
 
+TEST_P(ExchangeClientTest, skipRequestDataSizeWithSingleSource) {
+  // Test skipRequestDataSizeWithSingleSource flag behavior
+
+  struct {
+    bool skipEnabled;
+
+    std::string debugString() const {
+      return fmt::format("skipEnabled={}", skipEnabled);
+    }
+  } testSettings[] = {
+      // skip enabled
+      {true},
+      // skip disabled
+      {false}};
+
+  for (const auto& setting : testSettings) {
+    SCOPED_TRACE(setting.debugString());
+
+    auto client = std::make_shared<ExchangeClient>(
+        "test-" + setting.debugString(),
+        17,
+        1024,
+        1,
+        kDefaultMinExchangeOutputBatchBytes,
+        pool(),
+        executor(),
+        10,
+        setting.skipEnabled);
+
+    client->close();
+  }
+}
+
+TEST_P(ExchangeClientTest, skipRequestDataSizeNotTriggeredWithMultipleSources) {
+  // Test that optimization is NOT triggered with multiple sources
+
+  auto data = makeRowVector({makeFlatVector<int64_t>(100, folly::identity)});
+  auto page = test::toSerializedPage(data, serdeKind_, bufferManager_, pool());
+
+  // Client with optimization ENABLED but multiple sources
+  auto client = std::make_shared<ExchangeClient>(
+      "test-multi-source",
+      17,
+      page->size() * 10,
+      1,
+      kDefaultMinExchangeOutputBatchBytes,
+      pool(),
+      executor(),
+      10,
+      // enableSingleSourceOptimization = true (but won't trigger with
+      // multiple sources)
+      true);
+
+  // Setup: Create tasks with TWO sources
+  std::vector<std::shared_ptr<Task>> tasks;
+  for (int i = 0; i < 2; ++i) {
+    auto taskId = fmt::format("local://test-source-{}", i);
+    auto task = makeTask(taskId);
+    bufferManager_->initializeTask(
+        task, core::PartitionedOutputNode::Kind::kPartitioned, 100, 16);
+
+    // Enqueue data
+    for (int j = 0; j < 3; ++j) {
+      enqueue(taskId, 17, data);
+    }
+
+    tasks.push_back(task);
+    client->addRemoteTaskId(taskId);
+  }
+
+  client->noMoreRemoteTasks();
+
+  // Fetch pages - should work with regular path (not single source
+  // optimization)
+  // 3 pages from each of 2 sources
+  auto pages = fetchPages(1, *client, 6);
+  ASSERT_EQ(pages.size(), 6);
+
+  // Cleanup: Signal no more data first to allow faster task termination,
+  // then cancel and remove tasks.
+  for (auto& task : tasks) {
+    bufferManager_->noMoreData(task->taskId());
+  }
+  for (auto& task : tasks) {
+    task->requestCancel();
+    bufferManager_->removeTask(task->taskId());
+  }
+  tasks.clear();
+
+  client->close();
+}
+
+// Test that lazyFetching=true defers data fetching until next() is called.
+// When lazyFetching=false (default), fetching starts immediately when remote
+// tasks are added via pickSourcesToRequestLocked(). When lazyFetching=true,
+// pickSourcesToRequestLocked() is not called in addRemoteTaskId(), deferring
+// the fetch until next() is called. This is useful for cached hash table
+// scenarios where waiter tasks may not need the data if the table is already
+// cached.
+TEST_P(ExchangeClientTest, lazyFetching) {
+  auto data = makeRowVector({makeFlatVector<int32_t>({1, 2, 3, 4, 5})});
+
+  // Test with lazyFetching=false (default behavior).
+  // Verify that fetching starts and we can retrieve pages normally.
+  {
+    auto taskId = "local://eager-fetching-test";
+    auto task = makeTask(taskId);
+
+    bufferManager_->initializeTask(
+        task, core::PartitionedOutputNode::Kind::kPartitioned, 100, 16);
+
+    auto client = std::make_shared<ExchangeClient>(
+        "t",
+        17,
+        ExchangeClient::kDefaultMaxQueuedBytes,
+        1,
+        kDefaultMinExchangeOutputBatchBytes,
+        pool(),
+        executor(),
+        10, // requestDataSizesMaxWaitSec
+        false, // skipRequestDataSizeWithSingleSource
+        false); // lazyFetching=false (default)
+
+    client->addRemoteTaskId(taskId);
+    enqueue(taskId, 17, data);
+
+    auto pages = fetchPages(1, *client, 1);
+    ASSERT_EQ(1, pages.size());
+
+    task->requestCancel();
+    bufferManager_->removeTask(taskId);
+    task.reset();
+    client->close();
+  }
+
+  // Test with lazyFetching=true.
+  // Verify that we can still retrieve pages (fetch is triggered by next()).
+  {
+    auto taskId = "local://lazy-fetching-test";
+    auto task = makeTask(taskId);
+
+    bufferManager_->initializeTask(
+        task, core::PartitionedOutputNode::Kind::kPartitioned, 100, 16);
+
+    auto client = std::make_shared<ExchangeClient>(
+        "t",
+        17,
+        ExchangeClient::kDefaultMaxQueuedBytes,
+        1,
+        kDefaultMinExchangeOutputBatchBytes,
+        pool(),
+        executor(),
+        10, // requestDataSizesMaxWaitSec
+        false, // skipRequestDataSizeWithSingleSource
+        true); // lazyFetching=true
+
+    client->addRemoteTaskId(taskId);
+    enqueue(taskId, 17, data);
+
+    // Even with lazy fetching, we should be able to retrieve pages
+    // since next() triggers the fetch.
+    auto pages = fetchPages(1, *client, 1);
+    ASSERT_EQ(1, pages.size());
+
+    task->requestCancel();
+    bufferManager_->removeTask(taskId);
+    task.reset();
+    client->close();
+  }
+}
+
+// Test the new hasNoMoreSources() API
+TEST_P(ExchangeClientTest, hasNoMoreSourcesApi) {
+  auto queue = std::make_shared<ExchangeQueue>(1, 0);
+
+  // Initially, should return false
+  EXPECT_FALSE(queue->hasNoMoreSources());
+
+  // After calling noMoreSources(), should return true
+  queue->noMoreSources();
+
+  EXPECT_TRUE(queue->hasNoMoreSources());
+}
+
 VELOX_INSTANTIATE_TEST_SUITE_P(
     ExchangeClientTest,
     ExchangeClientTest,
-    testing::Values(
-        VectorSerde::Kind::kPresto,
-        VectorSerde::Kind::kCompactRow,
-        VectorSerde::Kind::kUnsafeRow));
+    testing::Values("Presto", "CompactRow", "UnsafeRow"),
+    [](const testing::TestParamInfo<std::string>& info) {
+      return fmt::format("{}", info.param);
+    });
 
 } // namespace
 } // namespace facebook::velox::exec

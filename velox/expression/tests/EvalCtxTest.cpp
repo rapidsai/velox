@@ -96,13 +96,17 @@ TEST_F(EvalCtxTest, vectorRecycler) {
   auto newVector = context.getVector(BIGINT(), 1'00);
   ASSERT_EQ(newVector.get(), vectorPtr);
   vector.reset();
-  { VectorRecycler vectorRecycler(vector, context.vectorPool()); }
+  {
+    VectorRecycler vectorRecycler(vector, context.vectorPool());
+  }
 
   // Hold the allocated vector on scoped vector destruction.
   vector = context.getVector(BIGINT(), 1'00);
   ASSERT_NE(vector.get(), newVector.get());
   newVector = vector;
-  { VectorRecycler vectorRecycler(vector, context.vectorPool()); }
+  {
+    VectorRecycler vectorRecycler(vector, context.vectorPool());
+  }
   vector = context.getVector(BIGINT(), 1'00);
   ASSERT_NE(vector.get(), newVector.get());
 }
@@ -232,4 +236,35 @@ TEST_F(EvalCtxTest, localSingleRow) {
 TEST_F(EvalCtxTest, inputFlatNoNulls) {
   EvalCtx context(&execCtx_);
   ASSERT_FALSE(context.inputFlatNoNulls());
+}
+
+TEST_F(EvalCtxTest, computeInputFlatNoNulls) {
+  // All flat, no nulls -> true.
+  auto flat = makeRowVector({
+      makeFlatVector<int64_t>({1, 2, 3}),
+      makeFlatVector<int64_t>({4, 5, 6}),
+  });
+  ASSERT_TRUE(EvalCtx::computeInputFlatNoNulls(*flat));
+
+  // Flat with nulls -> false.
+  auto withNulls = makeRowVector({
+      makeFlatVector<int64_t>({1, 2, 3}),
+      makeNullableFlatVector<int64_t>({1, std::nullopt, 3}),
+  });
+  ASSERT_FALSE(EvalCtx::computeInputFlatNoNulls(*withNulls));
+
+  // Constant encoding, no nulls -> true.
+  auto withConstant = makeRowVector({
+      makeFlatVector<int64_t>({1, 2, 3}),
+      makeConstant<int64_t>(42, 3),
+  });
+  ASSERT_TRUE(EvalCtx::computeInputFlatNoNulls(*withConstant));
+
+  // Dictionary encoding -> false.
+  auto indices = makeIndices({0, 1, 2});
+  auto withDict = makeRowVector({
+      makeFlatVector<int64_t>({1, 2, 3}),
+      wrapInDictionary(indices, makeFlatVector<int64_t>({4, 5, 6})),
+  });
+  ASSERT_FALSE(EvalCtx::computeInputFlatNoNulls(*withDict));
 }

@@ -16,6 +16,8 @@
 
 #include "velox/dwio/common/Writer.h"
 
+#include "velox/common/base/Exceptions.h"
+
 namespace facebook::velox::dwio::common {
 
 void Writer::checkStateTransition(State oldState, State newState) {

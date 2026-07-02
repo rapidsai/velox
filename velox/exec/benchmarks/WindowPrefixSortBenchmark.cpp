@@ -21,6 +21,7 @@
 
 #include "velox/common/memory/SharedArbitrator.h"
 #include "velox/exec/Cursor.h"
+#include "velox/exec/OperatorType.h"
 #include "velox/exec/tests/utils/HiveConnectorTestBase.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
 #include "velox/functions/prestosql/aggregates/RegisterAggregateFunctions.h"
@@ -38,6 +39,7 @@ static constexpr int32_t kNumVectors = 50;
 static constexpr int32_t kRowsPerVector = 1'0000;
 
 namespace {
+using namespace facebook::velox::common::testutil;
 
 class WindowPrefixSortBenchmark : public HiveConnectorTestBase {
  public:
@@ -72,8 +74,9 @@ class WindowPrefixSortBenchmark : public HiveConnectorTestBase {
 
       // Generate key with a small number of unique values from a small range
       // (0-16).
-      children.emplace_back(makeFlatVector<int32_t>(
-          kRowsPerVector, [](auto row) { return row % 17; }));
+      children.emplace_back(
+          makeFlatVector<int32_t>(
+              kRowsPerVector, [](auto row) { return row % 17; }));
 
       // Generate key with a small number of unique values from a large range
       // (300 total values).
@@ -94,8 +97,9 @@ class WindowPrefixSortBenchmark : public HiveConnectorTestBase {
 
       // Generate a column with increasing values to get a deterministic sort
       // order.
-      children.emplace_back(makeFlatVector<int32_t>(
-          kRowsPerVector, [](auto row) { return row; }));
+      children.emplace_back(
+          makeFlatVector<int32_t>(
+              kRowsPerVector, [](auto row) { return row; }));
 
       // Generate random values without nulls.
       children.emplace_back(fuzzer.fuzzFlat(INTEGER()));
@@ -168,11 +172,11 @@ class WindowPrefixSortBenchmark : public HiveConnectorTestBase {
     auto stats = task->taskStats();
     for (auto& pipeline : stats.pipelineStats) {
       for (auto& op : pipeline.operatorStats) {
-        if (op.operatorType == "Window") {
+        if (op.operatorType == OperatorType::kWindow) {
           windowNanos_.add(op.addInputTiming);
           windowNanos_.add(op.getOutputTiming);
         }
-        if (op.operatorType == "Values") {
+        if (op.operatorType == OperatorType::kValues) {
           // This is the timing for Window::noMoreInput() where the window
           // sorting happens. So including in the cpu timing.
           windowNanos_.add(op.finishTiming);
@@ -192,7 +196,8 @@ class WindowPrefixSortBenchmark : public HiveConnectorTestBase {
           std::move(plan),
           0,
           core::QueryCtx::create(executor_.get()),
-          Task::ExecutionMode::kSerial);
+          Task::ExecutionMode::kSerial,
+          exec::Consumer{});
     } else {
       const std::unordered_map<std::string, std::string> queryConfigMap(
           {{core::QueryConfig::kPrefixSortNormalizedKeyMaxBytes, "0"}});
@@ -202,7 +207,8 @@ class WindowPrefixSortBenchmark : public HiveConnectorTestBase {
           0,
           core::QueryCtx::create(
               executor_.get(), core::QueryConfig(queryConfigMap)),
-          Task::ExecutionMode::kSerial);
+          Task::ExecutionMode::kSerial,
+          exec::Consumer{});
     }
   }
 

@@ -33,6 +33,7 @@ static constexpr int32_t kNumVectors = 1'000;
 static constexpr int32_t kRowsPerVector = 10'000;
 
 namespace {
+using namespace facebook::velox::common::testutil;
 
 class SimpleAggregatesBenchmark : public HiveConnectorTestBase {
  public:
@@ -64,8 +65,9 @@ class SimpleAggregatesBenchmark : public HiveConnectorTestBase {
 
       // Generate key with a small number of unique values from a small range
       // (0-16).
-      children.emplace_back(makeFlatVector<int32_t>(
-          kRowsPerVector, [](auto row) { return row % 17; }));
+      children.emplace_back(
+          makeFlatVector<int32_t>(
+              kRowsPerVector, [](auto row) { return row % 17; }));
 
       // Generate key with a small number of unique values from a large range
       // (300 total values).
@@ -165,7 +167,8 @@ class SimpleAggregatesBenchmark : public HiveConnectorTestBase {
         std::move(plan),
         0,
         core::QueryCtx::create(executor_.get()),
-        exec::Task::ExecutionMode::kSerial);
+        exec::Task::ExecutionMode::kSerial,
+        exec::Consumer{});
   }
 
  private:

@@ -18,11 +18,13 @@
 
 #include <functional>
 #include <map>
+#include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
 
 #include "folly/Conv.h"
 #include "velox/common/base/Exceptions.h"
+#include "velox/common/config/IConfig.h"
 
 namespace facebook::velox::config {
 
@@ -47,7 +49,7 @@ std::chrono::duration<double> toDuration(const std::string& str);
 
 /// The concrete config class should inherit the config base and define all the
 /// entries.
-class ConfigBase {
+class ConfigBase : public IConfig {
  public:
   template <typename T>
   struct Entry {
@@ -111,49 +113,51 @@ class ConfigBase {
                                   : entry.defaultVal;
   }
 
-  template <typename T>
-  std::optional<T> get(
-      const std::string& key,
-      std::function<T(std::string, std::string)> toT = [](auto /* unused */,
-                                                          auto value) {
-        return folly::to<T>(value);
-      }) const {
-    auto val = get(key);
-    if (val.has_value()) {
-      return toT(key, val.value());
-    } else {
-      return std::nullopt;
-    }
-  }
-
-  template <typename T>
-  T get(
-      const std::string& key,
-      const T& defaultValue,
-      std::function<T(std::string, std::string)> toT = [](auto /* unused */,
-                                                          auto value) {
-        return folly::to<T>(value);
-      }) const {
-    auto val = get(key);
-    if (val.has_value()) {
-      return toT(key, val.value());
-    } else {
-      return defaultValue;
-    }
-  }
+  using IConfig::get;
 
   bool valueExists(const std::string& key) const;
 
   const std::unordered_map<std::string, std::string>& rawConfigs() const;
 
-  std::unordered_map<std::string, std::string> rawConfigsCopy() const;
+  std::unordered_map<std::string, std::string> rawConfigsCopy() const final;
+
+  /// Converts a session key to another config key by replacing
+  /// '_' with '-'.
+  static std::string toConfigKey(std::string_view sessionKey);
+
+  /// Returns the value for 'key' if present; otherwise checks 'fallback'.
+  /// Fallback key is derived from 'key' by replacing '_' with '-'.
+  template <typename T>
+  std::optional<T> getWithFallback(
+      std::string_view key,
+      const ConfigBase& fallback) const {
+    if (auto value = get<T>(std::string(key))) {
+      return value;
+    }
+    return fallback.get<T>(toConfigKey(key));
+  }
+
+  /// Deprecated: Do not use in new code.
+  /// Legacy helper for key pairs that don't follow the standard
+  /// session-key('_') <-> config-key('-') naming convention.
+  /// Prefer getWithFallback(key, fallback) instead.
+  template <typename T>
+  std::optional<T> getLegacyWithFallback(
+      std::string_view key,
+      const ConfigBase& fallback,
+      std::string_view fallbackKey) const {
+    if (auto value = get<T>(std::string(key))) {
+      return value;
+    }
+    return fallback.get<T>(std::string(fallbackKey));
+  }
 
  protected:
   mutable std::shared_mutex mutex_;
   std::unordered_map<std::string, std::string> configs_;
 
  private:
-  std::optional<std::string> get(const std::string& key) const;
+  std::optional<std::string> access(const std::string& key) const final;
 
   const bool mutable_;
 };

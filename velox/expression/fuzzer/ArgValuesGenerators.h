@@ -65,7 +65,7 @@ class PhoneNumberArgValuesGenerator : public ArgValuesGenerator {
 // 2. the size of all container types in the JSON argument do not exceed a
 // randomly generated maxContainerSize.
 // 1. either all map keys in all maps in the JSON argument are VARCHAR or they
-// are BIGINT, and all map-key values are choosen from a randomly generated
+// are BIGINT, and all map-key values are chosen from a randomly generated
 // candidate set. The size of the candidate map-key set is slightly larger than
 // maxContainerSize, so that access into maps by keys has matches and misses.
 //
@@ -158,4 +158,79 @@ class UnifiedDigestArgValuesGenerator : public ArgValuesGenerator {
   TDigestArgValuesGenerator tdigestGenerator_;
   QDigestArgValuesGenerator qdigestGenerator_;
 };
+
+/// Generates arguments for fb_dedup_normalize_text function.
+/// For the two-parameter version, constrains the second parameter to valid
+/// normalization forms: NFC, NFD, NFKC, NFKD.
+class FbDedupNormalizeTextArgValuesGenerator : public ArgValuesGenerator {
+ public:
+  FbDedupNormalizeTextArgValuesGenerator() = default;
+  ~FbDedupNormalizeTextArgValuesGenerator() override = default;
+
+  std::vector<core::TypedExprPtr> generate(
+      const CallableSignature& signature,
+      const VectorFuzzer::Options& options,
+      FuzzerGenerator& rng,
+      ExpressionFuzzerState& state) override;
+};
+
+/// Generates arguments for at_timezone function.
+/// Constrains the second parameter (timezone) to valid timezone offset formats
+/// (e.g., "+HH:MM", "-HH:MM", "+HH", etc.) instead of random strings.
+class AtTimezoneArgValuesGenerator : public ArgValuesGenerator {
+ public:
+  AtTimezoneArgValuesGenerator() = default;
+  ~AtTimezoneArgValuesGenerator() override = default;
+
+  std::vector<core::TypedExprPtr> generate(
+      const CallableSignature& signature,
+      const VectorFuzzer::Options& options,
+      FuzzerGenerator& rng,
+      ExpressionFuzzerState& state) override;
+};
+
+class SetDigestArgValuesGenerator : public ArgValuesGenerator {
+ public:
+  explicit SetDigestArgValuesGenerator(std::string functionName) {
+    functionName_ = std::move(functionName);
+  }
+  ~SetDigestArgValuesGenerator() override = default;
+
+  std::vector<core::TypedExprPtr> generate(
+      const CallableSignature& signature,
+      const VectorFuzzer::Options& options,
+      FuzzerGenerator& rng,
+      ExpressionFuzzerState& state) override;
+
+ private:
+  std::string functionName_;
+};
+/// Generates valid S2 cell ID arguments for s2_cell_* functions.
+/// Picks random face, position, and level to construct valid cell IDs via
+/// S2CellOp::cellIdFromFacePositionLevel. Also constrains the level
+/// argument to [0, 30] when present.
+class S2CellIdArgValuesGenerator : public ArgValuesGenerator {
+ public:
+  ~S2CellIdArgValuesGenerator() override = default;
+
+  std::vector<core::TypedExprPtr> generate(
+      const CallableSignature& signature,
+      const VectorFuzzer::Options& options,
+      FuzzerGenerator& rng,
+      ExpressionFuzzerState& state) override;
+};
+
+/// Generates valid hex token arguments for s2_cell_from_token.
+/// Constructs a random valid cell ID, then converts it to a token string.
+class S2CellTokenArgValuesGenerator : public ArgValuesGenerator {
+ public:
+  ~S2CellTokenArgValuesGenerator() override = default;
+
+  std::vector<core::TypedExprPtr> generate(
+      const CallableSignature& signature,
+      const VectorFuzzer::Options& options,
+      FuzzerGenerator& rng,
+      ExpressionFuzzerState& state) override;
+};
+
 } // namespace facebook::velox::fuzzer

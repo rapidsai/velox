@@ -19,7 +19,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <vector>
+#include <mutex>
 
 inline size_t count_trailing_zeros(uint64_t x) {
   return x == 0 ? 64 : __builtin_ctzll(x);
@@ -88,15 +88,4 @@ using tsan_lock_guard = TsanEmptyLockGuard<T>;
 
 #endif
 
-template <typename T>
-inline void resizeTsanAtomic(
-    std::vector<tsan_atomic<T>>& vector,
-    int32_t newSize) {
-  std::vector<tsan_atomic<T>> newVector(newSize);
-  auto numCopy = std::min<int32_t>(newSize, vector.size());
-  for (auto i = 0; i < numCopy; ++i) {
-    newVector[i] = tsanAtomicValue(vector[i]);
-  }
-  vector = std::move(newVector);
-}
 } // namespace facebook::velox

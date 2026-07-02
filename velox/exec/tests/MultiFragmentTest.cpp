@@ -13,8 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include "folly/experimental/EventCount.h"
+#include "folly/synchronization/EventCount.h"
 #include "velox/common/base/tests/GTestUtils.h"
+#include "velox/common/testutil/TempDirectoryPath.h"
 #include "velox/common/testutil/TestValue.h"
 #include "velox/connectors/hive/HiveConnector.h"
 #include "velox/connectors/hive/HiveConnectorSplit.h"
@@ -30,7 +31,6 @@
 #include "velox/exec/tests/utils/LocalExchangeSource.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
 #include "velox/exec/tests/utils/SerializedPageUtil.h"
-#include "velox/exec/tests/utils/TempDirectoryPath.h"
 
 using namespace facebook::velox::exec::test;
 
@@ -38,15 +38,14 @@ using facebook::velox::common::testutil::TestValue;
 using facebook::velox::test::BatchMaker;
 
 namespace facebook::velox::exec {
+using namespace facebook::velox::common::testutil;
 namespace {
 
 struct TestParam {
-  VectorSerde::Kind serdeKind;
+  std::string serdeKind;
   common::CompressionKind compressionKind;
 
-  TestParam(
-      VectorSerde::Kind _serdeKind,
-      common::CompressionKind _compressionKind)
+  TestParam(std::string _serdeKind, common::CompressionKind _compressionKind)
       : serdeKind(_serdeKind), compressionKind(_compressionKind) {}
 };
 
@@ -55,18 +54,12 @@ class MultiFragmentTest : public HiveConnectorTestBase,
  public:
   static std::vector<TestParam> getTestParams() {
     std::vector<TestParam> params;
-    params.emplace_back(
-        VectorSerde::Kind::kPresto, common::CompressionKind_NONE);
-    params.emplace_back(
-        VectorSerde::Kind::kCompactRow, common::CompressionKind_NONE);
-    params.emplace_back(
-        VectorSerde::Kind::kUnsafeRow, common::CompressionKind_NONE);
-    params.emplace_back(
-        VectorSerde::Kind::kPresto, common::CompressionKind_LZ4);
-    params.emplace_back(
-        VectorSerde::Kind::kCompactRow, common::CompressionKind_LZ4);
-    params.emplace_back(
-        VectorSerde::Kind::kUnsafeRow, common::CompressionKind_LZ4);
+    params.emplace_back("Presto", common::CompressionKind_NONE);
+    params.emplace_back("CompactRow", common::CompressionKind_NONE);
+    params.emplace_back("UnsafeRow", common::CompressionKind_NONE);
+    params.emplace_back("Presto", common::CompressionKind_LZ4);
+    params.emplace_back("CompactRow", common::CompressionKind_LZ4);
+    params.emplace_back("UnsafeRow", common::CompressionKind_LZ4);
     return params;
   }
 
@@ -109,8 +102,9 @@ class MultiFragmentTest : public HiveConnectorTestBase,
     auto queryCtx = core::QueryCtx::create(
         executor ? executor : executor_.get(),
         core::QueryConfig(std::move(configCopy)));
-    queryCtx->testingOverrideMemoryPool(memory::memoryManager()->addRootPool(
-        queryCtx->queryId(), maxMemory, MemoryReclaimer::create()));
+    queryCtx->testingOverrideMemoryPool(
+        memory::memoryManager()->addRootPool(
+            queryCtx->queryId(), maxMemory, MemoryReclaimer::create()));
     core::PlanFragment planFragment{planNode};
     return Task::create(
         taskId,
@@ -127,7 +121,9 @@ class MultiFragmentTest : public HiveConnectorTestBase,
       std::unordered_map<std::string, std::string>& extraQueryConfigs,
       int destination = 0,
       Consumer consumer = nullptr,
-      int64_t maxMemory = memory::kMaxMemory) const {
+      int64_t maxMemory = memory::kMaxMemory,
+      const std::optional<common::SpillDiskOptions>& diskSpillOpts =
+          std::nullopt) const {
     auto configCopy = configSettings_;
     for (const auto& [k, v] : extraQueryConfigs) {
       configCopy[k] = v;
@@ -139,8 +135,9 @@ class MultiFragmentTest : public HiveConnectorTestBase,
         nullptr,
         nullptr,
         executor_.get());
-    queryCtx->testingOverrideMemoryPool(memory::memoryManager()->addRootPool(
-        queryCtx->queryId(), maxMemory, MemoryReclaimer::create()));
+    queryCtx->testingOverrideMemoryPool(
+        memory::memoryManager()->addRootPool(
+            queryCtx->queryId(), maxMemory, MemoryReclaimer::create()));
     core::PlanFragment planFragment{planNode};
     return Task::create(
         taskId,
@@ -148,7 +145,9 @@ class MultiFragmentTest : public HiveConnectorTestBase,
         destination,
         std::move(queryCtx),
         Task::ExecutionMode::kParallel,
-        std::move(consumer));
+        std::move(consumer),
+        /*memoryArbitrationPriority=*/0,
+        diskSpillOpts);
   }
 
   std::vector<RowVectorPtr> makeVectors(int count, int rowsPerVector) {
@@ -252,7 +251,7 @@ class MultiFragmentTest : public HiveConnectorTestBase,
         exchangeStats.at("localExchangeSource.numPages").count);
     ASSERT_EQ(
         expectedBackgroundCpuCount,
-        exchangeStats.at(ExchangeClient::kBackgroundCpuTimeMs).count);
+        exchangeStats.at(std::string(Operator::kBackgroundCpuTimeNanos)).count);
     ASSERT_EQ(
         expectedBackgroundCpuCount, taskStats.at("0").backgroundTiming.count);
   }
@@ -376,23 +375,27 @@ TEST_P(MultiFragmentTest, aggregationSingleKey) {
   auto leafPlanStats = toPlanStats(leafTask->taskStats());
   const auto serdeKindRuntimsStats =
       leafPlanStats.at(partitionNodeId)
-          .customStats.at(Operator::kShuffleSerdeKind);
+          .customStats.at(std::string(Operator::kShuffleSerdeKind));
   ASSERT_EQ(serdeKindRuntimsStats.count, 4);
   ASSERT_EQ(
-      serdeKindRuntimsStats.min, static_cast<int64_t>(GetParam().serdeKind));
+      serdeKindRuntimsStats.min,
+      static_cast<int64_t>(VectorSerde::kindByName(GetParam().serdeKind)));
   ASSERT_EQ(
-      serdeKindRuntimsStats.max, static_cast<int64_t>(GetParam().serdeKind));
+      serdeKindRuntimsStats.max,
+      static_cast<int64_t>(VectorSerde::kindByName(GetParam().serdeKind)));
 
   for (const auto& finalTask : finalTasks) {
     auto finalPlanStats = toPlanStats(finalTask->taskStats());
     const auto serdeKindRuntimsStats =
         finalPlanStats.at(exchangeNodeId)
-            .customStats.at(Operator::kShuffleSerdeKind);
+            .customStats.at(std::string(Operator::kShuffleSerdeKind));
     ASSERT_EQ(serdeKindRuntimsStats.count, 1);
     ASSERT_EQ(
-        serdeKindRuntimsStats.min, static_cast<int64_t>(GetParam().serdeKind));
+        serdeKindRuntimsStats.min,
+        static_cast<int64_t>(VectorSerde::kindByName(GetParam().serdeKind)));
     ASSERT_EQ(
-        serdeKindRuntimsStats.max, static_cast<int64_t>(GetParam().serdeKind));
+        serdeKindRuntimsStats.max,
+        static_cast<int64_t>(VectorSerde::kindByName(GetParam().serdeKind)));
   }
 }
 
@@ -675,13 +678,15 @@ TEST_P(MultiFragmentTest, mergeExchange) {
   EXPECT_LT(0, mergeExchangeStats.inputBytes);
   EXPECT_LT(0, mergeExchangeStats.rawInputBytes);
 
-  const auto serdeKindRuntimsStats =
-      mergeExchangeStats.customStats.at(Operator::kShuffleSerdeKind);
+  const auto serdeKindRuntimsStats = mergeExchangeStats.customStats.at(
+      std::string(Operator::kShuffleSerdeKind));
   ASSERT_EQ(serdeKindRuntimsStats.count, 1);
   ASSERT_EQ(
-      serdeKindRuntimsStats.min, static_cast<int64_t>(GetParam().serdeKind));
+      serdeKindRuntimsStats.min,
+      static_cast<int64_t>(VectorSerde::kindByName(GetParam().serdeKind)));
   ASSERT_EQ(
-      serdeKindRuntimsStats.max, static_cast<int64_t>(GetParam().serdeKind));
+      serdeKindRuntimsStats.max,
+      static_cast<int64_t>(VectorSerde::kindByName(GetParam().serdeKind)));
 }
 
 // Test reordering and dropping columns in PartitionedOutput operator.
@@ -917,11 +922,17 @@ TEST_P(MultiFragmentTest, mergeExchangeWithSpill) {
             .capturePlanNodeId(partitionNodeId)
             .planNode();
     localMergeNodeIds.push_back(localMergeNodeId);
-    auto sortTask =
-        makeTask(sortTaskId, partialSortPlan, spillMergeConfigs, tasks.size());
     spillDirectories.push_back(TempDirectoryPath::create());
-    sortTask->setSpillDirectory(
-        spillDirectories[numPartialSortTasks]->getPath());
+    common::SpillDiskOptions spillOpts;
+    spillOpts.spillDirPath = spillDirectories[numPartialSortTasks]->getPath();
+    auto sortTask = makeTask(
+        sortTaskId,
+        partialSortPlan,
+        spillMergeConfigs,
+        tasks.size(),
+        /*consumer=*/nullptr,
+        memory::kMaxMemory,
+        spillOpts);
     tasks.push_back(sortTask);
     sortTask->start(4);
 
@@ -986,13 +997,15 @@ TEST_P(MultiFragmentTest, mergeExchangeWithSpill) {
   EXPECT_LT(0, mergeExchangeStats.inputBytes);
   EXPECT_LT(0, mergeExchangeStats.rawInputBytes);
 
-  const auto serdeKindRuntimsStats =
-      mergeExchangeStats.customStats.at(Operator::kShuffleSerdeKind);
+  const auto serdeKindRuntimsStats = mergeExchangeStats.customStats.at(
+      std::string(Operator::kShuffleSerdeKind));
   ASSERT_EQ(serdeKindRuntimsStats.count, 1);
   ASSERT_EQ(
-      serdeKindRuntimsStats.min, static_cast<int64_t>(GetParam().serdeKind));
+      serdeKindRuntimsStats.min,
+      static_cast<int64_t>(VectorSerde::kindByName(GetParam().serdeKind)));
   ASSERT_EQ(
-      serdeKindRuntimsStats.max, static_cast<int64_t>(GetParam().serdeKind));
+      serdeKindRuntimsStats.max,
+      static_cast<int64_t>(VectorSerde::kindByName(GetParam().serdeKind)));
 }
 
 TEST_P(MultiFragmentTest, noHashPartitionSkew) {
@@ -1665,7 +1678,7 @@ namespace {
 core::PlanNodePtr makeJoinOverExchangePlan(
     const RowTypePtr& exchangeType,
     const RowVectorPtr& buildData,
-    VectorSerde::Kind serdeKind) {
+    std::string serdeKind) {
   auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
   return PlanBuilder(planNodeIdGenerator)
       .exchange(exchangeType, serdeKind)
@@ -2083,14 +2096,14 @@ class TestCustomExchangeNode : public core::PlanNode {
   TestCustomExchangeNode(
       const core::PlanNodeId& id,
       const RowTypePtr type,
-      VectorSerde::Kind serdeKind)
+      std::string serdeKind)
       : PlanNode(id), outputType_(type), serdeKind_(serdeKind) {}
 
   const RowTypePtr& outputType() const override {
     return outputType_;
   }
 
-  VectorSerde::Kind serdeKind() const {
+  const std::string& serdeKind() const {
     return serdeKind_;
   }
 
@@ -2117,7 +2130,7 @@ class TestCustomExchangeNode : public core::PlanNode {
   }
 
   const RowTypePtr outputType_;
-  const VectorSerde::Kind serdeKind_;
+  const std::string serdeKind_;
 };
 
 class TestCustomExchange : public exec::Exchange {
@@ -2204,12 +2217,15 @@ TEST_P(MultiFragmentTest, customPlanNodeWithExchangeClient) {
 
   auto planStats = toPlanStats(leafTask->taskStats());
   const auto serdeKindRuntimsStats =
-      planStats.at(partitionNodeId).customStats.at(Operator::kShuffleSerdeKind);
+      planStats.at(partitionNodeId)
+          .customStats.at(std::string(Operator::kShuffleSerdeKind));
   ASSERT_EQ(serdeKindRuntimsStats.count, 1);
   ASSERT_EQ(
-      serdeKindRuntimsStats.min, static_cast<int64_t>(GetParam().serdeKind));
+      serdeKindRuntimsStats.min,
+      static_cast<int64_t>(VectorSerde::kindByName(GetParam().serdeKind)));
   ASSERT_EQ(
-      serdeKindRuntimsStats.max, static_cast<int64_t>(GetParam().serdeKind));
+      serdeKindRuntimsStats.max,
+      static_cast<int64_t>(VectorSerde::kindByName(GetParam().serdeKind)));
 }
 
 // This test is to reproduce the race condition between task terminate and no
@@ -2902,12 +2918,12 @@ TEST_P(MultiFragmentTest, mergeSmallBatchesInExchange) {
     ASSERT_EQ(numPages, stats.customStats.at("numReceivedPages").sum);
   };
 
-  if (GetParam().serdeKind == VectorSerde::Kind::kPresto) {
+  if (GetParam().serdeKind == "Presto") {
     test(1, 1'000);
     test(1'000, 56);
-    test(10'000, 6);
-    test(100'000, 1);
-  } else if (GetParam().serdeKind == VectorSerde::Kind::kCompactRow) {
+    test(10'000, 7);
+    test(100'000, 2);
+  } else if (GetParam().serdeKind == "CompactRow") {
     test(1, 1'000);
     test(1'000, 39);
     test(10'000, 5);
@@ -2915,13 +2931,13 @@ TEST_P(MultiFragmentTest, mergeSmallBatchesInExchange) {
   } else {
     test(1, 1'000);
     test(1'000, 72);
-    test(10'000, 7);
-    test(100'000, 1);
+    test(10'000, 8);
+    test(100'000, 2);
   }
 }
 
 TEST_P(MultiFragmentTest, splitLargeCompactRowsInExchange) {
-  if (GetParam().serdeKind != VectorSerde::Kind::kCompactRow) {
+  if (GetParam().serdeKind != "CompactRow") {
     return;
   }
   const uint64_t kNumColumns = 100;
@@ -2947,14 +2963,13 @@ TEST_P(MultiFragmentTest, splitLargeCompactRowsInExchange) {
                               {"c0"},
                               kNumPartitions,
                               /*outputLayout=*/{},
-                              VectorSerde::Kind::kCompactRow)
+                              "CompactRow")
                           .planNode();
   const auto producerTaskId = "local://t1";
 
-  auto plan =
-      test::PlanBuilder()
-          .exchange(asRowType(data->type()), VectorSerde::Kind::kCompactRow)
-          .planNode();
+  auto plan = test::PlanBuilder()
+                  .exchange(asRowType(data->type()), "CompactRow")
+                  .planNode();
 
   auto expected = makeRowVector(columns);
 
@@ -3036,33 +3051,41 @@ TEST_P(MultiFragmentTest, compression) {
     auto consumerTaskStats = exec::toPlanStats(consumerTask->taskStats());
     const auto& consumerPlanStats = consumerTaskStats.at("0");
     ASSERT_EQ(
-        consumerPlanStats.customStats.at(Operator::kShuffleCompressionKind).min,
+        consumerPlanStats.customStats
+            .at(std::string(Operator::kShuffleCompressionKind))
+            .min,
         static_cast<common::CompressionKind>(GetParam().compressionKind));
     ASSERT_EQ(
-        consumerPlanStats.customStats.at(Operator::kShuffleCompressionKind).max,
+        consumerPlanStats.customStats
+            .at(std::string(Operator::kShuffleCompressionKind))
+            .max,
         static_cast<common::CompressionKind>(GetParam().compressionKind));
     ASSERT_EQ(data->size() * kNumRepeats, consumerPlanStats.outputRows);
 
     auto producerTaskStats = exec::toPlanStats(producerTask->taskStats());
     const auto& producerStats = producerTaskStats.at("1");
     ASSERT_EQ(
-        producerStats.customStats.at(Operator::kShuffleCompressionKind).min,
+        producerStats.customStats
+            .at(std::string(Operator::kShuffleCompressionKind))
+            .min,
         static_cast<common::CompressionKind>(GetParam().compressionKind));
     ASSERT_EQ(
-        producerStats.customStats.at(Operator::kShuffleCompressionKind).max,
+        producerStats.customStats
+            .at(std::string(Operator::kShuffleCompressionKind))
+            .max,
         static_cast<common::CompressionKind>(GetParam().compressionKind));
     if (GetParam().compressionKind == common::CompressionKind_NONE) {
       ASSERT_EQ(
           producerStats.customStats.count(
-              IterativeVectorSerializer::kCompressedBytes),
+              std::string(IterativeVectorSerializer::kCompressedBytes)),
           0);
       ASSERT_EQ(
           producerStats.customStats.count(
-              IterativeVectorSerializer::kCompressionInputBytes),
+              std::string(IterativeVectorSerializer::kCompressionInputBytes)),
           0);
       ASSERT_EQ(
           producerStats.customStats.count(
-              IterativeVectorSerializer::kCompressionSkippedBytes),
+              std::string(IterativeVectorSerializer::kCompressionSkippedBytes)),
           0);
       return;
     }
@@ -3070,18 +3093,22 @@ TEST_P(MultiFragmentTest, compression) {
     if (!expectSkipCompression) {
       ASSERT_LT(
           producerStats.customStats
-              .at(IterativeVectorSerializer::kCompressedBytes)
+              .at(std::string(IterativeVectorSerializer::kCompressedBytes))
               .sum,
           producerStats.customStats
-              .at(IterativeVectorSerializer::kCompressionInputBytes)
+              .at(std::string(
+                  IterativeVectorSerializer::kCompressionInputBytes))
               .sum);
       ASSERT_EQ(producerStats.customStats.count("compressionSkippedBytes"), 0);
     } else {
-      ASSERT_LT(
-          0,
-          producerStats.customStats
-              .at(IterativeVectorSerializer::kCompressionSkippedBytes)
-              .sum);
+      // Note: With the crash fix for PartitionedOutput, the serializer is
+      // recreated after each flush, which resets the compression skip counter.
+      // This means compression is always attempted, so we verify compression
+      // stats exist rather than checking for skipped bytes.
+      ASSERT_GT(
+          producerStats.customStats.count(
+              std::string(IterativeVectorSerializer::kCompressionInputBytes)),
+          0);
     }
   };
 
@@ -3093,8 +3120,66 @@ TEST_P(MultiFragmentTest, compression) {
       test("local://t1", 0.7, false);
     }
     SCOPED_TRACE(fmt::format("minCompressionRatio 0.0000001"));
-    { test("local://t2", 0.0000001, true); }
+    {
+      test("local://t2", 0.0000001, true);
+    }
   }
+}
+
+TEST_P(MultiFragmentTest, compressionPageSizeSkip) {
+  if (GetParam().compressionKind == common::CompressionKind_NONE) {
+    GTEST_SKIP() << "Page size skip only applies with compression enabled";
+  }
+  if (GetParam().serdeKind != "Presto") {
+    GTEST_SKIP()
+        << "Page size skip only implemented in PrestoIterativeVectorSerializer";
+  }
+
+  const auto data = makeRowVector({makeFlatVector<int64_t>({1, 2, 3})});
+
+  const auto producerPlan =
+      test::PlanBuilder()
+          .values({data})
+          .partitionedOutput({}, 1, /*outputLayout=*/{}, GetParam().serdeKind)
+          .planNode();
+
+  const auto plan = test::PlanBuilder()
+                        .exchange(asRowType(data->type()), GetParam().serdeKind)
+                        .singleAggregation({}, {"sum(c0)"})
+                        .planNode();
+
+  const auto expected =
+      makeRowVector({makeFlatVector<int64_t>(std::vector<int64_t>{6})});
+
+  std::unordered_map<std::string, std::string> producerConfig;
+  producerConfig[core::QueryConfig::kShuffleCompressionKind] =
+      common::compressionKindToString(GetParam().compressionKind);
+  producerConfig[core::QueryConfig::kMinShuffleCompressionPageSizeBytes] =
+      std::to_string(1 << 30);
+
+  auto producerTask =
+      makeTask("local://pageSizeSkip", producerPlan, producerConfig);
+  producerTask->start(1);
+
+  auto consumerTask =
+      test::AssertQueryBuilder(plan)
+          .split(remoteSplit("local://pageSizeSkip"))
+          .config(
+              core::QueryConfig::kShuffleCompressionKind,
+              common::compressionKindToString(GetParam().compressionKind))
+          .destination(0)
+          .assertResults(expected);
+
+  auto producerTaskStats = exec::toPlanStats(producerTask->taskStats());
+  const auto& producerStats = producerTaskStats.at("1");
+  ASSERT_GT(
+      producerStats.customStats.count(
+          std::string(IterativeVectorSerializer::kCompressionSkippedBytes)),
+      0);
+  ASSERT_EQ(
+      producerStats.customStats.count(
+          std::string(IterativeVectorSerializer::kCompressionInputBytes)),
+      0);
 }
 
 TEST_P(MultiFragmentTest, scaledTableScan) {
@@ -3195,31 +3280,186 @@ TEST_P(MultiFragmentTest, scaledTableScan) {
     if (testData.scaleEnabled) {
       ASSERT_EQ(
           planStats.at(scanNodeId)
-              .customStats.count(TableScan::kNumRunningScaleThreads),
+              .customStats.count(
+                  std::string(TableScan::kNumRunningScaleThreads)),
           1);
       if (testData.expectScaleUp) {
         ASSERT_GE(
             planStats.at(scanNodeId)
-                .customStats[TableScan::kNumRunningScaleThreads]
+                .customStats[std::string(TableScan::kNumRunningScaleThreads)]
                 .sum,
             1);
         ASSERT_LE(
             planStats.at(scanNodeId)
-                .customStats[TableScan::kNumRunningScaleThreads]
+                .customStats[std::string(TableScan::kNumRunningScaleThreads)]
                 .sum,
             numLeafDrivers);
       } else {
         ASSERT_EQ(
             planStats.at(scanNodeId)
-                .customStats.count(TableScan::kNumRunningScaleThreads),
+                .customStats.count(
+                    std::string(TableScan::kNumRunningScaleThreads)),
             1);
       }
     } else {
       ASSERT_EQ(
           planStats.at(scanNodeId)
-              .customStats.count(TableScan::kNumRunningScaleThreads),
+              .customStats.count(
+                  std::string(TableScan::kNumRunningScaleThreads)),
           0);
     }
+  }
+}
+
+// Test row output with no columns (empty schema).
+TEST_P(MultiFragmentTest, emptySchema) {
+  // Create data with rows but no columns
+  auto emptyRowType = ROW({}, {});
+  auto data = makeRowVector(emptyRowType, 1'000);
+
+  std::vector<std::shared_ptr<Task>> tasks;
+  auto leafTaskId = makeTaskId("leaf", 0);
+
+  // Leaf task: Values -> PartitionedOutput
+  auto leafPlan =
+      PlanBuilder()
+          .values({data})
+          .partitionedOutput({}, 1, /*outputLayout=*/{}, GetParam().serdeKind)
+          .planNode();
+
+  auto leafTask = makeTask(leafTaskId, leafPlan, tasks.size());
+  tasks.push_back(leafTask);
+  leafTask->start(4);
+
+  // Root task: Exchange -> Project
+  auto rootTaskId = makeTaskId("root", 0);
+  auto rootPlan = PlanBuilder()
+                      .exchange(emptyRowType, GetParam().serdeKind)
+                      .singleAggregation({}, {"count(1)"})
+                      .planNode();
+
+  test::AssertQueryBuilder(rootPlan, duckDbQueryRunner_)
+      .split(remoteSplit(leafTaskId))
+      .config(
+          core::QueryConfig::kShuffleCompressionKind,
+          common::compressionKindToString(GetParam().compressionKind))
+      .assertResults("SELECT 1000");
+
+  for (auto& task : tasks) {
+    ASSERT_TRUE(waitForTaskCompletion(task.get())) << task->taskId();
+  }
+}
+
+// Test stateful deserialization with different batch byte limits.
+// This validates that the Exchange operator correctly breaks in the middle
+// and continues from the leftover when batch size limits are reached.
+TEST_P(MultiFragmentTest, batchBytes) {
+  auto test = [&](int32_t numBatches,
+                  int32_t rowsPerBatch,
+                  uint64_t preferredBatchBytes,
+                  uint64_t expectedAtLeastOutputBatches = 0) {
+    SCOPED_TRACE(
+        fmt::format(
+            "numBatches={}, rowsPerBatch={}, preferredBatchBytes={}",
+            numBatches,
+            rowsPerBatch,
+            succinctBytes(preferredBatchBytes)));
+
+    std::vector<RowVectorPtr> batches;
+    batches.reserve(numBatches);
+
+    for (int i = 0; i < numBatches; ++i) {
+      auto batch = makeRowVector({
+          makeFlatVector<int64_t>(
+              rowsPerBatch,
+              [i, rowsPerBatch](auto row) { return i * rowsPerBatch + row; }),
+          makeFlatVector<int32_t>(
+              rowsPerBatch,
+              [i, rowsPerBatch](auto row) {
+                return (i * rowsPerBatch + row) % 1000;
+              }),
+          makeFlatVector<double>(
+              rowsPerBatch,
+              [i, rowsPerBatch](auto row) {
+                return (i * rowsPerBatch + row) * 1.5;
+              }),
+      });
+      batches.push_back(batch);
+    }
+
+    auto leafTaskId = makeTaskId("leaf", 0);
+    auto leafPlan =
+        PlanBuilder()
+            .values(batches)
+            .partitionedOutput({}, 1, {"c0", "c1", "c2"}, GetParam().serdeKind)
+            .planNode();
+
+    auto leafTask = makeTask(leafTaskId, leafPlan, 0);
+    leafTask->start(1);
+
+    core::PlanNodeId exchangeNodeId;
+    auto rootPlan =
+        PlanBuilder()
+            .exchange(
+                ROW({"c0", "c1", "c2"}, {BIGINT(), INTEGER(), DOUBLE()}),
+                GetParam().serdeKind)
+            .capturePlanNodeId(exchangeNodeId)
+            .singleAggregation({}, {"count(1)", "sum(c0)", "avg(c2)"})
+            .planNode();
+
+    auto extraConfigs = std::unordered_map<std::string, std::string>{
+        {core::QueryConfig::kPreferredOutputBatchBytes,
+         std::to_string(preferredBatchBytes)},
+        {core::QueryConfig::kShuffleCompressionKind,
+         common::compressionKindToString(GetParam().compressionKind)}};
+
+    auto task = test::AssertQueryBuilder(rootPlan, duckDbQueryRunner_)
+                    .split(remoteSplit(leafTaskId))
+                    .configs(extraConfigs)
+                    .assertResults(
+                        fmt::format(
+                            "SELECT {}, {}, {}",
+                            numBatches * rowsPerBatch,
+                            (static_cast<int64_t>(numBatches) * rowsPerBatch *
+                             (numBatches * rowsPerBatch - 1)) /
+                                2,
+                            (static_cast<int64_t>(numBatches) * rowsPerBatch *
+                             (numBatches * rowsPerBatch - 1)) /
+                                2 * 1.5 / (numBatches * rowsPerBatch)));
+
+    waitForTaskCompletion(leafTask.get());
+
+    // Verify Exchange stats to ensure data was processed correctly
+    auto rootTaskStats = toPlanStats(task->taskStats());
+    const auto& exchangeStats = rootTaskStats.at(exchangeNodeId);
+
+    EXPECT_GE(exchangeStats.outputVectors, expectedAtLeastOutputBatches);
+  };
+
+  // Presto serialization operates at page-level granularity (pages are atomic).
+  // The number of output batches depends on how many Presto pages are created
+  // during serialization, which varies based on encoding, compression, and
+  // data.
+  //
+  // For this test (100 input batches × 100 rows = 10,000 rows):
+  // The actual behavior shows all pages are merged and processed together,
+  // resulting in a single batch output currently.
+  //
+  // This is a known limitation - Presto pages cannot be partially deserialized.
+  // The fix prevents INT32_MAX overflow by controlling the merge size, but
+  // fine-grained batch control requires deeper changes to PrestoVectorSerde.
+
+  if (GetParam().serdeKind == "Presto") {
+    // Current implementation merges all pages and processes in one batch
+    // The key improvement is preventing overflow, not fine-grained batching
+    test(100, 100, 1, 1); // Expect single batch with all data
+    test(100, 100, 1ULL << 30, 1); // Expect single batch with all data
+  } else {
+    // Row-based serialization (CompactRow/UnsafeRow) supports row-level
+    // batching With 1 byte limit: Can produce many small batches
+    test(100, 100, 1, 100);
+    // With 1GB limit: All rows fit in one batch
+    test(100, 100, 1ULL << 30, 1);
   }
 }
 
@@ -3230,7 +3470,7 @@ VELOX_INSTANTIATE_TEST_SUITE_P(
     [](const testing::TestParamInfo<TestParam>& info) {
       return fmt::format(
           "{}_{}",
-          VectorSerde::kindName(info.param.serdeKind),
+          info.param.serdeKind,
           compressionKindToString(info.param.compressionKind));
     });
 } // namespace

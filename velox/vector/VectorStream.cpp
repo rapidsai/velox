@@ -66,9 +66,9 @@ std::unique_ptr<VectorSerde>& getVectorSerdeImpl() {
   return serde;
 }
 
-std::unordered_map<VectorSerde::Kind, std::unique_ptr<VectorSerde>>&
+std::unordered_map<std::string, std::unique_ptr<VectorSerde>>&
 getNamedVectorSerdeImpl() {
-  static std::unordered_map<VectorSerde::Kind, std::unique_ptr<VectorSerde>>
+  static std::unordered_map<std::string, std::unique_ptr<VectorSerde>>
       namedSerdes;
   return namedSerdes;
 }
@@ -147,7 +147,7 @@ bool isRegisteredVectorSerde() {
 
 /// Named serde helper functions.
 void registerNamedVectorSerde(
-    VectorSerde::Kind kind,
+    const std::string& kind,
     std::unique_ptr<VectorSerde> serdeToRegister) {
   auto& namedSerdeMap = getNamedVectorSerdeImpl();
   VELOX_CHECK(
@@ -157,17 +157,17 @@ void registerNamedVectorSerde(
   namedSerdeMap[kind] = std::move(serdeToRegister);
 }
 
-void deregisterNamedVectorSerde(VectorSerde::Kind kind) {
+void deregisterNamedVectorSerde(const std::string& kind) {
   auto& namedSerdeMap = getNamedVectorSerdeImpl();
   namedSerdeMap.erase(kind);
 }
 
-bool isRegisteredNamedVectorSerde(VectorSerde::Kind kind) {
+bool isRegisteredNamedVectorSerde(const std::string& kind) {
   auto& namedSerdeMap = getNamedVectorSerdeImpl();
   return namedSerdeMap.find(kind) != namedSerdeMap.end();
 }
 
-VectorSerde* getNamedVectorSerde(VectorSerde::Kind kind) {
+VectorSerde* getNamedVectorSerde(const std::string& kind) {
   auto& namedSerdeMap = getNamedVectorSerdeImpl();
   auto it = namedSerdeMap.find(kind);
   VELOX_CHECK(
@@ -322,10 +322,11 @@ RowVectorPtr IOBufToRowVector(
   ranges.reserve(4);
 
   for (const auto& range : ioBuf) {
-    ranges.emplace_back(ByteRange{
-        const_cast<uint8_t*>(range.data()),
-        static_cast<int32_t>(range.size()),
-        0});
+    ranges.emplace_back(
+        ByteRange{
+            const_cast<uint8_t*>(range.data()),
+            static_cast<int32_t>(range.size()),
+            0});
   }
 
   auto byteStream = std::make_unique<BufferInputStream>(std::move(ranges));
@@ -338,6 +339,33 @@ RowVectorPtr IOBufToRowVector(
   serde->deserialize(
       byteStream.get(), &pool, outputType, &outputVector, nullptr);
   return outputVector;
+}
+
+folly::IOBuf rowVectorToIOBufBatch(
+    const RowVectorPtr& rowVector,
+    memory::MemoryPool& pool,
+    VectorSerde* serde,
+    const VectorSerde::Options* options) {
+  return rowVectorToIOBufBatch(
+      rowVector, rowVector->size(), pool, serde, options);
+}
+
+folly::IOBuf rowVectorToIOBufBatch(
+    const RowVectorPtr& rowVector,
+    vector_size_t rangeEnd,
+    memory::MemoryPool& pool,
+    VectorSerde* serde,
+    const VectorSerde::Options* options) {
+  if (serde == nullptr) {
+    serde = getVectorSerde();
+  }
+
+  auto serializer = serde->createBatchSerializer(&pool, options);
+  IOBufOutputStream stream(pool);
+  IndexRange range{0, rangeEnd};
+  Scratch scratch;
+  serializer->serialize(rowVector, folly::Range(&range, 1), scratch, &stream);
+  return std::move(*stream.getIOBuf());
 }
 
 } // namespace facebook::velox

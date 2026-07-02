@@ -20,6 +20,7 @@
 #include "velox/functions/lib/DateTimeFormatter.h"
 #include "velox/functions/prestosql/types/TimestampWithTimeZoneType.h"
 #include "velox/functions/prestosql/types/fuzzer_utils/TimestampWithTimeZoneInputGenerator.h"
+#include "velox/type/CastRegistry.h"
 #include "velox/type/tz/TimeZoneMap.h"
 
 namespace facebook::velox {
@@ -32,6 +33,36 @@ const tz::TimeZone* getTimeZoneFromConfig(const core::QueryConfig& config) {
   }
 
   return tz::locateZone(0); // GMT
+}
+
+// Helper function to calculate midnight in UTC for the given session start
+// time in the session timezone. This can be called once and reused for all
+// rows in a batch.
+int64_t calculateMidnightUtcMs(
+    int64_t sessionStartTimeMs,
+    const tz::TimeZone* sessionTimeZone) {
+  std::chrono::milliseconds localRepresentation;
+
+  if (sessionStartTimeMs != 0) {
+    // Convert session start time to local time in the timezone
+    localRepresentation = sessionTimeZone->to_local(
+        std::chrono::milliseconds(sessionStartTimeMs));
+  } else {
+    // Special case: when session start time is 0 (epoch), treat it as
+    // local representation of epoch (1970-01-01 00:00:00 in local time),
+    // not as UTC epoch converted to local time
+    localRepresentation = std::chrono::milliseconds(0);
+  }
+
+  // Truncate to start of day (midnight) in local time representation
+  auto localMidnight =
+      std::chrono::floor<std::chrono::days>(localRepresentation);
+
+  // Convert the local midnight representation back to UTC
+  auto utcMidnight = sessionTimeZone->to_sys(
+      std::chrono::duration_cast<std::chrono::milliseconds>(localMidnight));
+
+  return utcMidnight.count();
 }
 
 void castFromTimestamp(
@@ -184,6 +215,30 @@ void castToDate(
   });
 }
 
+void castToTime(
+    const BaseVector& input,
+    exec::EvalCtx& context,
+    const SelectivityVector& rows,
+    BaseVector& result) {
+  auto* flatResult = result.as<FlatVector<int64_t>>();
+  const auto* timestampVector = input.as<SimpleVector<int64_t>>();
+
+  context.applyToSelectedNoThrow(rows, [&](auto row) {
+    auto timestampWithTimezone = timestampVector->valueAt(row);
+    auto timestamp = unpackTimestampUtc(timestampWithTimezone);
+
+    // Convert the UTC timestamp to the timezone of the timestamp
+    timestamp.toTimezone(
+        *tz::locateZone(unpackZoneKeyId(timestampWithTimezone)));
+
+    // Extract time-of-day using std::chrono. floor() rounds towards
+    // negative infinity, so this correctly handles negative timestamps.
+    auto millis = std::chrono::milliseconds{timestamp.toMillis()};
+    auto timeOfDay = millis - std::chrono::floor<std::chrono::days>(millis);
+    flatResult->set(row, timeOfDay.count());
+  });
+}
+
 class TimestampWithTimeZoneCastOperator final : public exec::CastOperator {
   TimestampWithTimeZoneCastOperator() = default;
 
@@ -193,32 +248,6 @@ class TimestampWithTimeZoneCastOperator final : public exec::CastOperator {
     return {std::shared_ptr<const CastOperator>{}, &kInstance};
   }
 
-  bool isSupportedFromType(const TypePtr& other) const override {
-    switch (other->kind()) {
-      case TypeKind::TIMESTAMP:
-        return true;
-      case TypeKind::VARCHAR:
-        return true;
-      case TypeKind::INTEGER:
-        return other->isDate();
-      default:
-        return false;
-    }
-  }
-
-  bool isSupportedToType(const TypePtr& other) const override {
-    switch (other->kind()) {
-      case TypeKind::TIMESTAMP:
-        return true;
-      case TypeKind::VARCHAR:
-        return true;
-      case TypeKind::INTEGER:
-        return other->isDate();
-      default:
-        return false;
-    }
-  }
-
   void castTo(
       const BaseVector& input,
       exec::EvalCtx& context,
@@ -226,6 +255,52 @@ class TimestampWithTimeZoneCastOperator final : public exec::CastOperator {
       const TypePtr& resultType,
       VectorPtr& result) const override {
     context.ensureWritable(rows, resultType, result);
+
+    if (input.typeKind() == TypeKind::BIGINT &&
+        input.type()->equivalent(*TIME())) {
+      const auto& config = context.execCtx()->queryCtx()->queryConfig();
+      const auto* sessionTimeZone = getTimeZoneFromConfig(config);
+      const auto sessionStartTimeMs = config.sessionStartTimeMs();
+
+      // Calculate midnight in UTC once (shared by both constant and
+      // non-constant paths)
+      const auto midnightUtcMs =
+          calculateMidnightUtcMs(sessionStartTimeMs, sessionTimeZone);
+
+      if (input.isConstantEncoding()) {
+        // Optimization for constant TIME input vectors
+        auto constantInput = input.as<ConstantVector<int64_t>>();
+        if (constantInput->isNullAt(0)) {
+          result = BaseVector::createNullConstant(
+              resultType, rows.end(), context.pool());
+          return;
+        }
+
+        const auto timeMillis = constantInput->valueAt(0);
+        auto packedValue =
+            pack(midnightUtcMs + timeMillis, sessionTimeZone->id());
+        result = std::make_shared<ConstantVector<int64_t>>(
+            context.pool(),
+            rows.end(),
+            false, // isNull
+            resultType,
+            std::move(packedValue));
+        return;
+      } else {
+        // Non-constant TIME input
+        auto* timestampWithTzResult = result->asFlatVector<int64_t>();
+        timestampWithTzResult->clearNulls(rows);
+        auto* rawResults = timestampWithTzResult->mutableRawValues();
+
+        const auto inputVector = input.as<SimpleVector<int64_t>>();
+        context.applyToSelectedNoThrow(rows, [&](vector_size_t row) {
+          const auto timeMillis = inputVector->valueAt(row);
+          const auto utcTimestampMs = midnightUtcMs + timeMillis;
+          rawResults[row] = pack(utcTimestampMs, sessionTimeZone->id());
+        });
+        return;
+      }
+    }
 
     auto* timestampWithTzResult = result->asFlatVector<int64_t>();
     timestampWithTzResult->clearNulls(rows);
@@ -264,6 +339,9 @@ class TimestampWithTimeZoneCastOperator final : public exec::CastOperator {
     } else if (resultType->kind() == TypeKind::INTEGER) {
       VELOX_CHECK(resultType->isDate());
       castToDate(input, context, rows, *result);
+    } else if (resultType->kind() == TypeKind::BIGINT) {
+      VELOX_CHECK(resultType->equivalent(*TIME()));
+      castToTime(input, context, rows, *result);
     } else {
       VELOX_UNSUPPORTED(
           "Cast from TIMESTAMP WITH TIME ZONE to {} not yet supported",
@@ -279,7 +357,6 @@ class TimestampWithTimeZoneTypeFactory : public CustomTypeFactory {
     return TIMESTAMP_WITH_TIME_ZONE();
   }
 
-  // Type casting from and to TimestampWithTimezone is not supported yet.
   exec::CastOperatorPtr getCastOperator() const override {
     return TimestampWithTimeZoneCastOperator::get();
   }
@@ -294,7 +371,25 @@ class TimestampWithTimeZoneTypeFactory : public CustomTypeFactory {
 
 void registerTimestampWithTimeZoneType() {
   registerCustomType(
-      "timestamp with time zone",
+      "TIMESTAMP WITH TIME ZONE",
       std::make_unique<const TimestampWithTimeZoneTypeFactory>());
+  // Lower cost = preferred during overload resolution. TIMESTAMP is closer
+  // to TIMESTAMP WITH TIME ZONE than DATE.
+  registerCastRules({
+      {.fromType = "TIMESTAMP",
+       .toType = "TIMESTAMP WITH TIME ZONE",
+       .implicitAllowed = true,
+       .cost = 1},
+      {.fromType = "VARCHAR", .toType = "TIMESTAMP WITH TIME ZONE"},
+      {.fromType = "DATE",
+       .toType = "TIMESTAMP WITH TIME ZONE",
+       .implicitAllowed = true,
+       .cost = 2},
+      {.fromType = "TIME", .toType = "TIMESTAMP WITH TIME ZONE"},
+      {.fromType = "TIMESTAMP WITH TIME ZONE", .toType = "TIMESTAMP"},
+      {.fromType = "TIMESTAMP WITH TIME ZONE", .toType = "VARCHAR"},
+      {.fromType = "TIMESTAMP WITH TIME ZONE", .toType = "DATE"},
+      {.fromType = "TIMESTAMP WITH TIME ZONE", .toType = "TIME"},
+  });
 }
 } // namespace facebook::velox

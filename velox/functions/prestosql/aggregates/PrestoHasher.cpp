@@ -17,8 +17,7 @@
 
 #include <type_traits>
 
-#define XXH_INLINE_ALL
-#include <xxhash.h> // @manual=third-party//xxHash:xxhash
+#include "velox/common/base/XxHashInline.h"
 
 #include "velox/functions/lib/RowsTranslationUtil.h"
 #include "velox/functions/prestosql/types/IPAddressType.h"
@@ -104,8 +103,7 @@ FOLLY_ALWAYS_INLINE void hashFloating(
 #if defined(__clang__)
 __attribute__((no_sanitize("integer")))
 #endif
-FOLLY_ALWAYS_INLINE int64_t
-safeHash(const int64_t& a, const int64_t& b) {
+FOLLY_ALWAYS_INLINE int64_t safeHash(const int64_t& a, const int64_t& b) {
   return a * 31 + b;
 }
 

@@ -24,24 +24,24 @@
  * THE TPC SOFTWARE IS AVAILABLE WITHOUT CHARGE FROM TPC.
  */
 
-#include "w_store_sales.h"
+#include "velox/tpcds/gen/dsdgen/include/w_store_sales.h"
 
-#include "append_info.h"
-#include "build_support.h"
-#include "columns.h"
-#include "config.h"
-#include "constants.h"
-#include "decimal.h"
-#include "genrand.h"
-#include "nulls.h"
-#include "parallel.h"
-#include "permute.h"
-#include "porting.h"
-#include "scaling.h"
-#include "scd.h"
-#include "tables.h"
-#include "tdefs.h"
-#include "w_store_returns.h"
+#include "velox/tpcds/gen/dsdgen/include/append_info.h"
+#include "velox/tpcds/gen/dsdgen/include/build_support.h"
+#include "velox/tpcds/gen/dsdgen/include/columns.h"
+#include "velox/tpcds/gen/dsdgen/include/config.h"
+#include "velox/tpcds/gen/dsdgen/include/constants.h"
+#include "velox/tpcds/gen/dsdgen/include/decimal.h"
+#include "velox/tpcds/gen/dsdgen/include/genrand.h"
+#include "velox/tpcds/gen/dsdgen/include/nulls.h"
+#include "velox/tpcds/gen/dsdgen/include/parallel.h"
+#include "velox/tpcds/gen/dsdgen/include/permute.h"
+#include "velox/tpcds/gen/dsdgen/include/porting.h"
+#include "velox/tpcds/gen/dsdgen/include/scaling.h"
+#include "velox/tpcds/gen/dsdgen/include/scd.h"
+#include "velox/tpcds/gen/dsdgen/include/tables.h"
+#include "velox/tpcds/gen/dsdgen/include/tdefs.h"
+#include "velox/tpcds/gen/dsdgen/include/w_store_returns.h"
 
 // ds_key_t
 // skipDays(int nTable, ds_key_t* pRemainder, DSDGenContext& dsdGenContext);
@@ -54,14 +54,12 @@ W_STORE_SALES_TBL* mk_master_store_sales(
     ds_key_t index,
     DSDGenContext& dsdGenContext) {
   decimal_t dMin, dMax;
-  int nMaxItemCount;
   struct W_STORE_SALES_TBL* r;
   r = &dsdGenContext.g_w_store_sales;
 
   if (!dsdGenContext.mk_master_store_sales_init) {
     strtodec(&dMin, "1.00");
     strtodec(&dMax, "100000.00");
-    nMaxItemCount = 20;
     dsdGenContext.pStoreSalesItemPermutation = makePermutation(
         dsdGenContext.nStoreSalesItemCount =
             static_cast<int>(getIDCount(ITEM, dsdGenContext)),
@@ -75,7 +73,7 @@ W_STORE_SALES_TBL* mk_master_store_sales(
   }
 
   r->ss_sold_store_sk = mk_join(SS_SOLD_STORE_SK, STORE, 1, dsdGenContext);
-  r->ss_sold_time_sk = mk_join(SS_SOLD_TIME_SK, TIME, 1, dsdGenContext);
+  r->ss_sold_time_sk = mk_join(SS_SOLD_TIME_SK, TIMET, 1, dsdGenContext);
   r->ss_sold_date_sk = mk_join(SS_SOLD_DATE_SK, DATET, 1, dsdGenContext);
   r->ss_sold_customer_sk =
       mk_join(SS_SOLD_CUSTOMER_SK, CUSTOMER, 1, dsdGenContext);

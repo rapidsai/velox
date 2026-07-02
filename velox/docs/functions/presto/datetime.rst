@@ -144,7 +144,10 @@ Date and Time Functions
 
 .. function:: from_unixtime(unixtime) -> timestamp
 
-    Returns the UNIX timestamp ``unixtime`` as a timestamp.
+    Returns the UNIX timestamp ``unixtime`` as a timestamp.  If the
+    :doc:`adjust_timestamp_to_session_timezone <../../configs>` property is set
+    to true, then the timestamp is adjusted to the time zone specified in
+    :doc:`session_timezone <../../configs>`.
 
 .. function:: from_unixtime(unixtime, string) -> timestamp with time zone
     :noindex:
@@ -157,6 +160,10 @@ Date and Time Functions
     Returns the UNIX timestamp ``unixtime`` as a timestamp with time zone
     using ``hours`` and ``minutes`` for the time zone offset.
     The offset must be in [-14:00, 14:00] range.
+
+.. function:: localtimestamp -> timestamp
+
+    Returns the timestamp as of the start of the query.
 
 .. function:: to_iso8601(x) -> varchar
 
@@ -176,6 +183,31 @@ Date and Time Functions
 .. function:: to_unixtime(timestamp) -> double
 
     Returns ``timestamp`` as a UNIX timestamp.
+
+.. function:: current_time() -> time with time zone
+
+    Returns the current time since midnight with the session timezoneReturns the current time since midnight with the session timezone, based on the query session start time.
+
+.. function:: current_timezone() -> varchar
+
+    Returns the current session time zone as a varchar.
+
+    Example::
+
+        SELECT current_timezone;   -- Asia/Kolkata
+
+.. function:: current_timestamp() -> timestamp with time zone
+.. function:: now() -> timestamp with time zone
+
+    Returns the current timestamp with session time zone applied.
+    The timestamp is captured once at the start of query execution and remains
+    constant throughout the query. This matches the standard SQL behavior for
+    ``CURRENT_TIMESTAMP`` and ``NOW()``.
+
+    Example::
+
+        SELECT current_timestamp;  -- 2025-07-17 14:53:12.123 Asia/Kolkata
+        SELECT now();              -- 2025-07-17 14:53:12.123 Asia/Kolkata
 
 Truncation Function
 -------------------
@@ -313,6 +345,10 @@ Specifier Description
 .. function:: date_format(x, format) -> varchar
 
     Formats ``x`` as a string using ``format``. ``x`` is a timestamp or a timestamp with time zone.
+
+.. function:: date_parse(string, format) -> timestamp
+
+    Parses ``string`` into a timestamp using ``format``.
 
 Java Date Functions
 -------------------

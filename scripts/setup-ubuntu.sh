@@ -189,7 +189,7 @@ function install_cuda {
     cuda-minimal-build-"$dashed" \
     cuda-nvrtc-dev-"$dashed" \
     libcufile-dev-"$dashed" \
-    libnvjitlink-devel-"$dashed" \
+    libnvjitlink-dev-"$dashed" \
     libnuma1
 }
 
@@ -202,18 +202,18 @@ function install_s3 {
 
 function install_gcs {
   # Dependencies of GCS, probably a workaround until the docker image is rebuilt
-  apt install -y --no-install-recommends libc-ares-dev libcurl4-openssl-dev
-  install_gcs-sdk-cpp
+  ${SUDO} apt install -y --no-install-recommends libc-ares-dev libcurl4-openssl-dev
+  install_gcs_sdk_cpp
 }
 
 function install_abfs {
   # Dependencies of Azure Storage Blob cpp
-  apt install -y openssl libxml2-dev
-  install_azure-storage-sdk-cpp
+  ${SUDO} apt install -y openssl libxml2-dev
+  install_azure_storage_sdk_cpp
 }
 
 function install_hdfs {
-  apt install -y --no-install-recommends libxml2-dev libgsasl7-dev uuid-dev openjdk-8-jdk
+  ${SUDO} apt install -y --no-install-recommends libxml2-dev libgsasl7-dev uuid-dev openjdk-8-jdk
   install_hdfs_deps
 }
 
@@ -225,13 +225,14 @@ function install_adapters {
 }
 
 function install_faiss_deps {
-  sudo apt-get install -y libopenblas-dev libomp-dev
+  ${SUDO} apt-get install -y libopenblas-dev libomp-dev
 }
 
 function install_velox_deps {
   run_and_time install_velox_deps_from_apt
   run_and_time install_fmt
   run_and_time install_protobuf
+  run_and_time install_grpc
   run_and_time install_boost
   run_and_time install_fast_float
   run_and_time install_folly
@@ -247,6 +248,7 @@ function install_velox_deps {
   run_and_time install_xsimd
   run_and_time install_simdjson
   run_and_time install_geos
+  run_and_time install_s2geometry
   run_and_time install_faiss
 }
 

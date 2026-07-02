@@ -24,6 +24,7 @@
 using facebook::velox::test::BatchMaker;
 
 namespace facebook::velox::exec::test {
+using namespace facebook::velox::common::testutil;
 namespace {
 
 class LocalPartitionTest : public HiveConnectorTestBase {
@@ -329,6 +330,80 @@ TEST_F(LocalPartitionTest, partitionBuffering) {
       queryBuilder.assertResults(query), 2200, 2, 2);
 }
 
+TEST_F(LocalPartitionTest, partitionBufferingWithStringBuffers) {
+  // Test string buffer memory accounting with partition buffering.
+  // String buffers are multiply-referenced across partitions. The fix
+  // amortizes string buffer sizes across partitions to avoid over-counting,
+  // which allows more efficient buffering.
+  std::vector<RowVectorPtr> vectors;
+  for (auto i = 0; i < 4; ++i) {
+    vectors.emplace_back(makeRowVector(
+        {"c0", "c1"},
+        {makeFlatVector<int32_t>(100, [](auto row) { return row % 2; }),
+         makeFlatVector<std::string>(
+             100, [](auto /*row*/) { return std::string(100, 'a'); })}));
+  }
+
+  auto runQuery = [&](const std::vector<RowVectorPtr>& input,
+                      int maxDrivers,
+                      int maxPartitionBufferSize) {
+    std::string query{"SELECT c0, arbitrary(c1) FROM tmp GROUP BY c0"};
+    auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+    auto plan =
+        PlanBuilder(planNodeIdGenerator)
+            .localPartition(
+                {"c0"},
+                {PlanBuilder(planNodeIdGenerator).values(input).planNode()})
+            .partialAggregation({"c0"}, {"arbitrary(c1)"})
+            .planNode();
+    createDuckDbTable(vectors);
+
+    AssertQueryBuilder queryBuilder(plan, duckDbQueryRunner_);
+    queryBuilder.maxDrivers(maxDrivers);
+
+    std::unordered_map<std::string, std::string> configs;
+    configs[core::QueryConfig::
+                kMinLocalExchangePartitionCountToUsePartitionBuffer] =
+        std::to_string(2);
+    configs[core::QueryConfig::kMaxLocalExchangePartitionBufferSize] =
+        std::to_string(maxPartitionBufferSize);
+    queryBuilder.configs(configs);
+
+    return queryBuilder.assertResults(query);
+  };
+
+  // With amortized string buffer accounting, the buffer can accumulate rows
+  // from all input vectors. So only 2 vectors are flushed to
+  // LocalExchangeQueues, compared to 8 if not amortizing string buffer sizes.
+  verifyExchangeSourceOperatorStats(runQuery(vectors, 2, 50000), 400, 2, 2);
+
+  // Test case with 99% of data belonging to one partition. We expect all
+  // partition buffers getting flushed together when the total size of all
+  // partition buffers exceeds the limit, instead of flushing each partiton
+  // buffer individually.
+  vectors.clear();
+  for (auto i = 0; i < 4; ++i) {
+    vectors.emplace_back(makeRowVector(
+        {"c0", "c1"},
+        {makeFlatVector<int32_t>(
+             100,
+             [](auto row) {
+               if (row == 0) {
+                 return 0;
+               } else {
+                 return 1;
+               }
+             }),
+         makeFlatVector<std::string>(
+             100, [](auto /*row*/) { return std::string(100, 'a'); })}));
+  }
+
+  // The total size of all partition buffers should exceed the limit and trigger
+  // the flush of all partition buffers at every batch, hence flushing a total
+  // of 8 vectors.
+  verifyExchangeSourceOperatorStats(runQuery(vectors, 2, 20000), 400, 8, 2);
+}
+
 TEST_F(LocalPartitionTest, partitionBufferingPreserveEncoding) {
   std::vector<RowVectorPtr> vectors = {
       makeRowVector({"c0"}, {makeConstant<int32_t>(0, 100)}),
@@ -388,8 +463,9 @@ TEST_F(LocalPartitionTest, maxBufferSizeGather) {
 
   auto valuesNode = [&](int start, int end) {
     return PlanBuilder(planNodeIdGenerator)
-        .values(std::vector<RowVectorPtr>(
-            vectors.begin() + start, vectors.begin() + end))
+        .values(
+            std::vector<RowVectorPtr>(
+                vectors.begin() + start, vectors.begin() + end))
         .planNode();
   };
 
@@ -961,8 +1037,9 @@ TEST_F(LocalPartitionTest, unionAllLocalExchangeWithInterDependency) {
       }
     };
 
-    Operator::registerOperator(std::make_unique<BlockingNodeFactory>(
-        std::move(blockingCallback), std::move(finishCallback)));
+    Operator::registerOperator(
+        std::make_unique<BlockingNodeFactory>(
+            std::move(blockingCallback), std::move(finishCallback)));
 
     auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
     auto plan = PlanBuilder(planNodeIdGenerator)
@@ -1030,8 +1107,9 @@ TEST_F(
 
   auto finishCallback = [&](bool /*unused*/) {};
 
-  Operator::registerOperator(std::make_unique<BlockingNodeFactory>(
-      std::move(blockingCallback), std::move(finishCallback)));
+  Operator::registerOperator(
+      std::make_unique<BlockingNodeFactory>(
+          std::move(blockingCallback), std::move(finishCallback)));
 
   auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
   auto plan = PlanBuilder(planNodeIdGenerator)
@@ -1143,11 +1221,23 @@ TEST_F(LocalPartitionTest, barrier) {
                           tableScanNode(),
                       })
                   .planNode();
+  struct {
+    bool hasBarrier;
+    bool serialExecution;
 
-  for (const auto hasBarrier : {false, true}) {
-    SCOPED_TRACE(fmt::format("hasBarrier {}", hasBarrier));
+    std::string toString() const {
+      return fmt::format(
+          "hasBarrier: {}, serialExecution: {}", hasBarrier, serialExecution);
+    }
+  } testSettings[] = {
+      {false, false}, {false, true}, {true, false}, {true, true}};
+
+  for (const auto& testData : testSettings) {
+    SCOPED_TRACE(testData.toString());
     AssertQueryBuilder queryBuilder(plan, duckDbQueryRunner_);
-    queryBuilder.barrierExecution(hasBarrier).serialExecution(true);
+    queryBuilder.barrierExecution(testData.hasBarrier)
+        .serialExecution(testData.serialExecution)
+        .maxDrivers(testData.serialExecution ? 1 : 3);
     for (auto i = 0; i < numSources; ++i) {
       for (auto j = 0; j < numSplits; ++j) {
         queryBuilder.split(
@@ -1156,7 +1246,8 @@ TEST_F(LocalPartitionTest, barrier) {
     }
 
     const auto task = queryBuilder.assertResults("SELECT * FROM tmp");
-    ASSERT_EQ(task->taskStats().numBarriers, hasBarrier ? numSplits : 0);
+    ASSERT_EQ(
+        task->taskStats().numBarriers, testData.hasBarrier ? numSplits : 0);
   }
 }
 

@@ -17,7 +17,7 @@
 #include <folly/init/Init.h>
 #include <velox/exec/Driver.h>
 #include <memory>
-#include "folly/experimental/EventCount.h"
+#include "folly/synchronization/EventCount.h"
 #include "velox/common/base/tests/GTestUtils.h"
 #include "velox/common/testutil/TestValue.h"
 #include "velox/dwio/common/tests/utils/BatchMaker.h"
@@ -124,8 +124,9 @@ class DriverTest : public OperatorTestBase {
       bool addTestingPauser = false) {
     std::vector<RowVectorPtr> batches;
     for (int32_t i = 0; i < numBatches; ++i) {
-      batches.push_back(std::dynamic_pointer_cast<RowVector>(
-          BatchMaker::createBatch(rowType, rowsInBatch, *pool_)));
+      batches.push_back(
+          std::dynamic_pointer_cast<RowVector>(
+              BatchMaker::createBatch(rowType, rowsInBatch, *pool_)));
     }
     if (filterFunc) {
       int32_t hits = 0;
@@ -188,10 +189,11 @@ class DriverTest : public OperatorTestBase {
     bool paused = false;
     for (;;) {
       if (operation == ResultOperation::kPause && paused) {
-        if (!cursor->hasNext()) {
-          paused = false;
-          Task::resume(cursor->task());
-        }
+        // Resume the task so that next() can retrieve more data.
+        // If there's already buffered data, next() returns it immediately;
+        // otherwise it will wait for the resumed task to produce output.
+        paused = false;
+        Task::resume(cursor->task());
       }
       if (!cursor->next()) {
         break;
@@ -468,10 +470,11 @@ TEST_F(DriverTest, error) {
   EXPECT_EQ(numRead, 0);
   EXPECT_TRUE(stateFutures_.at(0).isReady());
   // Realized immediately since task not running.
-  EXPECT_TRUE(tasks_[0]
-                  ->taskCompletionFuture()
-                  .within(std::chrono::microseconds(1'000'000))
-                  .isReady());
+  EXPECT_TRUE(
+      tasks_[0]
+          ->taskCompletionFuture()
+          .within(std::chrono::microseconds(1'000'000))
+          .isReady());
   EXPECT_EQ(tasks_[0]->state(), TaskState::kFailed);
 }
 
@@ -799,8 +802,9 @@ TEST_F(DriverTest, pauserNode) {
   // all its Tasks in the test instance to create inter-Task pauses.
   static DriverTest* testInstance;
   testInstance = this;
-  Operator::registerOperator(std::make_unique<PauserNodeFactory>(
-      kThreadsPerTask, sequence, testInstance));
+  Operator::registerOperator(
+      std::make_unique<PauserNodeFactory>(
+          kThreadsPerTask, sequence, testInstance));
 
   std::vector<CursorParameters> params(kNumTasks);
   int32_t hits{0};
@@ -1614,7 +1618,8 @@ DEBUG_ONLY_TEST_F(DriverTest, driverCpuTimeSlicingCheck) {
           0,
           core::QueryCtx::create(
               driverExecutor_.get(), core::QueryConfig{std::move(queryConfig)}),
-          testParam.executionMode);
+          testParam.executionMode,
+          exec::Consumer{});
       while (task->next() != nullptr) {
       }
     }

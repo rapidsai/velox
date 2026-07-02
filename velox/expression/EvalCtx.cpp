@@ -39,14 +39,39 @@ EvalCtx::EvalCtx(
   VELOX_CHECK_NOT_NULL(exprSet);
   VELOX_CHECK_NOT_NULL(row);
 
-  inputFlatNoNulls_ = true;
-  for (const auto& child : row->children()) {
+  inputFlatNoNulls_ = computeInputFlatNoNulls(*row);
+}
+
+EvalCtx::EvalCtx(
+    core::ExecCtx* execCtx,
+    ExprSet* exprSet,
+    const RowVector* row,
+    bool inputFlatNoNulls,
+    bool lazyDereference)
+    : execCtx_(execCtx),
+      exprSet_(exprSet),
+      row_(row),
+      lazyDereference_(lazyDereference),
+      inputFlatNoNulls_(inputFlatNoNulls) {
+  VELOX_CHECK_NOT_NULL(execCtx);
+  VELOX_CHECK_NOT_NULL(exprSet);
+  VELOX_CHECK_NOT_NULL(row);
+  VELOX_DCHECK_EQ(
+      inputFlatNoNulls,
+      computeInputFlatNoNulls(*row),
+      "Pre-computed inputFlatNoNulls does not match actual RowVector state");
+}
+
+// static
+bool EvalCtx::computeInputFlatNoNulls(const RowVector& row) {
+  for (const auto& child : row.children()) {
     VELOX_CHECK_NOT_NULL(child);
     if ((!child->isFlatEncoding() && !child->isConstantEncoding()) ||
         child->mayHaveNulls()) {
-      inputFlatNoNulls_ = false;
+      return false;
     }
   }
+  return true;
 }
 
 EvalCtx::EvalCtx(core::ExecCtx* execCtx)
@@ -186,6 +211,25 @@ void EvalCtx::setStatus(vector_size_t index, const Status& status) {
       addError(index, toVeloxUserError(status.message()), errors_);
     } else {
       addError(index, errors_);
+    }
+  } else {
+    VELOX_FAIL(status.message());
+  }
+}
+
+void EvalCtx::setStatuses(const SelectivityVector& rows, const Status& status) {
+  VELOX_CHECK(!status.ok(), "Status must be an error");
+  if (status.isUserError()) {
+    if (throwOnError_) {
+      VELOX_USER_FAIL(status.message());
+    }
+
+    if (captureErrorDetails_) {
+      auto veloxException = toVeloxUserError(status.message());
+      rows.applyToSelected(
+          [&](auto row) { addError(row, veloxException, errors_); });
+    } else {
+      rows.applyToSelected([&](auto row) { addError(row, errors_); });
     }
   } else {
     VELOX_FAIL(status.message());

@@ -24,24 +24,24 @@
  * THE TPC SOFTWARE IS AVAILABLE WITHOUT CHARGE FROM TPC.
  */
 
-#include "scaling.h"
+#include "velox/tpcds/gen/dsdgen/include/scaling.h"
 #include <assert.h>
 #include <stdio.h>
 #include <cmath>
-#include "columns.h"
-#include "config.h"
-#include "constants.h"
-#include "dist.h"
-#include "error_msg.h"
-#include "genrand.h"
-#include "parallel.h"
-#include "porting.h"
-#include "r_params.h"
-#include "scd.h"
-#include "tdef_functions.h"
-#include "tdefs.h"
-#include "tpcds.idx.h"
-#include "w_inventory.h"
+#include "velox/tpcds/gen/dsdgen/include/columns.h"
+#include "velox/tpcds/gen/dsdgen/include/config.h"
+#include "velox/tpcds/gen/dsdgen/include/constants.h"
+#include "velox/tpcds/gen/dsdgen/include/dist.h"
+#include "velox/tpcds/gen/dsdgen/include/error_msg.h"
+#include "velox/tpcds/gen/dsdgen/include/genrand.h"
+#include "velox/tpcds/gen/dsdgen/include/parallel.h"
+#include "velox/tpcds/gen/dsdgen/include/porting.h"
+#include "velox/tpcds/gen/dsdgen/include/r_params.h"
+#include "velox/tpcds/gen/dsdgen/include/scd.h"
+#include "velox/tpcds/gen/dsdgen/include/tdef_functions.h"
+#include "velox/tpcds/gen/dsdgen/include/tdefs.h"
+#include "velox/tpcds/gen/dsdgen/include/tpcds.idx.h"
+#include "velox/tpcds/gen/dsdgen/include/w_inventory.h"
 
 void setUpdateScaling(int table, DSDGenContext& dsdGenContext);
 int row_skip(int tbl, ds_key_t count, DSDGenContext& dsdGenContext);
@@ -217,7 +217,8 @@ ds_key_t getIDCount(int nTable, DSDGenContext& dsdGenContext) {
  */
 ds_key_t get_rowcount(int table, DSDGenContext& dsdGenContext) {
   static double nScale;
-  int nTable, nMultiplier, i, nBadScale = 0, nRowcountOffset = 0;
+  int nTable, nMultiplier, i, nRowcountOffset = 0;
+  // int nBadScale = 0;
   tdef* pTdef;
 
   if (!dsdGenContext.get_rowcount_init) {
@@ -270,7 +271,7 @@ ds_key_t get_rowcount(int table, DSDGenContext& dsdGenContext) {
               dsdGenContext);
           break;
         case 300:
-          nBadScale = QERR_BAD_SCALE;
+          // nBadScale = QERR_BAD_SCALE;
           dsdGenContext.arRowcount[nTable].kBaseRowcount = dist_weight(
               NULL,
               "rowcounts",
@@ -279,7 +280,7 @@ ds_key_t get_rowcount(int table, DSDGenContext& dsdGenContext) {
               dsdGenContext);
           break;
         case 100:
-          nBadScale = QERR_BAD_SCALE;
+          // nBadScale = QERR_BAD_SCALE;
           dsdGenContext.arRowcount[nTable].kBaseRowcount = dist_weight(
               NULL,
               "rowcounts",
@@ -288,7 +289,7 @@ ds_key_t get_rowcount(int table, DSDGenContext& dsdGenContext) {
               dsdGenContext);
           break;
         case 10:
-          nBadScale = QERR_BAD_SCALE;
+          // nBadScale = QERR_BAD_SCALE;
           dsdGenContext.arRowcount[nTable].kBaseRowcount = dist_weight(
               NULL,
               "rowcounts",
@@ -297,7 +298,7 @@ ds_key_t get_rowcount(int table, DSDGenContext& dsdGenContext) {
               dsdGenContext);
           break;
         case 1:
-          nBadScale = QERR_QUALIFICATION_SCALE;
+          // nBadScale = QERR_QUALIFICATION_SCALE;
           dsdGenContext.arRowcount[nTable].kBaseRowcount = dist_weight(
               NULL,
               "rowcounts",
@@ -306,7 +307,7 @@ ds_key_t get_rowcount(int table, DSDGenContext& dsdGenContext) {
               dsdGenContext);
           break;
         default:
-          nBadScale = QERR_BAD_SCALE;
+          // nBadScale = QERR_BAD_SCALE;
           int mem =
               dist_member(NULL, "rowcounts", nTable + 1, 3, dsdGenContext);
           switch (mem) {

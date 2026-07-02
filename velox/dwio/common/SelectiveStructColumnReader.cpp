@@ -407,7 +407,6 @@ void SelectiveStructColumnReaderBase::read(
   }
 
   const uint64_t* structNulls = nulls();
-
   // A struct reader may have a null/non-null filter
   if (scanSpec_->filter()) {
     const auto kind = scanSpec_->filter()->kind();
@@ -429,7 +428,6 @@ void SelectiveStructColumnReaderBase::read(
   VELOX_CHECK(!childSpecs.empty());
   for (size_t i = 0; i < childSpecs.size(); ++i) {
     const auto& childSpec = childSpecs[i];
-    VELOX_TRACE_HISTORY_PUSH("read %s", childSpec->fieldName().c_str());
 
     if (childSpec->deltaUpdate()) {
       // Will make LazyVector.
@@ -453,7 +451,7 @@ void SelectiveStructColumnReaderBase::read(
     auto* reader = children_.at(fieldIndex);
     if (reader->isTopLevel() && childSpec->projectOut() &&
         !childSpec->hasFilter() && generateLazyChildren_) {
-      // Will make a LazyVector.
+      // Will make a LazyVector (with or without transform).
       continue;
     }
 
@@ -463,7 +461,7 @@ void SelectiveStructColumnReaderBase::read(
         SelectivityTimer timer(childSpec->selectivity(), activeRows.size());
 
         reader->resetInitTimeClocks();
-        reader->read(offset, activeRows, structNulls);
+        reader->readWithTiming(offset, activeRows, structNulls);
 
         // Exclude initialization time.
         timer.subtract(reader->initTimeClocks());
@@ -475,7 +473,7 @@ void SelectiveStructColumnReaderBase::read(
         break;
       }
     } else {
-      reader->read(offset, activeRows, structNulls);
+      reader->readWithTiming(offset, activeRows, structNulls);
     }
   }
 
@@ -531,12 +529,59 @@ bool SelectiveStructColumnReaderBase::isChildMissing(
        childSpec.channel() >= fileType_->size());
 }
 
+std::unique_ptr<velox::dwio::common::ColumnLoader>
+SelectiveStructColumnReaderBase::makeColumnLoader(vector_size_t index) {
+  // Check if the child at this index has a transform with kNone extraction.
+  // If so, return a TransformColumnLoader to apply the transform lazily.
+  for (const auto& childSpec : scanSpec_->children()) {
+    if (childSpec->subscript() == index && childSpec->hasTransform() &&
+        childSpec->extractionType() ==
+            velox::common::ScanSpec::ExtractionType::kNone) {
+      return std::make_unique<velox::dwio::common::TransformColumnLoader>(
+          this, children_[index], numReads_, childSpec->transform());
+    }
+  }
+  return std::make_unique<velox::dwio::common::ColumnLoader>(
+      this, children_[index], numReads_);
+}
+
 void SelectiveStructColumnReaderBase::getValues(
     const RowSet& rows,
     VectorPtr* result) {
   VELOX_CHECK(!scanSpec_->children().empty());
   VELOX_CHECK_NOT_NULL(
       *result, "SelectiveStructColumnReaderBase expects a non-null result");
+
+  // When deltaUpdate is set, skip kField extraction so the reader produces
+  // the full struct.  The extraction transform is applied after the delta
+  // update.
+  if (!isRoot_ &&
+      scanSpec_->extractionType() ==
+          velox::common::ScanSpec::ExtractionType::kField &&
+      !scanSpec_->deltaUpdate()) {
+    auto fieldIdx = scanSpec_->extractionFieldIndex();
+    for (const auto& childSpec : scanSpec_->children()) {
+      if (childSpec->channel() == fieldIdx && !childSpec->isConstant()) {
+        auto index = static_cast<vector_size_t>(childSpec->subscript());
+        if (childSpec->hasFilter() || !children_[index]->isTopLevel() ||
+            !generateLazyChildren_) {
+          children_[index]->getValues(rows, result);
+        } else {
+          // Lazy loading: create a LazyVector for the extracted field.
+          setOutputRowsForLazy(rows);
+          setLazyField(
+              makeColumnLoader(index),
+              children_[index]->requestedType(),
+              static_cast<vector_size_t>(rows.size()),
+              pool_,
+              *result);
+        }
+        return;
+      }
+    }
+    VELOX_UNREACHABLE();
+  }
+
   VELOX_CHECK(
       result->get()->type()->isRow(),
       "Struct reader expects a result of type ROW.");
@@ -550,7 +595,6 @@ void SelectiveStructColumnReaderBase::getValues(
 
   setComplexNulls(rows, *result);
   for (const auto& childSpec : scanSpec_->children()) {
-    VELOX_TRACE_HISTORY_PUSH("getValues %s", childSpec->fieldName().c_str());
     if (!childSpec->keepValues()) {
       continue;
     }
@@ -574,8 +618,17 @@ void SelectiveStructColumnReaderBase::getValues(
                 this, children_[index], numReads_),
             resultRow->type()->childAt(channel),
             rows.size(),
-            memoryPool_,
+            pool_,
             childResult);
+      }
+      // If the column also has an extraction transform (e.g., MapKeys on a
+      // MAP_CONCAT delta-updated column), apply it after the delta update.
+      // The delta update modifies the column (e.g., MAP_CONCAT adds entries),
+      // and extraction should see the updated data.
+      if (childSpec->hasTransform() && childResult) {
+        // Force-load lazy vectors so the transform can process them.
+        childResult = BaseVector::loadedVectorShared(childResult);
+        childResult = childSpec->transform()(childResult, pool_);
       }
       continue;
     }
@@ -615,13 +668,16 @@ void SelectiveStructColumnReaderBase::getValues(
 
     // LazyVector result.
     setOutputRowsForLazy(rows);
+    // When the child has a transform (e.g., extraction pushdown), the lazy
+    // vector type is the transform's output type, not the file column type.
+    auto lazyType =
+        (childSpec->hasTransform() && childSpec->transformOutputType())
+        ? childSpec->transformOutputType()
+        : resultRow->type()->childAt(channel);
     setLazyField(
-        std::make_unique<ColumnLoader>(this, children_[index], numReads_),
-        resultRow->type()->childAt(channel),
-        rows.size(),
-        memoryPool_,
-        childResult);
+        makeColumnLoader(index), lazyType, rows.size(), pool_, childResult);
   }
+
   resultRow->updateContainsLazyNotLoaded();
 }
 

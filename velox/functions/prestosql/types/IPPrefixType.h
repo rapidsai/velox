@@ -23,8 +23,8 @@
 #include "velox/type/Type.h"
 
 namespace facebook::velox {
-
 namespace ipaddress {
+
 constexpr uint8_t kIPV4Bits = 32;
 constexpr uint8_t kIPV6Bits = 128;
 constexpr int kIPPrefixLengthIndex = 16;
@@ -50,7 +50,7 @@ inline folly::Expected<int8_t, Status> tryIpPrefixLengthFromIPAddressType(
 }
 
 inline folly::Expected<std::pair<int128_t, int8_t>, Status>
-tryParseIpPrefixString(folly::StringPiece ipprefixString) {
+tryParseIpPrefixString(std::string_view ipprefixString) {
   // Ensure '/' is present
   if (ipprefixString.find('/') == std::string::npos) {
     return folly::makeUnexpected(
@@ -92,8 +92,13 @@ tryParseIpPrefixString(folly::StringPiece ipprefixString) {
   memcpy(&intAddr, &addrBytes, ipaddress::kIPAddressBytes);
   return std::make_pair(intAddr, prefix);
 }
+
 }; // namespace ipaddress
 
+/// Represents an IP prefix as ROW<IPADDRESS, TINYINT>. The prefix length is
+/// stored as TINYINT (int8_t), so IPv6 prefix length 128 wraps to -128. Code
+/// that reads the prefix length must cast to uint8_t to recover the correct
+/// unsigned value.
 class IPPrefixType final : public RowType {
   IPPrefixType()
       : RowType(
@@ -119,6 +124,18 @@ class IPPrefixType final : public RowType {
     return name();
   }
 
+  /// Max string size: 39 (IPv6) + 1 (/) + 3 (prefix up to 128) = 43.
+  static constexpr int32_t kMaxStringSize = 43;
+
+  /// Formats an IP prefix as "ip/prefixLength" (e.g., "192.128.0.0/9" or
+  /// "2001:db8::/32").
+  /// @param ip IP address stored as int128_t.
+  /// @param prefixLength Prefix length in bits.
+  /// @param buffer Output buffer, pre-allocated with at least kMaxStringSize
+  /// bytes.
+  std::string_view valueToString(int128_t ip, int8_t prefixLength, char* buffer)
+      const;
+
   folly::dynamic serialize() const override {
     folly::dynamic obj = folly::dynamic::object;
     obj["name"] = "Type";
@@ -126,9 +143,8 @@ class IPPrefixType final : public RowType {
     return obj;
   }
 
-  const std::vector<TypeParameter>& parameters() const override {
-    static const std::vector<TypeParameter> kEmpty = {};
-    return kEmpty;
+  std::span<const TypeParameter> parameters() const override {
+    return {};
   }
 };
 

@@ -17,12 +17,14 @@
 #include "velox/connectors/hive/storage_adapters/gcs/GcsFileSystem.h"
 #include "velox/common/base/tests/GTestUtils.h"
 #include "velox/common/file/File.h"
+#include "velox/common/testutil/TempFilePath.h"
 #include "velox/connectors/hive/storage_adapters/gcs/GcsUtil.h"
 #include "velox/connectors/hive/storage_adapters/gcs/RegisterGcsFileSystem.h"
 #include "velox/connectors/hive/storage_adapters/gcs/tests/GcsEmulator.h"
-#include "velox/exec/tests/utils/TempFilePath.h"
 
 #include "gtest/gtest.h"
+
+using namespace facebook::velox::common::testutil;
 
 namespace facebook::velox::filesystems {
 namespace {
@@ -60,8 +62,8 @@ TEST_F(GcsFileSystemTest, readFile) {
   EXPECT_EQ(size, ref_size);
   EXPECT_EQ(readFile->pread(0, size), kLoremIpsum);
 
-  char buffer1[size];
-  ASSERT_EQ(readFile->pread(0, size, &buffer1), kLoremIpsum);
+  std::vector<char> buffer1(size);
+  ASSERT_EQ(readFile->pread(0, size, buffer1.data()), kLoremIpsum);
   ASSERT_EQ(readFile->size(), ref_size);
 
   char buffer2[50];
@@ -252,7 +254,7 @@ TEST_F(GcsFileSystemTest, credentialsConfig) {
       "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
       "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/foo-email%40foo-project.iam.gserviceaccount.com"
   })""";
-  auto jsonFile = exec::test::TempFilePath::create();
+  auto jsonFile = TempFilePath::create();
   std::ofstream credsOut(jsonFile->getPath());
   credsOut << kCreds;
   credsOut.close();

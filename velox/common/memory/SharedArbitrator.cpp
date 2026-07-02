@@ -15,6 +15,7 @@
  */
 
 #include "velox/common/memory/SharedArbitrator.h"
+#include <folly/system/HardwareConcurrency.h>
 #include <folly/system/ThreadName.h>
 #include <pthread.h>
 #include <mutex>
@@ -58,25 +59,28 @@ namespace {
   }
 
 #define MEM_POOL_CAP_EXCEEDED(errorMessage, requestPool) \
-  VELOX_MEM_POOL_CAP_EXCEEDED(fmt::format(               \
-      "Exceeded memory pool capacity. {}\n{}\n\n{}",     \
-      errorMessage,                                      \
-      this->toString(),                                  \
-      requestPool->toString(true)));
+  VELOX_MEM_POOL_CAP_EXCEEDED(                           \
+      fmt::format(                                       \
+          "Exceeded memory pool capacity. {}\n{}\n\n{}", \
+          errorMessage,                                  \
+          this->toString(),                              \
+          requestPool->toString(true)));
 
 #define LOCAL_MEM_ARBITRATION_FAILED(errorMessage, requestPool) \
-  VELOX_MEM_ARBITRATION_FAILED(fmt::format(                     \
-      "Local arbitration failure. {}\n{}\n\n{}",                \
-      errorMessage,                                             \
-      this->toString(),                                         \
-      requestPool->toString(true)));
+  VELOX_MEM_ARBITRATION_FAILED(                                 \
+      fmt::format(                                              \
+          "Local arbitration failure. {}\n{}\n\n{}",            \
+          errorMessage,                                         \
+          this->toString(),                                     \
+          requestPool->toString(true)));
 
 #define GLOBAL_MEM_ARBITRATION_FAILED(errorMessage, requestPool) \
-  VELOX_MEM_ARBITRATION_FAILED(fmt::format(                      \
-      "Global arbitration failure. {}\n{}\n\n{}",                \
-      errorMessage,                                              \
-      this->toString(),                                          \
-      requestPool->toString(true)));
+  VELOX_MEM_ARBITRATION_FAILED(                                  \
+      fmt::format(                                               \
+          "Global arbitration failure. {}\n{}\n\n{}",            \
+          errorMessage,                                          \
+          this->toString(),                                      \
+          requestPool->toString(true)));
 
 template <typename T>
 T getConfig(
@@ -126,10 +130,11 @@ uint64_t SharedArbitrator::ExtraConfig::memoryPoolReservedCapacity(
 uint64_t SharedArbitrator::ExtraConfig::maxMemoryArbitrationTimeNs(
     const std::unordered_map<std::string, std::string>& configs) {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
-             config::toDuration(getConfig<std::string>(
-                 configs,
-                 kMaxMemoryArbitrationTime,
-                 std::string(kDefaultMaxMemoryArbitrationTime))))
+             config::toDuration(
+                 getConfig<std::string>(
+                     configs,
+                     kMaxMemoryArbitrationTime,
+                     std::string(kDefaultMaxMemoryArbitrationTime))))
       .count();
 }
 
@@ -292,8 +297,7 @@ SharedArbitrator::SharedArbitrator(const Config& config)
       "memoryReclaimThreadsHwMultiplier_ needs to be positive");
 
   const uint64_t numReclaimThreads = std::max<size_t>(
-      1,
-      std::thread::hardware_concurrency() * memoryReclaimThreadsHwMultiplier_);
+      1, folly::available_concurrency() * memoryReclaimThreadsHwMultiplier_);
   memoryReclaimExecutor_ = std::make_unique<folly::CPUThreadPoolExecutor>(
       numReclaimThreads,
       std::make_shared<folly::NamedThreadFactory>("MemoryReclaim"));
@@ -539,14 +543,14 @@ void SharedArbitrator::addPool(const std::shared_ptr<MemoryPool>& pool) {
 }
 
 void SharedArbitrator::removePool(MemoryPool* pool) {
-  VELOX_CHECK_EQ(pool->reservedBytes(), 0);
+  VELOX_CHECK_EQ(pool->reservedBytes(), 0, "{}", pool->name());
   const uint64_t freedBytes = shrinkPool(pool, 0);
-  VELOX_CHECK_EQ(pool->capacity(), 0);
+  VELOX_CHECK_EQ(pool->capacity(), 0, "{}", pool->name());
   freeCapacity(freedBytes);
 
   std::unique_lock guard{participantLock_};
   const auto ret = participants_.erase(pool->name());
-  VELOX_CHECK_EQ(ret, 1);
+  VELOX_CHECK_EQ(ret, 1, "{}", pool->name());
 }
 
 std::vector<ArbitrationCandidate> SharedArbitrator::getCandidates(
@@ -893,13 +897,16 @@ void SharedArbitrator::growCapacity(ArbitrationOperation& op) {
   RETURN_IF_TRUE(maybeGrowFromSelf(op));
 
   if (!ensureCapacity(op)) {
+    const auto maxCapacity = op.participant()->maxCapacity();
     MEM_POOL_CAP_EXCEEDED(
         fmt::format(
-            "Can't grow {} capacity with {}. This will exceed its max capacity "
+            "Can't grow {} capacity with {}. This will exceed its {} "
             "{}, current capacity {}.",
             op.participant()->name(),
             succinctBytes(op.requestBytes()),
-            succinctBytes(op.participant()->maxCapacity()),
+            capacity_ < maxCapacity ? "arbitrator capacity"
+                                    : "memory pool capacity",
+            succinctBytes(std::min(capacity_, maxCapacity)),
             succinctBytes(op.participant()->capacity())),
         op.participant()->pool());
   }
@@ -1139,10 +1146,11 @@ void SharedArbitrator::checkIfAborted(ArbitrationOperation& op) {
 
 void SharedArbitrator::checkIfTimeout(ArbitrationOperation& op) {
   if (FOLLY_UNLIKELY(op.hasTimeout())) {
-    VELOX_MEM_ARBITRATION_TIMEOUT(fmt::format(
-        "Memory arbitration timed out on memory pool: {} after running {}",
-        op.participant()->name(),
-        succinctNanos(op.executionTimeNs())));
+    VELOX_MEM_ARBITRATION_TIMEOUT(
+        fmt::format(
+            "Memory arbitration timed out on memory pool: {} after running {}",
+            op.participant()->name(),
+            succinctNanos(op.executionTimeNs())));
   }
 }
 
@@ -1354,14 +1362,15 @@ uint64_t SharedArbitrator::reclaimUsedMemoryByAbort(bool force) {
   // after abort operation.
   const auto currentCapacity = victim.participant->pool()->capacity();
   try {
-    VELOX_MEM_POOL_ABORTED(fmt::format(
-        "Memory pool aborted to reclaim used memory, current capacity {}, "
-        "requesting capacity from global arbitration {} memory pool "
-        "stats:\n{}\n{}",
-        succinctBytes(currentCapacity),
-        succinctBytes(victim.participant->globalArbitrationGrowCapacity()),
-        victim.participant->pool()->toString(),
-        victim.participant->pool()->treeMemoryUsage()));
+    VELOX_MEM_POOL_ABORTED(
+        fmt::format(
+            "Memory pool aborted to reclaim used memory, current capacity {}, "
+            "requesting capacity from global arbitration {} memory pool "
+            "stats:\n{}\n{}",
+            succinctBytes(currentCapacity),
+            succinctBytes(victim.participant->globalArbitrationGrowCapacity()),
+            victim.participant->pool()->toString(),
+            victim.participant->pool()->treeMemoryUsage()));
   } catch (VeloxRuntimeError&) {
     abort(victim.participant, std::current_exception());
     return currentCapacity;
@@ -1395,7 +1404,6 @@ uint64_t SharedArbitrator::reclaim(
   if (participant->aborted()) {
     removeGlobalArbitrationWaiter(participant->id());
   }
-  freeCapacity(reclaimedBytes);
 
   updateMemoryReclaimStats(
       reclaimedBytes, reclaimTimeNs, localArbitration, stats);
@@ -1407,6 +1415,8 @@ uint64_t SharedArbitrator::reclaim(
                       << " stats " << succinctBytes(stats.reclaimedBytes)
                       << " numNonReclaimableAttempts "
                       << stats.numNonReclaimableAttempts;
+
+  freeCapacity(reclaimedBytes);
   if (reclaimedBytes == 0) {
     FB_LOG_EVERY_MS(WARNING, 1'000) << fmt::format(
         "Nothing reclaimed from memory pool {} with reclaim target {},  memory pool stats:\n{}\n{}",

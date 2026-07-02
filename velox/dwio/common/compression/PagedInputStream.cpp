@@ -16,6 +16,8 @@
 
 #include "velox/dwio/common/compression/PagedInputStream.h"
 
+#include "velox/dwio/common/Statistics.h"
+
 namespace facebook::velox::dwio::common::compression {
 
 void PagedInputStream::prepareOutputBuffer(uint64_t uncompressedLength) {
@@ -165,7 +167,7 @@ bool PagedInputStream::readOrSkip(const void** data, int32_t* size) {
   // perform decryption
   if (decrypter_) {
     decryptionBuffer_ =
-        decrypter_->decrypt(folly::StringPiece{input, remainingLength_});
+        decrypter_->decrypt(std::string_view{input, remainingLength_});
     input = reinterpret_cast<const char*>(decryptionBuffer_->data());
     remainingLength_ = decryptionBuffer_->length();
     if (data) {
@@ -186,11 +188,13 @@ bool PagedInputStream::readOrSkip(const void** data, int32_t* size) {
       outputBufferPtr_ = nullptr;
     } else {
       prepareOutputBuffer(decompressedLength);
-      outputBufferLength_ = decompressor_->decompress(
-          input,
-          remainingLength_,
-          outputBuffer_->data(),
-          outputBuffer_->capacity());
+      outputBufferLength_ = withDecompressStats(decompressCounter_, [&] {
+        return decompressor_->decompress(
+            input,
+            remainingLength_,
+            outputBuffer_->data(),
+            outputBuffer_->capacity());
+      });
       if (data) {
         *data = outputBuffer_->data();
       }

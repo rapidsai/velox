@@ -14,9 +14,18 @@
 velox_add_library(
   velox_presto_types_fuzzer_utils
   TimestampWithTimeZoneInputGenerator.cpp
+  TimeWithTimezoneInputGenerator.cpp
   HyperLogLogInputGenerator.cpp
+  KHyperLogLogInputGenerator.cpp
   P4HyperLogLogInputGenerator.cpp
   SfmSketchInputGenerator.cpp
+  HEADERS
+  HyperLogLogInputGenerator.h
+  KHyperLogLogInputGenerator.h
+  P4HyperLogLogInputGenerator.h
+  SfmSketchInputGenerator.h
+  TimeWithTimezoneInputGenerator.h
+  TimestampWithTimeZoneInputGenerator.h
 )
 
 velox_link_libraries(

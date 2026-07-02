@@ -14,13 +14,26 @@
  * limitations under the License.
  */
 #include "velox/exec/Window.h"
+#include "velox/exec/OperatorType.h"
 #include "velox/exec/OperatorUtils.h"
 #include "velox/exec/PartitionStreamingWindowBuild.h"
 #include "velox/exec/RowsStreamingWindowBuild.h"
 #include "velox/exec/SortWindowBuild.h"
+#include "velox/exec/SubPartitionedSortWindowBuild.h"
 #include "velox/exec/Task.h"
 
 namespace facebook::velox::exec {
+
+namespace {
+common::PrefixSortConfig makePrefixSortConfig(
+    const core::QueryConfig& queryConfig) {
+  return common::PrefixSortConfig{
+      queryConfig.prefixSortNormalizedKeyMaxBytes(),
+      queryConfig.prefixSortMinRows(),
+      queryConfig.prefixSortMaxStringPrefixLength()};
+}
+
+} // namespace
 
 Window::Window(
     int32_t operatorId,
@@ -31,9 +44,9 @@ Window::Window(
           windowNode->outputType(),
           operatorId,
           windowNode->id(),
-          "Window",
+          OperatorType::kWindow,
           windowNode->canSpill(driverCtx->queryConfig())
-              ? driverCtx->makeSpillConfig(operatorId)
+              ? driverCtx->makeSpillConfig(operatorId, OperatorType::kWindow)
               : std::nullopt),
       numInputColumns_(windowNode->inputType()->size()),
       windowNode_(windowNode),
@@ -44,7 +57,8 @@ Window::Window(
   if (spillConfig == nullptr &&
       operatorCtx_->driverCtx()->queryConfig().windowSpillEnabled()) {
     auto lockedStats = stats_.wlock();
-    lockedStats->runtimeStats.emplace(kSpillNotSupported, RuntimeMetric(1));
+    lockedStats->runtimeStats.emplace(
+        std::string(kSpillNotSupported), RuntimeMetric(1));
   }
   if (windowNode->inputsSorted()) {
     if (supportRowsStreaming()) {
@@ -55,16 +69,28 @@ Window::Window(
           windowNode, pool(), spillConfig, &nonReclaimableSection_);
     }
   } else {
-    windowBuild_ = std::make_unique<SortWindowBuild>(
-        windowNode,
-        pool(),
-        common::PrefixSortConfig{
-            driverCtx->queryConfig().prefixSortNormalizedKeyMaxBytes(),
-            driverCtx->queryConfig().prefixSortMinRows(),
-            driverCtx->queryConfig().prefixSortMaxStringPrefixLength()},
-        spillConfig,
-        &nonReclaimableSection_,
-        spillStats_.get());
+    if (auto numSubPartitions =
+            operatorCtx_->driverCtx()->queryConfig().windowNumSubPartitions();
+        numSubPartitions > 1) {
+      windowBuild_ = std::make_unique<SubPartitionedSortWindowBuild>(
+          windowNode,
+          numSubPartitions,
+          pool(),
+          makePrefixSortConfig(driverCtx->queryConfig()),
+          spillConfig,
+          &nonReclaimableSection_,
+          &stats_,
+          spillStats_.get());
+    } else {
+      windowBuild_ = std::make_unique<SortWindowBuild>(
+          windowNode,
+          pool(),
+          makePrefixSortConfig(driverCtx->queryConfig()),
+          spillConfig,
+          &nonReclaimableSection_,
+          &stats_,
+          spillStats_.get());
+    }
   }
 }
 
@@ -159,10 +185,11 @@ Window::WindowFrame Window::createWindowFrame(
       return std::make_optional(
           FrameChannelArg{kConstantChannel, nullptr, value});
     } else {
-      return std::make_optional(FrameChannelArg{
-          frameChannel,
-          BaseVector::create(frame->type(), 0, pool()),
-          std::nullopt});
+      return std::make_optional(
+          FrameChannelArg{
+              frameChannel,
+              BaseVector::create(frame->type(), 0, pool()),
+              std::nullopt});
     }
   };
 
@@ -196,14 +223,15 @@ void Window::createWindowFunctions() {
       }
     }
 
-    windowFunctions_.push_back(WindowFunction::create(
-        windowNodeFunction.functionCall->name(),
-        functionArgs,
-        windowNodeFunction.functionCall->type(),
-        windowNodeFunction.ignoreNulls,
-        operatorCtx_->pool(),
-        &stringAllocator_,
-        operatorCtx_->driverCtx()->queryConfig()));
+    windowFunctions_.push_back(
+        WindowFunction::create(
+            windowNodeFunction.functionCall->name(),
+            functionArgs,
+            windowNodeFunction.functionCall->type(),
+            windowNodeFunction.ignoreNulls,
+            operatorCtx_->pool(),
+            &stringAllocator_,
+            operatorCtx_->driverCtx()->queryConfig()));
 
     windowFrames_.push_back(
         createWindowFrame(windowNode_, windowNodeFunction.frame, inputType));
@@ -251,8 +279,11 @@ void Window::reclaim(
     // TODO Add support for spilling after noMoreInput().
     LOG(WARNING)
         << "Can't reclaim from window operator which has started producing output: "
-        << pool()->name() << ", usage: " << succinctBytes(pool()->usedBytes())
-        << ", reservation: " << succinctBytes(pool()->reservedBytes());
+        << pool()->name() << ", root pool: " << pool()->root()->name()
+        << ", used: " << succinctBytes(pool()->usedBytes())
+        << ", reservation: " << succinctBytes(pool()->reservedBytes())
+        << ", root pool reservation: "
+        << succinctBytes(pool()->root()->reservedBytes());
     return;
   }
 

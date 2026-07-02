@@ -37,14 +37,19 @@ class CoalesceExpr : public SpecialForm {
     propagatesNulls_ = false;
   }
 
-  static TypePtr resolveType(const std::vector<TypePtr>& argTypes);
-
   friend class CoalesceCallToSpecialForm;
 };
 
 class CoalesceCallToSpecialForm : public FunctionCallToSpecialForm {
  public:
+  /// Returns the type of the 1st argument. Throws if 'argTypes' is empty or not
+  /// argument types are the same.
   TypePtr resolveType(const std::vector<TypePtr>& argTypes) override;
+
+  TypePtr resolveTypeWithCoercions(
+      const std::vector<TypePtr>& argTypes,
+      std::vector<TypePtr>& coercions,
+      const TypeCoercer& coercer) override;
 
   ExprPtr constructSpecialForm(
       const TypePtr& type,

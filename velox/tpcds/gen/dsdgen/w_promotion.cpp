@@ -24,18 +24,18 @@
  * THE TPC SOFTWARE IS AVAILABLE WITHOUT CHARGE FROM TPC.
  */
 
-#include "w_promotion.h"
+#include "velox/tpcds/gen/dsdgen/include/w_promotion.h"
 
-#include "append_info.h"
-#include "build_support.h"
-#include "columns.h"
-#include "config.h"
-#include "genrand.h"
-#include "misc.h"
-#include "nulls.h"
-#include "porting.h"
-#include "tables.h"
-#include "tdefs.h"
+#include "velox/tpcds/gen/dsdgen/include/append_info.h"
+#include "velox/tpcds/gen/dsdgen/include/build_support.h"
+#include "velox/tpcds/gen/dsdgen/include/columns.h"
+#include "velox/tpcds/gen/dsdgen/include/config.h"
+#include "velox/tpcds/gen/dsdgen/include/genrand.h"
+#include "velox/tpcds/gen/dsdgen/include/misc.h"
+#include "velox/tpcds/gen/dsdgen/include/nulls.h"
+#include "velox/tpcds/gen/dsdgen/include/porting.h"
+#include "velox/tpcds/gen/dsdgen/include/tables.h"
+#include "velox/tpcds/gen/dsdgen/include/tdefs.h"
 
 #include <stdio.h>
 
@@ -63,7 +63,6 @@ int mk_w_promotion(
 
   /* begin locals declarations */
   date_t start_date;
-  ds_key_t nTemp;
   int nFlags;
   tdef* pTdef = getSimpleTdefsByNumber(PROMOTION, dsdGenContext);
 
@@ -80,7 +79,6 @@ int mk_w_promotion(
   nullSet(&pTdef->kNullBitMap, P_NULLS, dsdGenContext);
   r->p_promo_sk = index;
   mk_bkey(&r->p_promo_id[0], index, P_PROMO_ID);
-  nTemp = index;
   r->p_start_date_id = start_date.julian +
       genrand_integer(NULL,
                       DIST_UNIFORM,

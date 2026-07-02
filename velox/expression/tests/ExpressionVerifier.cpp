@@ -194,12 +194,14 @@ void transformInputTestCases(
   const auto [transformedInputs, transformProjections] =
       referenceQueryRunner->inputProjections(input);
   for (const auto& expr : transformProjections) {
-    transformPlans.push_back(core::Expressions::inferTypes(
-        expr, transformedInputs[0]->type(), pool));
+    transformPlans.push_back(
+        core::Expressions::inferTypes(
+            expr, transformedInputs[0]->type(), pool));
   }
   for (int i = 0; i < transformedInputs.size(); ++i) {
-    transformedInputTestCases.push_back(fuzzer::InputTestCase{
-        transformedInputs[i], inputTestCases[i].activeRows});
+    transformedInputTestCases.push_back(
+        fuzzer::InputTestCase{
+            transformedInputs[i], inputTestCases[i].activeRows});
   }
 }
 
@@ -432,6 +434,7 @@ ExpressionVerifier::verify(
             // Throws in case only one evaluation path throws exception.
             // Otherwise, return false to signal that the expression failed.
             if (exceptionCommonPtr && exceptionReference) {
+              LOG(INFO) << "Both paths threw exception.";
               verificationStates.push_back(VerificationState::kBothPathsThrow);
             } else {
               verificationStates.push_back(

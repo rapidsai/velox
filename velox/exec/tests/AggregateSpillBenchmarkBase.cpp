@@ -36,10 +36,12 @@ std::unique_ptr<RowContainer> makeRowContainer(
       true, // nullableKeys
       std::vector<Accumulator>{},
       dependentTypes,
-      false, // hasNext
-      false, // isJoinBuild
-      false, // hasProbedFlag
-      false, // hasNormalizedKey
+      /*hasNext=*/false,
+      /*isJoinBuild=*/false,
+      /*hasProbedFlag=*/false,
+      /*hasCountFlag=*/false,
+      /*hasNormalizedKey=*/false,
+      /*useListRowIndex=*/false,
       pool.get());
 }
 

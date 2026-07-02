@@ -19,12 +19,14 @@
 #include <fmt/format.h>
 
 #include "velox/common/process/TraceContext.h"
+#include "velox/dwio/common/Arena.h"
 #include "velox/dwio/common/Mutation.h"
 #include "velox/dwio/common/exception/Exception.h"
 #include "velox/functions/lib/string/StringImpl.h"
 
 namespace facebook::velox::dwrf {
 
+using dwio::common::ArenaCreate;
 using dwio::common::ColumnStatistics;
 using dwio::common::FileFormat;
 using dwio::common::LogType;
@@ -77,12 +79,6 @@ FooterStatisticsImpl::FooterStatisticsImpl(
   }
 }
 
-ReaderBase::ReaderBase(
-    MemoryPool& pool,
-    std::unique_ptr<dwio::common::BufferedInput> input,
-    FileFormat fileFormat)
-    : ReaderBase(createReaderOptions(pool, fileFormat), std::move(input)) {}
-
 namespace {
 
 template <typename T>
@@ -96,7 +92,7 @@ template <typename T>
 std::unique_ptr<FooterWrapper> parseFooter(
     dwio::common::SeekableInputStream* input,
     google::protobuf::Arena* arena) {
-  auto* impl = google::protobuf::Arena::CreateMessage<T>(arena);
+  auto* impl = ArenaCreate<T>(arena);
   VELOX_CHECK(impl->ParseFromZeroCopyStream(input));
   return std::make_unique<FooterWrapper>(impl);
 }
@@ -115,14 +111,13 @@ ReaderBase::ReaderBase(
   DWIO_ENSURE(fileLength_ > 0, "ORC file is empty");
   VELOX_CHECK_GE(fileLength_, 4, "File size too small");
 
-  const auto preloadFile = fileLength_ <= options_.filePreloadThreshold();
-  const int64_t footerBufSize =
-      std::min(fileLength_, options_.footerEstimatedSize());
-  const uint64_t readSize = preloadFile ? fileLength_ : footerBufSize;
-  if (input_->supportSyncLoad()) {
-    input_->enqueue({fileLength_ - readSize, readSize, "footer"});
-    input_->load(preloadFile ? LogType::FILE : LogType::FOOTER);
+  // Preload small files: one IO for entire file, serving all subsequent reads.
+  if (fileLength_ <= options_.filePreloadThreshold()) {
+    input_->preload();
   }
+
+  const int64_t footerBufSize =
+      std::min(fileLength_, options_.footerSpeculativeIoSize());
 
   // TODO: read footer from spectrum
   auto footerBuffer =
@@ -169,11 +164,6 @@ ReaderBase::ReaderBase(
           : proto::orc::CompressionKind_IsValid(postScript_->compression()),
       "Corrupted File, invalid compression kind ",
       postScript_->compression());
-
-  if (input_->supportSyncLoad() && (tailSize > readSize)) {
-    input_->enqueue({fileLength_ - tailSize, tailSize, "footer"});
-    input_->load(LogType::FOOTER);
-  }
 
   BufferPtr fullFooterBuffer;
   char* footerStart;

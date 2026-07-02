@@ -18,7 +18,6 @@
 #include "velox/exec/Aggregate.h"
 #include "velox/exec/Strings.h"
 #include "velox/expression/FunctionSignature.h"
-#include "velox/functions/prestosql/aggregates/AggregateNames.h"
 #include "velox/vector/FlatVector.h"
 
 namespace facebook::velox::aggregate::prestosql {
@@ -81,12 +80,12 @@ struct Accumulator {
 
           if (errorValue < 0) {
             VELOX_ARITHMETIC_ERROR(
-                "Value {} is less than {}",
+                "Arithmetic overflow in MAP_UNION_SUM: Value {} is less than {}",
                 errorValue,
                 std::numeric_limits<S>::min());
           } else {
             VELOX_ARITHMETIC_ERROR(
-                "Value {} exceeds {}",
+                "Arithmetic overflow in MAP_UNION_SUM: Value {} exceeds {}",
                 errorValue,
                 std::numeric_limits<S>::max());
           }
@@ -230,12 +229,12 @@ struct ComplexTypeAccumulator {
 
               if (errorValue < 0) {
                 VELOX_ARITHMETIC_ERROR(
-                    "Value {} is less than {}",
+                    "Arithmetic overflow in MAP_UNION_SUM: Value {} is less than {}",
                     errorValue,
                     std::numeric_limits<V>::min());
               } else {
                 VELOX_ARITHMETIC_ERROR(
-                    "Value {} exceeds {}",
+                    "Arithmetic overflow in MAP_UNION_SUM: Value {} exceeds {}",
                     errorValue,
                     std::numeric_limits<V>::max());
               }
@@ -481,14 +480,14 @@ std::unique_ptr<exec::Aggregate> createMapUnionSumAggregate(
       return std::make_unique<MapUnionSumAggregate<K, double>>(resultType);
     default:
       VELOX_UNREACHABLE(
-          "Unexpected value type {}", mapTypeKindToName(valueKind));
+          "Unexpected value type {}", TypeKindName::toName(valueKind));
   }
 }
 
 } // namespace
 
 void registerMapUnionSumAggregate(
-    const std::string& prefix,
+    const std::vector<std::string>& names,
     bool withCompanionFunctions,
     bool overwrite) {
   const std::vector<std::string> valueTypes = {
@@ -506,15 +505,13 @@ void registerMapUnionSumAggregate(
             .build());
   }
 
-  auto name = prefix + kMapUnionSum;
   exec::registerAggregateFunction(
-      name,
+      names,
       std::move(signatures),
-      [name](
-          core::AggregationNode::Step /*step*/,
-          const std::vector<TypePtr>& argTypes,
-          const TypePtr& resultType,
-          const core::QueryConfig& /*config*/)
+      [](core::AggregationNode::Step /*step*/,
+         const std::vector<TypePtr>& argTypes,
+         const TypePtr& resultType,
+         const core::QueryConfig& /*config*/)
           -> std::unique_ptr<exec::Aggregate> {
         VELOX_CHECK_EQ(argTypes.size(), 1);
         VELOX_CHECK(argTypes[0]->isMap());
@@ -536,6 +533,9 @@ void registerMapUnionSumAggregate(
                 valueTypeKind, resultType);
           case TypeKind::BIGINT:
             return createMapUnionSumAggregate<int64_t>(
+                valueTypeKind, resultType);
+          case TypeKind::HUGEINT:
+            return createMapUnionSumAggregate<int128_t>(
                 valueTypeKind, resultType);
           case TypeKind::REAL:
             return createMapUnionSumAggregate<float>(valueTypeKind, resultType);
@@ -563,7 +563,7 @@ void registerMapUnionSumAggregate(
                   valueTypeKind, resultType);
             }
             VELOX_UNREACHABLE(
-                "Unexpected key type {}", mapTypeKindToName(keyTypeKind));
+                "Unexpected key type {}", TypeKindName::toName(keyTypeKind));
         }
       },
       withCompanionFunctions,

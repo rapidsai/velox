@@ -16,9 +16,8 @@
 #pragma once
 
 #include "velox/common/base/Portability.h"
-#include "velox/common/memory/MemoryAllocator.h"
+#include "velox/common/base/RuntimeMetrics.h"
 #include "velox/exec/OneWayStatusFlag.h"
-#include "velox/exec/Operator.h"
 #include "velox/exec/RowContainer.h"
 #include "velox/exec/VectorHasher.h"
 
@@ -30,15 +29,22 @@ struct TableInsertPartitionInfo {
   /// ['start', 'end') specifies the insert range of this table partition.
   PartitionBoundIndexType start;
   PartitionBoundIndexType end;
-  /// Used to contains the overflowed rows which can't be inserted into the
-  /// given table partition range.
+  /// Holds overflowed rows that can't be inserted into the given table
+  /// partition range. Re-inserted serially after all partitions finish.
   std::vector<char*>& overflows;
+  /// Hashes of the rows in 'overflows', stored 1:1. Carried through so
+  /// the serial re-insertion phase does not need to re-hash overflow rows.
+  std::vector<uint64_t>& overflowHashes;
 
   TableInsertPartitionInfo(
       PartitionBoundIndexType _start,
       PartitionBoundIndexType _end,
-      std::vector<char*>& _overflows)
-      : start(_start), end(_end), overflows(_overflows) {
+      std::vector<char*>& _overflows,
+      std::vector<uint64_t>& _overflowHashes)
+      : start(_start),
+        end(_end),
+        overflows(_overflows),
+        overflowHashes(_overflowHashes) {
     VELOX_CHECK_GE(start, 0);
     VELOX_CHECK_LT(start, end);
   }
@@ -48,9 +54,10 @@ struct TableInsertPartitionInfo {
     return index >= start && index < end;
   }
 
-  /// Adds 'row' falls outside of this partititon range into 'overflows'.
-  void addOverflow(char* row) {
+  /// Records 'row' (with its already-computed 'hash') as an overflow.
+  void addOverflow(char* row, uint64_t hash) {
     overflows.push_back(row);
+    overflowHashes.push_back(hash);
   }
 };
 
@@ -115,6 +122,8 @@ struct HashTableStats {
 struct ParallelJoinBuildStats {
   std::vector<CpuWallTiming> partitionTimings;
   std::vector<CpuWallTiming> buildTimings;
+  std::vector<CpuWallTiming> bloomFilterPartitionTimings;
+  std::vector<CpuWallTiming> bloomFilterBuildTimings;
 };
 
 class BaseHashTable {
@@ -140,21 +149,38 @@ class BaseHashTable {
 
   /// The name of the runtime stats collected and reported by operators that use
   /// the HashTable (HashBuild, HashAggregation).
-  static inline const std::string kCapacity{"hashtable.capacity"};
-  static inline const std::string kNumRehashes{"hashtable.numRehashes"};
-  static inline const std::string kNumDistinct{"hashtable.numDistinct"};
-  static inline const std::string kNumTombstones{"hashtable.numTombstones"};
+  static constexpr std::string_view kCapacity{"hashtable.capacity"};
+  static constexpr std::string_view kNumRehashes{"hashtable.numRehashes"};
+  static constexpr std::string_view kNumDistinct{"hashtable.numDistinct"};
+  static constexpr std::string_view kNumTombstones{"hashtable.numTombstones"};
+  static constexpr std::string_view kHashMode{"hashtable.hashMode"};
 
   /// The same as above but only reported by the HashBuild operator.
-  static inline const std::string kBuildWallNanos{"hashtable.buildWallNanos"};
-  static inline const std::string kParallelJoinPartitionWallNanos{
+  static constexpr std::string_view kBuildWallNanos{"hashtable.buildWallNanos"};
+  static constexpr std::string_view kParallelJoinPartitionWallNanos{
       "hashtable.parallelJoinPartitionWallNanos"};
-  static inline const std::string kParallelJoinPartitionCpuNanos{
+  static constexpr std::string_view kParallelJoinPartitionCpuNanos{
       "hashtable.parallelJoinPartitionCpuNanos"};
-  static inline const std::string kParallelJoinBuildWallNanos{
+  static constexpr std::string_view kParallelJoinBuildWallNanos{
       "hashtable.parallelJoinBuildWallNanos"};
-  static inline const std::string kParallelJoinBuildCpuNanos{
+  static constexpr std::string_view kParallelJoinBuildCpuNanos{
       "hashtable.parallelJoinBuildCpuNanos"};
+  static constexpr std::string_view kParallelJoinBloomFilterPartitionWallNanos{
+      "hashtable.parallelJoinBloomFilterPartitionWallNanos"};
+  static constexpr std::string_view kParallelJoinBloomFilterPartitionCpuNanos{
+      "hashtable.parallelJoinBloomFilterPartitionCpuNanos"};
+  static constexpr std::string_view kParallelJoinBloomFilterBuildWallNanos{
+      "hashtable.parallelJoinBloomFilterBuildWallNanos"};
+  static constexpr std::string_view kParallelJoinBloomFilterBuildCpuNanos{
+      "hashtable.parallelJoinBloomFilterBuildCpuNanos"};
+  static constexpr std::string_view kVectorHasherMergeCpuNanos{
+      "hashtable.vectorHasherMergeCpuNanos"};
+  static constexpr std::string_view kHashTableCacheHit{"hashtable.cacheHit"};
+  static constexpr std::string_view kHashTableCacheMiss{"hashtable.cacheMiss"};
+
+  /// Populates 'runtimeStats' with hash table stats.
+  virtual void addRuntimeStats(
+      std::unordered_map<std::string, RuntimeMetric>& runtimeStats) const = 0;
 
   /// Returns the string of the given 'mode'.
   static std::string modeString(HashMode mode);
@@ -285,6 +311,15 @@ class BaseHashTable {
       uint64_t maxBytes,
       char** rows) = 0;
 
+  /// Same as above, but only return rows from the row container of
+  /// 'rowContainerId'.
+  virtual int32_t listNotProbedRows(
+      RowContainerIterator& rowContainerIt,
+      int rowContainerId,
+      int32_t maxRows,
+      uint64_t maxBytes,
+      char** rows) = 0;
+
   /// Returns rows with 'probed' flag set. Used by the right semi join.
   virtual int32_t listProbedRows(
       RowsIterator* iter,
@@ -292,9 +327,27 @@ class BaseHashTable {
       uint64_t maxBytes,
       char** rows) = 0;
 
+  /// Same as above, but only return rows from the row container of
+  /// 'rowContainerId'.
+  virtual int32_t listProbedRows(
+      RowContainerIterator& rowContainerIt,
+      int rowContainerId,
+      int32_t maxRows,
+      uint64_t maxBytes,
+      char** rows) = 0;
+
   /// Returns all rows. Used by the right semi join project.
   virtual int32_t listAllRows(
       RowsIterator* iter,
+      int32_t maxRows,
+      uint64_t maxBytes,
+      char** rows) = 0;
+
+  /// Same as above, but only return rows from the row container of
+  /// 'rowContainerId'.
+  virtual int32_t listAllRows(
+      RowContainerIterator& rowContainerIt,
+      int rowContainerId,
       int32_t maxRows,
       uint64_t maxBytes,
       char** rows) = 0;
@@ -310,7 +363,21 @@ class BaseHashTable {
   virtual void prepareJoinTable(
       std::vector<std::unique_ptr<BaseHashTable>> tables,
       int8_t spillInputStartPartitionBit,
+      size_t vectorHasherMaxNumDistinct,
+      bool dropDuplicates = false,
       folly::Executor* executor = nullptr) = 0;
+
+  /// The hash table used for join build in left semi and anti join may not
+  /// retain duplicate join keys when allowDuplicates_ is false. This is
+  /// achieved by constructing the hash table in the addInput phase to eliminate
+  /// duplicate join keys. When the percentage of duplicate data is small, it
+  /// will adaptively adjust to not build the hash table in the addInput phase.
+  /// Instead, it operates like other join types by reading all the data before
+  /// building the hash table. This function is used to change the behavior of
+  /// building hash table, if allowDuplicates is true, the join hash table will
+  /// not be built during the addInput phase, and the input data will also not
+  /// be deduplicated, but it will not impact the containing row container.
+  virtual void setAllowDuplicates(bool allowDuplicates) = 0;
 
   /// Returns the memory footprint in bytes for any data structures
   /// owned by 'this'.
@@ -327,6 +394,9 @@ class BaseHashTable {
   /// Returns the number of rows in a group by or hash join build
   /// side. This is used for sizing the internal hash table.
   virtual uint64_t numDistinct() const = 0;
+
+  /// Returns the number of row containers in this hash table.
+  virtual int32_t numRowContainers() const = 0;
 
   /// Return a number of current stats that can help with debugging and
   /// profiling.
@@ -414,8 +484,7 @@ class BaseHashTable {
   __attribute__((__no_sanitize__("thread")))
 #endif
 #endif
-  static TagVector
-  loadTags(uint8_t* tags, int64_t tagIndex) {
+  static TagVector loadTags(uint8_t* tags, int64_t tagIndex) {
     // Cannot use xsimd::batch::unaligned here because we need to skip TSAN.
     auto src = tags + tagIndex;
 #if XSIMD_WITH_SSE2
@@ -427,6 +496,10 @@ class BaseHashTable {
 
   const ParallelJoinBuildStats& parallelJoinBuildStats() const {
     return parallelJoinBuildStats_;
+  }
+
+  const CpuWallTiming& vectorHasherMergeTiming() const {
+    return vectorHasherMergeTiming_;
   }
 
   /// Copies the values at 'columnIndex' into 'result' for the 'rows.size' rows
@@ -452,6 +525,7 @@ class BaseHashTable {
   std::unique_ptr<RowContainer> rows_;
 
   ParallelJoinBuildStats parallelJoinBuildStats_;
+  CpuWallTiming vectorHasherMergeTiming_;
 };
 
 FOLLY_ALWAYS_INLINE std::ostream& operator<<(
@@ -484,8 +558,10 @@ class HashTable : public BaseHashTable {
       bool allowDuplicates,
       bool isJoinBuild,
       bool hasProbedFlag,
+      bool hasCountFlag,
       uint32_t minTableSizeForParallelJoinBuild,
-      memory::MemoryPool* pool);
+      memory::MemoryPool* pool,
+      uint64_t bloomFilterMaxSize = 0);
 
   ~HashTable() override = default;
 
@@ -500,6 +576,7 @@ class HashTable : public BaseHashTable {
         false, // allowDuplicates
         false, // isJoinBuild
         false, // hasProbedFlag
+        false, // hasCountFlag
         0, // minTableSizeForParallelJoinBuild
         pool);
   }
@@ -509,8 +586,10 @@ class HashTable : public BaseHashTable {
       const std::vector<TypePtr>& dependentTypes,
       bool allowDuplicates,
       bool hasProbedFlag,
+      bool hasCountFlag,
       uint32_t minTableSizeForParallelJoinBuild,
-      memory::MemoryPool* pool) {
+      memory::MemoryPool* pool,
+      uint64_t bloomFilterMaxSize = 0) {
     return std::make_unique<HashTable>(
         std::move(hashers),
         std::vector<Accumulator>{},
@@ -518,8 +597,10 @@ class HashTable : public BaseHashTable {
         allowDuplicates,
         true, // isJoinBuild
         hasProbedFlag,
+        hasCountFlag,
         minTableSizeForParallelJoinBuild,
-        pool);
+        pool,
+        bloomFilterMaxSize);
   }
 
   void groupProbe(HashLookup& lookup, int8_t spillInputStartPartitionBit)
@@ -552,6 +633,27 @@ class HashTable : public BaseHashTable {
       uint64_t maxBytes,
       char** rows) override;
 
+  int32_t listNotProbedRows(
+      RowContainerIterator& rowContainerIt,
+      int rowContainerId,
+      int32_t maxRows,
+      uint64_t maxBytes,
+      char** rows) override;
+
+  int32_t listProbedRows(
+      RowContainerIterator& rowContainerIt,
+      int rowContainerId,
+      int32_t maxRows,
+      uint64_t maxBytes,
+      char** rows) override;
+
+  int32_t listAllRows(
+      RowContainerIterator& rowContainerIt,
+      int rowContainerId,
+      int32_t maxRows,
+      uint64_t maxBytes,
+      char** rows) override;
+
   int32_t listNullKeyRows(
       NullKeyRowsIterator* iter,
       int32_t maxRows,
@@ -578,6 +680,10 @@ class HashTable : public BaseHashTable {
     return numDistinct_;
   }
 
+  int32_t numRowContainers() const override {
+    return otherTables_.size() + 1;
+  }
+
   HashTableStats stats() const override {
     return HashTableStats{
         capacity_, numRehashes_, numDistinct_, numTombstones_};
@@ -587,8 +693,25 @@ class HashTable : public BaseHashTable {
     return hasDuplicates_.check();
   }
 
+  void setAllowDuplicates(const bool allowDuplicates) override {
+    allowDuplicates_ = allowDuplicates;
+  }
+
   HashMode hashMode() const override {
     return hashMode_;
+  }
+
+  void addRuntimeStats(
+      std::unordered_map<std::string, RuntimeMetric>& runtimeStats)
+      const override {
+    runtimeStats[std::string(kCapacity)] = RuntimeMetric(capacity_);
+    runtimeStats[std::string(kHashMode)] =
+        RuntimeMetric(static_cast<int64_t>(hashMode_));
+    runtimeStats[std::string(kNumRehashes)] = RuntimeMetric(numRehashes_);
+    runtimeStats[std::string(kNumDistinct)] = RuntimeMetric(numDistinct_);
+    if (numTombstones_ != 0) {
+      runtimeStats[std::string(kNumTombstones)] = RuntimeMetric(numTombstones_);
+    }
   }
 
   void decideHashMode(
@@ -611,6 +734,8 @@ class HashTable : public BaseHashTable {
   void prepareJoinTable(
       std::vector<std::unique_ptr<BaseHashTable>> tables,
       int8_t spillInputStartPartitionBit,
+      size_t vectorHasherMaxNumDistinct,
+      bool dropDuplicates = false,
       folly::Executor* executor = nullptr) override;
 
   void prepareForJoinProbe(
@@ -766,6 +891,14 @@ class HashTable : public BaseHashTable {
   int32_t
   listRows(RowsIterator* iter, int32_t maxRows, uint64_t maxBytes, char** rows);
 
+  template <RowContainer::ProbeType probeType>
+  int32_t listRows(
+      RowContainerIterator& rowContainerIt,
+      int rowContainerId,
+      int32_t maxRows,
+      uint64_t maxBytes,
+      char** rows);
+
   char*& nextRow(char* row) {
     return *reinterpret_cast<char**>(row + nextOffset_);
   }
@@ -846,7 +979,7 @@ class HashTable : public BaseHashTable {
   // to the end of 'overflows' in 'partitionInfo'.
   void insertForJoin(
       char** groups,
-      uint64_t* hashes,
+      const uint64_t* hashes,
       int32_t numGroups,
       TableInsertPartitionInfo* partitionInfo);
 
@@ -854,7 +987,8 @@ class HashTable : public BaseHashTable {
   // contents in a RowContainer owned by 'this'. 'hashes' are the hash
   // numbers or array indices (if kArray mode) for each
   // group. 'groups' is expected to have no duplicate keys.
-  void insertForGroupBy(char** groups, uint64_t* hashes, int32_t numGroups);
+  void
+  insertForGroupBy(char** groups, const uint64_t* hashes, int32_t numGroups);
 
   // Checks if we can apply parallel table build optimization for hash join.
   // The function returns true if all of the following conditions:
@@ -876,12 +1010,14 @@ class HashTable : public BaseHashTable {
   void parallelJoinBuild();
 
   // Inserts the rows in 'partition' from this and 'otherTables' into 'this'.
-  // The rows that would have gone past the end of the partition are returned in
-  // 'overflow'.
+  // The rows that would have gone past the end of the partition are returned
+  // in 'overflow', along with their already-computed hashes in
+  // 'overflowHashes' so the caller can re-insert without re-hashing.
   void buildJoinPartition(
       uint8_t partition,
       const std::vector<std::unique_ptr<RowPartitions>>& rowPartitions,
-      std::vector<char*>& overflow);
+      std::vector<char*>& overflow,
+      std::vector<uint64_t>& overflowHashes);
 
   // Assigns a partition to each row of 'subtable' in RowPartitions of
   // subtable's RowContainer. If 'hashMode_' is kNormalizedKeys, records the
@@ -889,6 +1025,20 @@ class HashTable : public BaseHashTable {
   void partitionRows(
       HashTable<ignoreNullKeys>& subtable,
       RowPartitions& rowPartitions);
+
+  // Whether we should build Bloom filters.  If Bloom filter pushdown is
+  // enabled, and the size fits, this returns true if any of the key columns
+  // support it.  The actual build should build a Bloom filter for each key
+  // column that supports it, and skip the ones that do not.
+  bool bloomFilterSupported() const;
+
+  // Populate the Bloom filter for the key column with `columnIndex` and rows
+  // with certain `partition`.  The partitions information is stored in
+  // `rowPartitions`.
+  void buildBloomFilterPartition(
+      column_index_t columnIndex,
+      uint8_t partition,
+      const std::vector<std::unique_ptr<RowPartitions>>& rowPartitions);
 
   // Calculates hashes for 'rows' and returns them in 'hashes'. If
   // 'initNormalizedKeys' is true, the normalized keys are stored below each row
@@ -950,7 +1100,7 @@ class HashTable : public BaseHashTable {
   template <bool isNormailizedKeyMode>
   void insertForJoinWithPrefetch(
       char** groups,
-      uint64_t* hashes,
+      const uint64_t* hashes,
       int32_t numGroups,
       TableInsertPartitionInfo* partitionInfo);
 
@@ -967,7 +1117,13 @@ class HashTable : public BaseHashTable {
   // or distinct mode VectorHashers in a group by hash table. 0 for
   // join build sides.
   int32_t reservePct() const {
-    return isJoinBuild_ ? 0 : 50;
+    return (isJoinBuild_ && allowDuplicates_) ? 0 : 50;
+  }
+
+  // Used to indicate whether it is a HashTable that does not contain duplicate
+  // join keys.
+  bool joinBuildNoDuplicates() const {
+    return isJoinBuild_ && !allowDuplicates_;
   }
 
   // Returns the byte offset of the bucket for 'hash' starting from 'table_'.
@@ -1023,6 +1179,11 @@ class HashTable : public BaseHashTable {
     }
   }
 
+  // Returns the i-th sub-table participating in parallel join build.
+  inline HashTable<ignoreNullKeys>* tableAt(size_t idx) {
+    return idx == 0 ? this : otherTables_[idx - 1].get();
+  }
+
   // We don't want any overlap in the bit ranges used by bucket index and those
   // used by spill partitioning; otherwise because we receive data from only one
   // partition, the overlapped bits would be the same and only a fraction of the
@@ -1035,8 +1196,11 @@ class HashTable : public BaseHashTable {
   // The min table size in row to trigger parallel join table build.
   const uint32_t minTableSizeForParallelJoinBuild_;
 
+  const uint64_t bloomFilterMaxSize_;
+
   int8_t sizeBits_;
   bool isJoinBuild_ = false;
+  bool allowDuplicates_ = true;
 
   // Set at join build time if the table has duplicates, meaning that
   // the join can be cardinality increasing. Atomic for tsan because

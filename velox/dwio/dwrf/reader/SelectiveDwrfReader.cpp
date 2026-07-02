@@ -81,7 +81,7 @@ std::unique_ptr<SelectiveColumnReader> SelectiveDwrfReader::build(
     case TypeKind::BIGINT:
       if (fileType->type()->isDecimal()) {
         return std::make_unique<SelectiveDecimalColumnReader<int64_t>>(
-            fileType, params, scanSpec);
+            requestedType, fileType, params, scanSpec);
       } else {
         return buildIntegerReader(
             requestedType, fileType, params, LONG_BYTE_SIZE, scanSpec);
@@ -97,6 +97,10 @@ std::unique_ptr<SelectiveColumnReader> SelectiveDwrfReader::build(
           stripe.getEncoding(ek).kind() ==
               proto::ColumnEncoding_Kind_MAP_FLAT) {
         return createSelectiveFlatMapColumnReader(
+            columnReaderOptions, requestedType, fileType, params, scanSpec);
+      }
+      if (scanSpec.isFlatMapAsStruct()) {
+        return std::make_unique<SelectiveMapAsStructColumnReader>(
             columnReaderOptions, requestedType, fileType, params, scanSpec);
       }
       return std::make_unique<SelectiveMapColumnReader>(
@@ -146,13 +150,13 @@ std::unique_ptr<SelectiveColumnReader> SelectiveDwrfReader::build(
     case TypeKind::HUGEINT:
       if (fileType->type()->isDecimal()) {
         return std::make_unique<SelectiveDecimalColumnReader<int128_t>>(
-            fileType, params, scanSpec);
+            requestedType, fileType, params, scanSpec);
       }
       [[fallthrough]];
     default:
       VELOX_FAIL(
           "buildReader unhandled type: " +
-          mapTypeKindToName(fileType->type()->kind()));
+          std::string(TypeKindName::toName(fileType->type()->kind())));
   }
 }
 

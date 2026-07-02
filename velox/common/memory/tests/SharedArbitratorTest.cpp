@@ -22,7 +22,7 @@
 #include <folly/init/Init.h>
 #include <functional>
 #include <optional>
-#include "folly/experimental/EventCount.h"
+#include "folly/synchronization/EventCount.h"
 #include "velox/common/base/Exceptions.h"
 #include "velox/common/base/tests/GTestUtils.h"
 #include "velox/common/memory/MallocAllocator.h"
@@ -292,23 +292,30 @@ class SharedArbitrationTest : public testing::WithParamInterface<TestParam>,
     if (expectGlobalArbitration) {
       VELOX_CHECK_EQ(
           stats.customStats.count(
-              SharedArbitrator::kGlobalArbitrationWaitCount),
+              std::string(SharedArbitrator::kGlobalArbitrationWaitCount)),
           1);
       VELOX_CHECK_GE(
-          stats.customStats.at(SharedArbitrator::kGlobalArbitrationWaitCount)
+          stats.customStats
+              .at(std::string(SharedArbitrator::kGlobalArbitrationWaitCount))
               .sum,
           1);
       VELOX_CHECK_EQ(
-          stats.customStats.count(SharedArbitrator::kLocalArbitrationCount), 0);
+          stats.customStats.count(
+              std::string(SharedArbitrator::kLocalArbitrationCount)),
+          0);
     } else {
       VELOX_CHECK_EQ(
-          stats.customStats.count(SharedArbitrator::kLocalArbitrationCount), 1);
+          stats.customStats.count(
+              std::string(SharedArbitrator::kLocalArbitrationCount)),
+          1);
       VELOX_CHECK_EQ(
-          stats.customStats.at(SharedArbitrator::kLocalArbitrationCount).sum,
+          stats.customStats
+              .at(std::string(SharedArbitrator::kLocalArbitrationCount))
+              .sum,
           1);
       VELOX_CHECK_EQ(
           stats.customStats.count(
-              SharedArbitrator::kGlobalArbitrationWaitCount),
+              std::string(SharedArbitrator::kGlobalArbitrationWaitCount)),
           0);
     }
   }
@@ -358,18 +365,19 @@ DEBUG_ONLY_TEST_P(
         queryCtxStateChecked = true;
       })));
 
-  const auto spillDirectory = exec::test::TempDirectoryPath::create();
+  const auto spillDirectory = TempDirectoryPath::create();
   TestScopedSpillInjection scopedSpillInjection(100);
   core::PlanNodeId aggregationNodeId;
   newQueryBuilder()
       .queryCtx(queryCtx)
       .spillDirectory(spillDirectory->getPath())
       .config(core::QueryConfig::kSpillEnabled, "true")
-      .plan(PlanBuilder()
-                .values(vectors)
-                .singleAggregation({"c0", "c1"}, {"array_agg(c2)"})
-                .capturePlanNodeId(aggregationNodeId)
-                .planNode())
+      .plan(
+          PlanBuilder()
+              .values(vectors)
+              .singleAggregation({"c0", "c1"}, {"array_agg(c2)"})
+              .capturePlanNodeId(aggregationNodeId)
+              .planNode())
       .assertResults("SELECT c0, c1, array_agg(c2) FROM tmp GROUP BY c0, c1");
   ASSERT_TRUE(queryCtxStateChecked);
   ASSERT_FALSE(queryCtx->testingUnderArbitration());
@@ -406,7 +414,7 @@ DEBUG_ONLY_TEST_P(
       })));
 
   std::thread queryThread([&] {
-    const auto spillDirectory = exec::test::TempDirectoryPath::create();
+    const auto spillDirectory = TempDirectoryPath::create();
     core::PlanNodeId aggregationNodeId;
     auto plan = PlanBuilder()
                     .values(vectors)
@@ -485,7 +493,7 @@ DEBUG_ONLY_TEST_P(
                              .singleAggregation({"c0", "c1"}, {"array_agg(c2)"})
                              .planNode();
   std::thread spillableThread([&]() {
-    const auto spillDirectory = exec::test::TempDirectoryPath::create();
+    const auto spillDirectory = TempDirectoryPath::create();
     newQueryBuilder(spillPlan)
         .queryCtx(queryCtx)
         .spillDirectory(spillDirectory->getPath())
@@ -590,11 +598,12 @@ DEBUG_ONLY_TEST_P(SharedArbitrationTestWithThreadingModes, reclaimToOrderBy) {
           newQueryBuilder()
               .queryCtx(orderByQueryCtx)
               .serialExecution(isSerialExecutionMode_)
-              .plan(PlanBuilder()
-                        .values(vectors)
-                        .orderBy({"c0 ASC NULLS LAST"}, false)
-                        .capturePlanNodeId(orderByNodeId)
-                        .planNode())
+              .plan(
+                  PlanBuilder()
+                      .values(vectors)
+                      .orderBy({"c0 ASC NULLS LAST"}, false)
+                      .capturePlanNodeId(orderByNodeId)
+                      .planNode())
               .assertResults("SELECT * FROM tmp ORDER BY c0 ASC NULLS LAST");
       auto taskStats = exec::toPlanStats(task->taskStats());
       auto& stats = taskStats.at(orderByNodeId);
@@ -607,12 +616,13 @@ DEBUG_ONLY_TEST_P(SharedArbitrationTestWithThreadingModes, reclaimToOrderBy) {
           newQueryBuilder()
               .queryCtx(fakeMemoryQueryCtx)
               .serialExecution(isSerialExecutionMode_)
-              .plan(PlanBuilder()
-                        .values(vectors)
-                        .addNode([&](std::string id, core::PlanNodePtr input) {
-                          return std::make_shared<FakeMemoryNode>(id, input);
-                        })
-                        .planNode())
+              .plan(
+                  PlanBuilder()
+                      .values(vectors)
+                      .addNode([&](std::string id, core::PlanNodePtr input) {
+                        return std::make_shared<FakeMemoryNode>(id, input);
+                      })
+                      .planNode())
               .assertResults("SELECT * FROM tmp");
     });
 
@@ -691,11 +701,12 @@ DEBUG_ONLY_TEST_P(
           newQueryBuilder()
               .queryCtx(aggregationQueryCtx)
               .serialExecution(isSerialExecutionMode_)
-              .plan(PlanBuilder()
-                        .values(vectors)
-                        .singleAggregation({"c0", "c1"}, {"array_agg(c2)"})
-                        .capturePlanNodeId(aggregationNodeId)
-                        .planNode())
+              .plan(
+                  PlanBuilder()
+                      .values(vectors)
+                      .singleAggregation({"c0", "c1"}, {"array_agg(c2)"})
+                      .capturePlanNodeId(aggregationNodeId)
+                      .planNode())
               .assertResults(
                   "SELECT c0, c1, array_agg(c2) FROM tmp GROUP BY c0, c1");
       auto taskStats = exec::toPlanStats(task->taskStats());
@@ -709,12 +720,13 @@ DEBUG_ONLY_TEST_P(
           newQueryBuilder()
               .queryCtx(fakeMemoryQueryCtx)
               .serialExecution(isSerialExecutionMode_)
-              .plan(PlanBuilder()
-                        .values(vectors)
-                        .addNode([&](std::string id, core::PlanNodePtr input) {
-                          return std::make_shared<FakeMemoryNode>(id, input);
-                        })
-                        .planNode())
+              .plan(
+                  PlanBuilder()
+                      .values(vectors)
+                      .addNode([&](std::string id, core::PlanNodePtr input) {
+                        return std::make_shared<FakeMemoryNode>(id, input);
+                      })
+                      .planNode())
               .assertResults("SELECT * FROM tmp");
     });
 
@@ -755,7 +767,7 @@ DEBUG_ONLY_TEST_P(
     folly::EventCount taskPauseWait;
     auto taskPauseWaitKey = taskPauseWait.prepareWait();
 
-    const auto fakeAllocationSize = kMemoryCapacity - (32L << 20);
+    const auto fakeAllocationSize = kMemoryCapacity - (2L << 20);
 
     std::atomic<bool> injectAllocationOnce{true};
     fakeOperatorFactory_->setAllocationCallback([&](Operator* op) {
@@ -822,12 +834,13 @@ DEBUG_ONLY_TEST_P(
           newQueryBuilder()
               .queryCtx(fakeMemoryQueryCtx)
               .serialExecution(isSerialExecutionMode_)
-              .plan(PlanBuilder()
-                        .values(vectors)
-                        .addNode([&](std::string id, core::PlanNodePtr input) {
-                          return std::make_shared<FakeMemoryNode>(id, input);
-                        })
-                        .planNode())
+              .plan(
+                  PlanBuilder()
+                      .values(vectors)
+                      .addNode([&](std::string id, core::PlanNodePtr input) {
+                        return std::make_shared<FakeMemoryNode>(id, input);
+                      })
+                      .planNode())
               .assertResults("SELECT * FROM tmp");
     });
 
@@ -940,7 +953,7 @@ DEBUG_ONLY_TEST_P(
       })));
 
   const int numDrivers = 1;
-  const auto spillDirectory = exec::test::TempDirectoryPath::create();
+  const auto spillDirectory = TempDirectoryPath::create();
   std::thread queryThread([&]() {
     VELOX_ASSERT_THROW(
         newQueryBuilder()
@@ -950,12 +963,13 @@ DEBUG_ONLY_TEST_P(
             .config(core::QueryConfig::kJoinSpillEnabled, "true")
             .config(core::QueryConfig::kSpillNumPartitionBits, "2")
             .maxDrivers(numDrivers)
-            .plan(PlanBuilder()
-                      .values(vectors)
-                      .localPartition({"c0", "c1"})
-                      .singleAggregation({"c0", "c1"}, {"array_agg(c2)"})
-                      .localPartition(std::vector<std::string>{})
-                      .planNode())
+            .plan(
+                PlanBuilder()
+                    .values(vectors)
+                    .localPartition({"c0", "c1"})
+                    .singleAggregation({"c0", "c1"}, {"array_agg(c2)"})
+                    .localPartition(std::vector<std::string>{})
+                    .planNode())
             .assertResults(
                 "SELECT c0, c1, array_agg(c2) FROM tmp GROUP BY c0, c1"),
         "Aborted for external error");
@@ -1013,7 +1027,7 @@ DEBUG_ONLY_TEST_P(
             [&]() { return aggregationAllocationUnblocked.load(); });
       })));
 
-  const auto spillDirectory = exec::test::TempDirectoryPath::create();
+  const auto spillDirectory = TempDirectoryPath::create();
   std::shared_ptr<Task> task;
   std::thread queryThread([&]() {
     task = newQueryBuilder()
@@ -1022,12 +1036,13 @@ DEBUG_ONLY_TEST_P(
                .config(core::QueryConfig::kSpillEnabled, "true")
                .config(core::QueryConfig::kJoinSpillEnabled, "true")
                .config(core::QueryConfig::kSpillNumPartitionBits, "2")
-               .plan(PlanBuilder()
-                         .values(vectors)
-                         .localPartition({"c0", "c1"})
-                         .singleAggregation({"c0", "c1"}, {"array_agg(c2)"})
-                         .localPartition(std::vector<std::string>{})
-                         .planNode())
+               .plan(
+                   PlanBuilder()
+                       .values(vectors)
+                       .localPartition({"c0", "c1"})
+                       .singleAggregation({"c0", "c1"}, {"array_agg(c2)"})
+                       .localPartition(std::vector<std::string>{})
+                       .planNode())
                .assertResults(
                    "SELECT c0, c1, array_agg(c2) FROM tmp GROUP BY c0, c1");
   });
@@ -1083,7 +1098,7 @@ DEBUG_ONLY_TEST_P(SharedArbitrationTestWithThreadingModes, runtimeStats) {
             values->pool()->free(buffer, fakeAllocationSize);
           })));
 
-  const auto spillDirectory = exec::test::TempDirectoryPath::create();
+  const auto spillDirectory = TempDirectoryPath::create();
   const auto outputDirectory = TempDirectoryPath::create();
   const auto queryCtx =
       newQueryCtx(memoryManager_.get(), executor_.get(), memoryCapacity);
@@ -1194,23 +1209,25 @@ DEBUG_ONLY_TEST_P(
       if (sameDriver) {
         task = newQueryBuilder()
                    .queryCtx(queryCtx)
-                   .plan(PlanBuilder()
-                             .values(vectors)
-                             .singleAggregation({"c0", "c1"}, {"array_agg(c2)"})
-                             .capturePlanNodeId(aggregationNodeId)
-                             .localPartition(std::vector<std::string>{})
-                             .planNode())
+                   .plan(
+                       PlanBuilder()
+                           .values(vectors)
+                           .singleAggregation({"c0", "c1"}, {"array_agg(c2)"})
+                           .capturePlanNodeId(aggregationNodeId)
+                           .localPartition(std::vector<std::string>{})
+                           .planNode())
                    .assertResults(
                        "SELECT c0, c1, array_agg(c2) FROM tmp GROUP BY c0, c1");
       } else {
         task = newQueryBuilder()
                    .queryCtx(queryCtx)
-                   .plan(PlanBuilder()
-                             .values(vectors)
-                             .localPartition({"c0", "c1"})
-                             .singleAggregation({"c0", "c1"}, {"array_agg(c2)"})
-                             .capturePlanNodeId(aggregationNodeId)
-                             .planNode())
+                   .plan(
+                       PlanBuilder()
+                           .values(vectors)
+                           .localPartition({"c0", "c1"})
+                           .singleAggregation({"c0", "c1"}, {"array_agg(c2)"})
+                           .capturePlanNodeId(aggregationNodeId)
+                           .planNode())
                    .assertResults(
                        "SELECT c0, c1, array_agg(c2) FROM tmp GROUP BY c0, c1");
       }
@@ -1369,6 +1386,7 @@ TEST_P(
           if (e.errorCode() != error_code::kMemCapExceeded.c_str() &&
               e.errorCode() != error_code::kMemAborted.c_str() &&
               e.errorCode() != error_code::kMemAllocError.c_str() &&
+              e.errorCode() != error_code::kMemArbitrationTimeout.c_str() &&
               (e.message() != "Aborted for external error")) {
             std::rethrow_exception(std::current_exception());
           }
@@ -1424,12 +1442,20 @@ TEST_P(SharedArbitrationTestWithThreadingModes, reserveReleaseCounters) {
 VELOX_INSTANTIATE_TEST_SUITE_P(
     SharedArbitrationTest,
     SharedArbitrationTestWithParallelExecutionModeOnly,
-    testing::ValuesIn(std::vector<TestParam>{{false}}));
+    testing::ValuesIn(std::vector<TestParam>{{false}}),
+    [](const testing::TestParamInfo<TestParam>& info) {
+      return fmt::format(
+          "{}", info.param.isSerialExecutionMode ? "serial" : "parallel");
+    });
 
 VELOX_INSTANTIATE_TEST_SUITE_P(
     SharedArbitrationTest,
     SharedArbitrationTestWithThreadingModes,
-    testing::ValuesIn(std::vector<TestParam>{{false}, {true}}));
+    testing::ValuesIn(std::vector<TestParam>{{false}, {true}}),
+    [](const testing::TestParamInfo<TestParam>& info) {
+      return fmt::format(
+          "{}", info.param.isSerialExecutionMode ? "serial" : "parallel");
+    });
 } // namespace facebook::velox::memory
 
 int main(int argc, char** argv) {

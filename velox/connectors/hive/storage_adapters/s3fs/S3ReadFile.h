@@ -35,17 +35,17 @@ class S3ReadFile : public ReadFile {
       uint64_t offset,
       uint64_t length,
       void* buf,
-      filesystems::File::IoStats* stats = nullptr) const final;
+      const FileIoContext& context = {}) const final;
 
   std::string pread(
       uint64_t offset,
       uint64_t length,
-      filesystems::File::IoStats* stats = nullptr) const final;
+      const FileIoContext& context = {}) const final;
 
   uint64_t preadv(
       uint64_t offset,
       const std::vector<folly::Range<char*>>& buffers,
-      filesystems::File::IoStats* stats = nullptr) const final;
+      const FileIoContext& context = {}) const final;
 
   uint64_t size() const final;
 

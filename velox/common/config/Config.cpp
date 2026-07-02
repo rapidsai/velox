@@ -15,6 +15,7 @@
  */
 
 #include <re2/re2.h>
+#include <algorithm>
 
 #include "velox/common/config/Config.h"
 
@@ -138,13 +139,18 @@ std::unordered_map<std::string, std::string> ConfigBase::rawConfigsCopy()
   return configs_;
 }
 
-std::optional<std::string> ConfigBase::get(const std::string& key) const {
-  std::optional<std::string> val;
-  std::shared_lock<std::shared_mutex> l(mutex_);
-  auto it = configs_.find(key);
-  if (it != configs_.end()) {
-    val = it->second;
-  }
-  return val;
+std::string ConfigBase::toConfigKey(std::string_view sessionKey) {
+  std::string configKey{sessionKey};
+  std::replace(configKey.begin(), configKey.end(), '_', '-');
+  return configKey;
 }
+
+std::optional<std::string> ConfigBase::access(const std::string& key) const {
+  std::shared_lock l{mutex_};
+  if (auto it = configs_.find(key); it != configs_.end()) {
+    return it->second;
+  }
+  return std::nullopt;
+}
+
 } // namespace facebook::velox::config

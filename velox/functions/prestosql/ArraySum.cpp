@@ -285,21 +285,24 @@ std::vector<std::shared_ptr<exec::FunctionSignature>> signatures() {
   std::vector<std::shared_ptr<exec::FunctionSignature>> signatures;
   signatures.reserve(typePairs.size());
   for (const auto& [argType, returnType] : typePairs) {
-    signatures.emplace_back(exec::FunctionSignatureBuilder()
-                                .returnType(returnType)
-                                .argumentType(fmt::format("array({})", argType))
-                                .build());
+    signatures.emplace_back(
+        exec::FunctionSignatureBuilder()
+            .returnType(returnType)
+            .argumentType(fmt::format("array({})", argType))
+            .build());
   }
   return signatures;
 }
 } // namespace
 
 // Register function.
-void registerVectorFunction_udf_array_sum(const std::string& name) {
+void registerVectorFunction_udf_array_sum(std::string_view name) {
   facebook::velox::exec::registerStatefulVectorFunction(
       name, signatures(), create<false>);
   facebook::velox::exec::registerStatefulVectorFunction(
-      name + "_propagate_element_null", signatures(), create<true>);
+      std::string(name) + "_propagate_element_null",
+      signatures(),
+      create<true>);
 }
 
 } // namespace facebook::velox::functions

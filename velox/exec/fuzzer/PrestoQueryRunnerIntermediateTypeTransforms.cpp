@@ -21,10 +21,14 @@
 #include "velox/expression/Expr.h"
 #include "velox/functions/prestosql/types/BingTileType.h"
 #include "velox/functions/prestosql/types/HyperLogLogType.h"
+#include "velox/functions/prestosql/types/IPAddressType.h"
 #include "velox/functions/prestosql/types/JsonType.h"
+#include "velox/functions/prestosql/types/KHyperLogLogType.h"
 #include "velox/functions/prestosql/types/QDigestType.h"
+#include "velox/functions/prestosql/types/SetDigestType.h"
 #include "velox/functions/prestosql/types/SfmSketchType.h"
 #include "velox/functions/prestosql/types/TDigestType.h"
+#include "velox/functions/prestosql/types/TimeWithTimezoneType.h"
 #include "velox/functions/prestosql/types/TimestampWithTimeZoneType.h"
 #include "velox/parse/Expressions.h"
 #include "velox/parse/TypeResolver.h"
@@ -50,6 +54,9 @@ intermediateTypeTransforms() {
           {HYPERLOGLOG(),
            std::make_shared<IntermediateTypeTransformUsingCast>(
                HYPERLOGLOG(), VARBINARY())},
+          {KHYPERLOGLOG(),
+           std::make_shared<IntermediateTypeTransformUsingCast>(
+               KHYPERLOGLOG(), VARBINARY())},
           {TDIGEST(DOUBLE()),
            std::make_shared<IntermediateTypeTransformUsingCast>(
                TDIGEST(DOUBLE()), VARBINARY())},
@@ -62,14 +69,26 @@ intermediateTypeTransforms() {
           {QDIGEST(REAL()),
            std::make_shared<IntermediateTypeTransformUsingCast>(
                QDIGEST(REAL()), VARBINARY())},
+          {SETDIGEST(),
+           std::make_shared<IntermediateTypeTransformUsingCast>(
+               SETDIGEST(), VARBINARY())},
           {SFMSKETCH(),
            std::make_shared<IntermediateTypeTransformUsingCast>(
                SFMSKETCH(), VARBINARY())},
           {JSON(), std::make_shared<JsonTransform>()},
+          {TIME(),
+           std::make_shared<IntermediateTypeTransformUsingCast>(
+               TIME(), VARCHAR())},
+          {TIME_WITH_TIME_ZONE(),
+           std::make_shared<IntermediateTypeTransformUsingCast>(
+               TIME_WITH_TIME_ZONE(), VARCHAR())},
           {BINGTILE(),
            std::make_shared<IntermediateTypeTransformUsingCast>(
                BINGTILE(), BIGINT())},
           {INTERVAL_DAY_TIME(), std::make_shared<IntervalDayTimeTransform>()},
+          {IPADDRESS(),
+           std::make_shared<IntermediateTypeTransformUsingCast>(
+               IPADDRESS(), VARCHAR())},
       };
   return intermediateTypeTransforms;
 }
@@ -237,10 +256,11 @@ core::ExprPtr getProjectionForRow(
           rowType.nameOf(i),
           transformDirection));
     } else {
-      children.push_back(std::make_shared<core::FieldAccessExpr>(
-          rowType.nameOf(i),
-          rowType.nameOf(i),
-          std::vector<core::ExprPtr>{inputExpr}));
+      children.push_back(
+          std::make_shared<core::FieldAccessExpr>(
+              rowType.nameOf(i),
+              rowType.nameOf(i),
+              std::vector<core::ExprPtr>{inputExpr}));
     }
   }
 

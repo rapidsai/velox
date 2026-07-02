@@ -63,7 +63,8 @@ class E2EFilterTest : public E2EFilterTestBase {
   void writeToMemory(
       const TypePtr& type,
       const std::vector<RowVectorPtr>& batches,
-      bool forRowGroupSkip = false) override {
+      bool forRowGroupSkip,
+      const std::vector<std::string>& /*indexColumns*/ = {}) override {
     auto options = createWriterOptions(type);
     int32_t flushCounter = 0;
     // If we test row group skip, we have all the data in one stripe. For
@@ -239,6 +240,62 @@ TEST_F(E2EFilterTest, floatAndDouble) {
       20,
       true,
       false);
+}
+
+TEST_F(E2EFilterTest, DISABLED_shortDecimal) {
+  // ORC write functionality is not yet supported. Enable this test once it
+  // becomes available and set the file format to ORC at that time.
+  // options.format = DwrfFormat::kOrc;
+  const std::unordered_map<std::string, TypePtr> types = {
+      {"shortdecimal_val:decimal(8, 5)", DECIMAL(8, 5)},
+      {"shortdecimal_val:decimal(10, 5)", DECIMAL(10, 5)},
+      {"shortdecimal_val:decimal(17, 5)", DECIMAL(17, 5)}};
+
+  for (const auto& pair : types) {
+    testWithTypes(
+        pair.first,
+        [&]() {
+          makeIntDistribution<int64_t>(
+              "shortdecimal_val",
+              10, // min
+              100, // max
+              22, // repeats
+              19, // rareFrequency
+              -999, // rareMin
+              30000, // rareMax
+              true);
+        },
+        false,
+        {"shortdecimal_val"},
+        20);
+  }
+}
+
+TEST_F(E2EFilterTest, DISABLED_longDecimal) {
+  // ORC write functionality is not yet supported. Enable this test once it
+  // becomes available and set the file format to ORC at that time.
+  // options.format = DwrfFormat::kOrc;
+  const std::unordered_map<std::string, TypePtr> types = {
+      {"longdecimal_val:decimal(30, 10)", DECIMAL(30, 10)},
+      {"longdecimal_val:decimal(37, 15)", DECIMAL(37, 15)}};
+  for (const auto& pair : types) {
+    testWithTypes(
+        pair.first,
+        [&]() {
+          makeIntDistribution<int128_t>(
+              "longdecimal_val",
+              10, // min
+              100, // max
+              22, // repeats
+              19, // rareFrequency
+              -999, // rareMin
+              30000, // rareMax
+              true);
+        },
+        false,
+        {"longdecimal_val"},
+        20);
+  }
 }
 
 TEST_F(E2EFilterTest, stringDirect) {
@@ -444,6 +501,32 @@ TEST_F(E2EFilterTest, subfieldsPruning) {
 
 TEST_F(E2EFilterTest, mutationCornerCases) {
   testMutationCornerCases();
+}
+
+// Verify processedStrides counts actual strides read, not stripes loaded.
+// With multi-stride data, processedStrides + skippedStrides must equal the
+// total number of strides across all stripes.
+TEST_F(E2EFilterTest, processedStridesCount) {
+  rowType_ = test::DataSetBuilder::makeRowType("long_val:bigint", false);
+  filterGenerator_ = std::make_unique<FilterGenerator>(rowType_, seed_);
+  auto customize = [&]() {};
+  auto batches = makeDataset(customize, true, false);
+  writeToMemory(rowType_, batches, true);
+  std::vector<std::string> filterable = {"long_val"};
+  testRowGroupSkip(batches, filterable);
+
+  const auto totalRows = kBatchCount * kBatchSize;
+  const auto totalStrides = (totalRows + kRowsInGroup - 1) / kRowsInGroup;
+  // With 4 batches x 25,000 rows in one stripe and kRowsInGroup=10,000,
+  // totalStrides is 10. The filter must skip some and process the rest.
+  // processedStrides > 1 proves we count per stride, not per stripe
+  // (the old bug gave processedStrides=1 for a single stripe).
+  EXPECT_EQ(10, totalStrides);
+  EXPECT_GT(runtimeStats_.skippedStrides, 0);
+  EXPECT_GT(runtimeStats_.processedStrides, 1);
+  EXPECT_EQ(
+      totalStrides,
+      runtimeStats_.skippedStrides + runtimeStats_.processedStrides);
 }
 
 // Define main so that gflags get processed.

@@ -59,6 +59,7 @@ class FilterProject : public Operator {
   void close() override {
     Operator::close();
     if (exprs_ != nullptr) {
+      exprs_->finishTracers();
       exprs_->clear();
     } else {
       VELOX_CHECK(!initialized_);
@@ -81,6 +82,12 @@ class FilterProject : public Operator {
   /// Ensures that expression stats are added to the operator stats if their
   /// tracking is enabled via query config.
   OperatorStats stats(bool clear) override;
+
+  /// Returns the filterNode, call this function before initialize the operator,
+  /// this field is reset in function initialize.
+  const std::shared_ptr<const core::FilterNode>& filterNode() const {
+    return filter_;
+  }
 
  private:
   // Evaluate filter on all rows. Return number of rows that passed the filter.

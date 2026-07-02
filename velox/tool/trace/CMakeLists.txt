@@ -18,13 +18,36 @@ add_library(
   FilterProjectReplayer.cpp
   HashJoinReplayer.cpp
   IndexLookupJoinReplayer.cpp
+  MergeJoinReplayer.cpp
   OperatorReplayerBase.cpp
+  OrderByReplayer.cpp
   PartitionedOutputReplayer.cpp
   TableScanReplayer.cpp
   TableWriterReplayer.cpp
+  TopNRowNumberReplayer.cpp
+  TraceReplayerConfigPrompt.cpp
   TraceReplayRunner.cpp
   TraceReplayTaskRunner.cpp
   UnnestReplayer.cpp
+)
+velox_add_test_headers(
+  velox_query_trace_replayer_base
+  AggregationReplayer.h
+  FilterProjectReplayer.h
+  HashJoinReplayer.h
+  IndexLookupJoinReplayer.h
+  MergeJoinReplayer.h
+  OperatorReplayerBase.h
+  OrderByReplayer.h
+  PartitionedOutputReplayer.h
+  TableScanReplayer.h
+  TableWriterReplayer.h
+  TopNRowNumberReplayer.h
+  TraceFileToolRunner.h
+  TraceReplayRunner.h
+  TraceReplayTaskRunner.h
+  TraceReplayerConfigPrompt.h
+  UnnestReplayer.h
 )
 
 target_link_libraries(

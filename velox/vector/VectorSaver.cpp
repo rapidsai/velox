@@ -69,6 +69,7 @@ bool read<bool>(std::istream& in) {
 template <>
 std::string read<std::string>(std::istream& in) {
   auto size = read<int32_t>(in);
+  VELOX_CHECK_GE(size, 0, "Invalid serialized string size: {}", size);
   std::string data;
   data.resize(size);
   in.read(data.data(), size);
@@ -248,10 +249,11 @@ void writeStringViews(
   std::vector<BufferMetadata> sortedStringBuffers;
   sortedStringBuffers.reserve(stringBuffers.size());
   for (int64_t i = 0; i < stringBuffers.size(); ++i) {
-    sortedStringBuffers.push_back(BufferMetadata{
-        stringBuffers[i]->as<char>(),
-        stringBuffers[i]->as<char>() + stringBuffers[i]->size(),
-        i});
+    sortedStringBuffers.push_back(
+        BufferMetadata{
+            stringBuffers[i]->as<char>(),
+            stringBuffers[i]->as<char>() + stringBuffers[i]->size(),
+            i});
   }
 
   std::sort(

@@ -24,22 +24,22 @@
  * THE TPC SOFTWARE IS AVAILABLE WITHOUT CHARGE FROM TPC.
  */
 
-#include "w_web_page.h"
+#include "velox/tpcds/gen/dsdgen/include/w_web_page.h"
 
-#include "append_info.h"
-#include "build_support.h"
-#include "config.h"
-#include "constants.h"
-#include "date.h"
-#include "decimal.h"
-#include "genrand.h"
-#include "misc.h"
-#include "nulls.h"
-#include "porting.h"
-#include "scaling.h"
-#include "scd.h"
-#include "tables.h"
-#include "tdefs.h"
+#include "velox/tpcds/gen/dsdgen/include/append_info.h"
+#include "velox/tpcds/gen/dsdgen/include/build_support.h"
+#include "velox/tpcds/gen/dsdgen/include/config.h"
+#include "velox/tpcds/gen/dsdgen/include/constants.h"
+#include "velox/tpcds/gen/dsdgen/include/date.h"
+#include "velox/tpcds/gen/dsdgen/include/decimal.h"
+#include "velox/tpcds/gen/dsdgen/include/genrand.h"
+#include "velox/tpcds/gen/dsdgen/include/misc.h"
+#include "velox/tpcds/gen/dsdgen/include/nulls.h"
+#include "velox/tpcds/gen/dsdgen/include/porting.h"
+#include "velox/tpcds/gen/dsdgen/include/scaling.h"
+#include "velox/tpcds/gen/dsdgen/include/scd.h"
+#include "velox/tpcds/gen/dsdgen/include/tables.h"
+#include "velox/tpcds/gen/dsdgen/include/tdefs.h"
 
 #include <stdio.h>
 
@@ -66,7 +66,6 @@ int mk_w_web_page(
     DSDGenContext& dsdGenContext) {
   int32_t bFirstRecord = 0, nFieldChangeFlags;
   date_t dToday;
-  ds_key_t nConcurrent, nRevisions;
 
   /* begin locals declarations */
   int32_t nTemp, nAccess;
@@ -86,10 +85,6 @@ int mk_w_web_page(
       CURRENT_DAY);
   strtodt(&dToday, szTemp.data());
   /* set up for the SCD handling */
-  nConcurrent =
-      static_cast<int>(get_rowcount(CONCURRENT_WEB_SITES, dsdGenContext));
-  nRevisions =
-      static_cast<int>(get_rowcount(WEB_PAGE, dsdGenContext) / nConcurrent);
 
   nullSet(&pT->kNullBitMap, WP_NULLS, dsdGenContext);
   r->wp_page_sk = index;

@@ -27,6 +27,12 @@ Generic Configuration
      - 10000
      - Max number of rows that could be return by operators from Operator::getOutput. It is used when an estimate of
        average row size is known and preferred_output_batch_bytes is used to compute the number of output rows.
+   * - merge_join_output_batch_start_size
+     - integer
+     - 0
+     - Initial output batch size in rows for MergeJoin operator. When non-zero, the batch size starts at this value
+       and is dynamically adjusted based on the average row size of previous output batches. When zero (default),
+       dynamic adjustment is disabled and the batch size is fixed at preferred_output_batch_rows.
    * - max_elements_size_in_repeat_and_sequence
      - integer
      - 10000
@@ -43,6 +49,17 @@ Generic Configuration
      - integer
      - 80
      - Abandons partial TopNRowNumber if number of output rows equals or exceeds this percentage of the number of input rows.
+   * - abandon_dedup_hashmap_min_rows
+     - integer
+     - 100,000
+     - Number of input rows to receive before starting to check whether to abandon building a HashTable without
+       duplicates in HashBuild for left semi/anti join.
+   * - abandon_dedup_hashmap_min_pct
+     - integer
+     - 0
+     - Abandons building a HashTable without duplicates in HashBuild for left semi/anti join if the percentage of
+       distinct keys in the HashTable exceeds this threshold. Zero means 'disable this optimization'.
+       Does not apply to counting joins (kCountingAnti, kCountingLeftSemiFilter) which always require deduplication.
    * - session_timezone
      - string
      -
@@ -64,7 +81,7 @@ Generic Configuration
      - bool
      - true
      - If true, the driver will collect the operator's input/output batch size through vector flat size estimation, otherwise not.
-     - We might turn this off in use cases which have very wide column width and batch size estimation has non-trivial cpu cost.
+       We might turn this off in use cases which have very wide column width and batch size estimation has non-trivial cpu cost.
    * - hash_adaptivity_enabled
      - bool
      - true
@@ -73,6 +90,11 @@ Generic Configuration
      - bool
      - true
      - If true, the conjunction expression can reorder inputs based on the time taken to calculate them.
+   * - parallel_join_build_rows_enabled
+     - bool
+     - false
+     - If true, the hash probe drivers can output build\-side rows in parallel for full and right joins (only when spilling is not
+       enabled by hash probe). If false, only the last prober is allowed to output build\-side rows.
    * - max_local_exchange_buffer_size
      - integer
      - 32MB
@@ -106,6 +128,12 @@ Generic Configuration
        client. Enforced approximately, not strictly. A larger size can increase network throughput
        for larger clusters and thus decrease query processing time at the expense of reducing the
        amount of memory available for other usage.
+   * - skip_request_data_size_with_single_source_enabled
+     - bool
+     - false
+     -  If true, skip request data size if there is only single source.
+        This is used to optimize the Presto-on-Spark use case where each exchange client
+        has only one shuffle partition source.
    * - local_merge_source_queue_size
      - integer
      - 2
@@ -116,6 +144,10 @@ Generic Configuration
      - The maximum size in bytes for the task's buffered output when output is partitioned using hash of partitioning keys. See PartitionedOutputNode::Kind::kPartitioned.
        The producer Drivers are blocked when the buffered size exceeds this.
        The Drivers are resumed when the buffered size goes below OutputBufferManager::kContinuePct (90)% of this.
+   * - partitioned_output_eager_flush
+     - bool
+     - false
+     - If true, the PartitionedOutput operator will flush rows eagerly, without waiting until buffers reach certain size. Default is false.
    * - max_output_buffer_size
      - integer
      - 32MB
@@ -126,6 +158,21 @@ Generic Configuration
      - integer
      - 1000
      - The minimum number of table rows that can trigger the parallel hash join table build.
+   * - hash_probe_dynamic_filter_pushdown_enabled
+     - bool
+     - true
+     - Whether hash probe can generate any dynamic filter (including Bloom filter) and push down to upstream operators.
+   * - hash_probe_string_dynamic_filter_pushdown_enabled
+     - bool
+     - false
+     - Whether hash probe can generate dynamic filter for string types and push down to upstream operators.
+   * - hash_probe_bloom_filter_pushdown_max_size
+     - integer
+     - 0
+     - The maximum byte size of Bloom filter that can be generated from hash
+       probe.  When set to 0, no Bloom filter will be generated.  To achieve
+       optimal performance, this should not be too larger than the CPU cache
+       size on the host.
    * - debug.validate_output_from_operators
      - bool
      - false
@@ -148,6 +195,12 @@ Generic Configuration
      - 0
      - If it is not zero, specifies the time limit that a driver can continuously
        run on a thread before yield. If it is zero, then it no limit.
+   * - window_num_sub_partitions
+     - integer
+     - 1
+     - Window operator can be configured to sub-divide window partitions on each thread of execution into groups of
+       sub partitions for sequential processing. This setting specifies how many sub-partitions to create for each
+       thread. Use 1 to disable sub partitioning.
    * - prefixsort_normalized_key_max_bytes
      - integer
      - 128
@@ -200,7 +253,6 @@ Generic Configuration
        be expensive (especially if operator stats are retrieved frequently) and this allows the user to
        explicitly enable it.
 
-.. _expression-evaluation-conf:
 
 Expression Evaluation Configuration
 -----------------------------------
@@ -216,11 +268,40 @@ Expression Evaluation Configuration
      - boolean
      - false
      - Whether to use the simplified expression evaluation path.
+   * - expression.eval_flat_no_nulls
+     - boolean
+     - true
+     - Whether to enable the FlatNoNulls fast path for expression evaluation. When enabled, expressions skip null
+       checking and vector decoding when all inputs are flat-encoded with no nulls. Set to false to disable this
+       optimization.
    * - expression.track_cpu_usage
      - boolean
      - false
      - Whether to track CPU usage for individual expressions (supported by call and cast expressions). Can be expensive
        when processing small batches, e.g. < 10K rows.
+   * - expression.track_cpu_usage_for_functions
+     - string
+     - ""
+     - Comma-separated list of function names to selectively track CPU usage for. Only applicable when
+       ``expression.track_cpu_usage`` is set to false. Function names are case-insensitive and will be normalized
+       to lowercase. This allows fine-grained control over CPU tracking overhead when only specific functions need to
+       be monitored.
+   * - expression.adaptive_cpu_sampling
+     - boolean
+     - false
+     - Enables adaptive per-function CPU usage sampling. Each function is calibrated over 6 batches (1 warmup + 5
+       calibration) to measure the overhead of CPU tracking (clock_gettime) relative to the function's execution time.
+       The timer overhead is measured once per ExprSet and shared across all functions. Functions where tracking overhead
+       is acceptable are always tracked; functions where overhead exceeds ``expression.adaptive_cpu_sampling_max_overhead_pct``
+       are sampled at a rate proportional to their overhead. Sampled timing stats are extrapolated to approximate
+       full-population values.
+   * - expression.adaptive_cpu_sampling_max_overhead_pct
+     - float
+     - 1.0
+     - Maximum acceptable CPU tracking overhead percentage per function, used with ``expression.adaptive_cpu_sampling``.
+       Functions whose tracking overhead exceeds this threshold are sampled at a rate of
+       ceil(overhead_pct / max_overhead_pct). For example, with max_overhead=1.0, a function with 70% tracking overhead
+       is sampled every 70th batch, bounding its effective overhead to ~1%. Must be greater than 0.
    * - legacy_cast
      - bool
      - false
@@ -335,6 +416,12 @@ Spilling
      - boolean
      - true
      - When `spill_enabled` is true, determines whether Window operator can spill to disk under memory pressure.
+   * - window_spill_min_read_batch_rows
+     - integer
+     - 1000
+     - When processing spilled window data, read batches of whole partitions having at least that many rows. Set to 1 to
+       read one whole partition at a time. Each driver processing the Window operator will process that much data at
+       once.
    * - row_number_spill_enabled
      - boolean
      - true
@@ -343,6 +430,10 @@ Spilling
      - boolean
      - true
      - When `spill_enabled` is true, determines whether TopNRowNumber operator can spill to disk under memory pressure.
+   * - mark_distinct_spill_enabled
+     - boolean
+     - false
+     - When `spill_enabled` is true, determines whether MarkDistinct operator can spill to disk under memory pressure.
    * - writer_spill_enabled
      - boolean
      - true
@@ -428,6 +519,12 @@ Spilling
      - Specifies the compression algorithm type to compress the spilled data before write to disk to trade CPU for IO
        efficiency. The supported compression codecs are: zlib, snappy, lzo, zstd, lz4 and gzip.
        none means no compression.
+   * - spill_num_max_merge_files
+     - integer
+     - 0
+     - The max number of files to merge at a time when merging sorted files into a single ordered stream. 0 means unlimited.
+       This is used to reduce memory pressure by capping the number of open files when merging spilled sorted files to
+       avoid using too much memory and causing OOM. Note that this is only applicable for ordered spill.
    * - spill_prefixsort_enabled
      - bool
      - false
@@ -465,6 +562,28 @@ Aggregation
      - integer
      - 80
      - Abandons partial aggregation if number of groups equals or exceeds this percentage of the number of input rows.
+   * - aggregation_compaction_bytes_threshold
+     - integer
+     - 0
+     - Memory threshold in bytes for triggering string compaction during global
+       aggregation. When total string storage exceeds this limit with high unused
+       memory ratio, compaction is triggered to reclaim dead strings. Disabled by
+       default (0). Currently only applies to approx_most_frequent aggregate with
+       StringView type during global aggregation.
+   * - aggregation_compaction_unused_memory_ratio
+     - double
+     - 0.25
+     - Ratio of unused (evicted) bytes to total bytes that triggers compaction.
+       The value is in the range of [0, 1). Currently only applies to approx_most_frequent
+       aggregate with StringView type during global aggregation. May be extended
+       to other aggregation types on-demand.
+   * - aggregation_memory_compaction_reclaim_enabled
+     - bool
+     - false
+     - If true, enables lightweight memory compaction before spilling during
+       memory reclaim in aggregation. When enabled, the aggregation operator
+       will try to compact aggregate function state (e.g., free dead strings)
+       before resorting to spilling.
    * - streaming_aggregation_min_output_batch_rows
      - integer
      - 0
@@ -503,6 +622,13 @@ Table Scan
        increasing the number of running scan threads, and stop once exceeds this
        ratio. The value is in the range of [0, 1]. This only applies if
        'table_scan_scaled_processing_enabled' is true.
+   * - table_scan_output_batch_rows_override
+     - integer
+     - 0
+     - If non-zero, overrides the number of rows in each output batch produced
+       by the TableScan operator, bypassing the dynamic batch size calculation.
+       This is useful for correctness testing where a fixed batch size is needed
+       to produce deterministic results. Zero means 'no override'.
 
 Table Writer
 ------------
@@ -548,9 +674,9 @@ Table Writer
      - Minimum amount of data processed by all the logical table partitions to
        trigger skewed partition rebalancing by scale writer exchange.
 
-Hive Connector
---------------
-Hive Connector config is initialized on velox runtime startup and is shared among queries as the default config.
+Connector Config
+----------------
+Connector config is initialized on velox runtime startup and is shared among queries as the default config across all connectors.
 Each query can override the config by setting corresponding query session properties such as in Prestissimo.
 
 .. list-table::
@@ -562,13 +688,52 @@ Each query can override the config by setting corresponding query session proper
      - Type
      - Default Value
      - Description
-   * - hive.max-partitions-per-writers
+   * - user
      -
+     - string
+     - ""
+     - The user of the query. Used for storage logging.
+   * - source
+     -
+     - string
+     - ""
+     - The source of the query. Used for storage access and logging.
+   * - schema
+     -
+     - string
+     - ""
+     - The schema of the query. Used for storage logging.
+
+Hive Connector
+--------------
+Hive Connector config is initialized on velox runtime startup and is shared among queries as the default config.
+Each query can override the config by setting corresponding query session properties such as in Prestissimo.
+
+Configuration property names use kebab-case (e.g., ``max-bucket-count``).
+Session property names use snake_case (e.g., ``max_bucket_count``).
+Properties without a session property name in the table below are fixed for the lifetime of the process
+and cannot be modified per query.
+
+Properties of type ``capacity`` accept human-readable size strings such as ``512kB``, ``128MB``, ``1GB``, etc.
+Properties of type ``integer`` with byte-valued defaults (shown as ``256KB``, ``8MB``, etc. for readability)
+must be specified as raw byte counts.
+
+.. list-table::
+   :widths: 20 20 10 10 70
+   :header-rows: 1
+
+   * - Configuration Property Name
+     - Session Property Name
+     - Type
+     - Default Value
+     - Description
+   * - max-partitions-per-writers
+     - max_partitions_per_writers
      - integer
-     - 100
+     - 128
      - Maximum number of (bucketed) partitions per a single table writer instance.
-   * - hive.max-bucket-count
-     - hive.max_bucket_count
+   * - max-bucket-count
+     - max_bucket_count
      - integer
      - 100000
      - Maximum number of buckets that a table writer is allowed to write to.
@@ -580,7 +745,7 @@ Each query can override the config by setting corresponding query session proper
        the update mode field of the table writer operator output. ``OVERWRITE``
        sets the update mode to indicate overwriting a partition if exists. ``ERROR`` sets the update mode to indicate
        error throwing if writing to an existing partition.
-   * - hive.immutable-partitions
+   * - immutable-partitions
      -
      - bool
      - false
@@ -617,7 +782,7 @@ Each query can override the config by setting corresponding query session proper
      - Maximum size in bytes to coalesce requests to be fetched in a single request.
    * - max-coalesced-distance
      -
-     - integer
+     - capacity
      - 512KB
      - Maximum distance in capacity units between chunks to be fetched that may be coalesced into a single request.
    * - load-quantum
@@ -644,21 +809,23 @@ Each query can override the config by setting corresponding query session proper
      - Maximum number of rows for sort writer in one batch of output. This is to limit the memory usage of sort writer.
    * - sort-writer-max-output-bytes
      - sort_writer_max_output_bytes
-     - string
+     - capacity
      - 10MB
      - Maximum bytes for sort writer in one batch of output. This is to limit the memory usage of sort writer.
+   * - max-target-file-size
+     - max_target_file_size
+     - capacity
+     - 0B
+     - Maximum target file size for writers. When a file exceeds this size during writing, the writer
+       closes the current file and starts writing to a new file. Accepts human-readable values like
+       "1GB". Zero means no limit (default). File rotation is not supported for bucketed tables or
+       sorted writes.
    * - file-preload-threshold
      -
      - integer
      - 8MB
      - Usually Velox fetches the meta data firstly then fetch the rest of file. But if the file is very small, Velox can fetch the whole file directly to avoid multiple IO requests.
        The parameter controls the threshold when whole file is fetched.
-   * - footer-estimated-size
-     -
-     - integer
-     - 1MB
-     - Define the estimation of footer size in ORC and Parquet format. The footer data includes version, schema, and meta data for every columns which may or may not need to be fetched later.
-       The parameter controls the size when footer is fetched each time. Bigger value can decrease the IO requests but may fetch more useless meta data.
    * - cache.no_retention
      - cache.no_retention
      - bool
@@ -667,25 +834,74 @@ Each query can override the config by setting corresponding query session proper
        and also skip staging to the ssd cache. This helps to prevent the cache space pollution
        from the one-time table scan by large batch query when mixed running with interactive
        query which has high data locality.
-   * - hive.reader.stats_based_filter_reorder_disabaled
-     - hive.reader.stats_based_filter_reorder_disabaled
+   * - stats-based-filter-reorder-disabled
+     - stats_based_filter_reorder_disabled
      - bool
      - false
      - If true, disable the stats based filter reordering during the read processing, and the
        filter execution order is totally determined by the filter type. Otherwise, the file
        reader will dynamically adjust the filter execution order based on the past filter
        execution stats.
-   * - hive.reader.timestamp-partition-value-as-local-time
-     - hive.reader.timestamp_partition_value_as_local_time
+   * - reader.timestamp-partition-value-as-local-time
+     - reader.timestamp_partition_value_as_local_time
      - bool
      - true
      - Reads timestamp partition value as local time if true. Otherwise, reads as UTC.
-   * - hive.preserve-flat-maps-in-memory
-     - hive.preserve_flat_maps_in_memory
+   * - preserve-flat-maps-in-memory
+     - preserve_flat_maps_in_memory
      - bool
      - false
      - Whether to preserve flat maps in memory as FlatMapVectors instead of converting them to MapVectors. This is only applied during data reading inside the DWRF and Nimble readers, not during downstream processing like expression evaluation etc.
-
+   * - max-rows-per-index-request
+     - max_rows_per_index_request
+     - integer
+     - 0
+     - Maximum number of output rows to return per index lookup request. The limit is applied to the actual output rows
+       after filtering. 0 means no limit (default).
+   * - file-metadata-cache-enabled
+     - file_metadata_cache_enabled
+     - bool
+     - false
+     - Whether to cache file metadata (footer, stripes, index) in the process-wide AsyncDataCache. When enabled,
+       the first reader performs a speculative tail read and populates the cache; subsequent readers on the same file
+       serve metadata from cache with zero file IO. Currently only supported by Nimble format.
+   * - pin-file-metadata
+     - pin_file_metadata
+     - bool
+     - false
+     - Whether to pin parsed metadata objects (e.g., StripeGroup, IndexGroup) in the reader's metadata cache with
+       strong references so they are never evicted. This avoids re-reading and re-parsing metadata on every stripe
+       access when weak-pointer cache entries would otherwise expire. Can be used independently of
+       file-metadata-cache-enabled. Currently only supported by Nimble format.
+   * - reader.collect-column-cpu-metrics
+     - reader.collect_column_cpu_metrics
+     - bool
+     - false
+     - If true, enables collection of per-column timing statistics during file reading. This includes
+       decompression and decode CPU time metrics for each column, reported as runtime metrics in the format
+       ``column_<nodeId>.<type>.decompressCPUTimeNanos`` and ``column_<nodeId>.<type>.decodeCPUTimeNanos``.
+       Useful for performance analysis and identifying slow columns.
+   * - orc.footer-speculative-io-size
+     - orc_footer_speculative_io_size
+     - integer
+     - 256KB
+     - Speculative tail-read size in bytes when opening ORC files. Controls how many bytes are read from the end
+       of the file to load the footer and nearby metadata in a single IO operation.
+       Set to 0 for adaptive mode.
+   * - parquet.footer-speculative-io-size
+     - parquet_footer_speculative_io_size
+     - integer
+     - 256KB
+     - Speculative tail-read size in bytes when opening Parquet files. Controls how many bytes are read from the end
+       of the file to load the footer and nearby metadata in a single IO operation.
+       Set to 0 for adaptive mode.
+   * - nimble.footer-speculative-io-size
+     - nimble_footer_speculative_io_size
+     - integer
+     - 8MB
+     - Speculative tail-read size in bytes when opening Nimble files. Controls how many bytes are read from the end
+       of the file to load the footer and nearby metadata in a single IO operation.
+       Set to 0 for adaptive mode.
 
 ``ORC File Format Configuration``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -778,7 +994,7 @@ Each query can override the config by setting corresponding query session proper
      - 1024
      - Batch size used when writing into Parquet through Arrow bridge.
    * - hive.parquet.writer.created-by
-     -
+     - hive.parquet.writer.created_by
      - string
      - parquet-cpp-velox version 0.0.0
      - Created-by value used when writing to Parquet.
@@ -879,6 +1095,19 @@ Each query can override the config by setting corresponding query session proper
      -
      - A custom credential provider, if specified, will be used to create the client in favor of other authentication mechanisms.
        The provider must be registered using "registerAWSCredentialsProvider" before it can be used.
+   * - hive.s3.aws-imds-enabled
+     - bool
+     - true
+     - AWS Instance Metadata Service (IMDS) is an AWS EC2 instance component used by applications to securely access metadata.
+       We must disable it on other instances to avoid high first-time read latency from S3 compatible object storages.
+   * - hive.s3.min-part-size
+     - string
+     - 10MB
+     - Minimum multi-part upload part size. The smallest allowed value is 5MB. The largest allowed value is 5GB.
+       If a file is less than this size, the file is sent as a single put request.
+       Otherwise, the file is split into multiple equal sized chunks of this part size excluding the last chunk.
+       The `AWS specification <https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html> `_ limits the part size between 5MB and 5GB.
+       Some S3 backend providers enforce these limits strictly.
 
 Bucket Level Configuration
 """"""""""""""""""""""""""
@@ -898,23 +1127,23 @@ These semantics are similar to the `Apache Hadoop-Aws module <https://hadoop.apa
      - Type
      - Default Value
      - Description
-   * - hive.gcs.endpoint
+   * - gcs.endpoint
      - string
      -
      - The GCS storage URI.
-   * - hive.gcs.json-key-file-path
+   * - gcs.json-key-file-path
      - string
      -
      - The GCS service account configuration JSON key file.
-   * - hive.gcs.max-retry-count
+   * - gcs.max-retry-count
      - integer
      -
      - The GCS maximum retry counter of transient errors.
-   * - hive.gcs.max-retry-time
+   * - gcs.max-retry-time
      - string
      -
      - The GCS maximum time allowed to retry transient errors.
-   * - hive.gcs.auth.access-token-provider
+   * - gcs.auth.access-token-provider
      - string
      -
      - A custom OAuth credential provider, if specified, will be used to create the client in favor of other
@@ -970,6 +1199,12 @@ These semantics are similar to the `Apache Hadoop-Aws module <https://hadoop.apa
      - Specifies the OAuth 2.0 token endpoint URL for the Azure AD application.
        This endpoint is used to acquire access tokens for authenticating with Azure storage.
        The URL follows the format: `https://login.microsoftonline.com/<tenant-id>/oauth2/token`.
+   * - fs.azure.sas.token.renew.period.for.streams
+     - string
+     - 120
+     - Specifies the period in seconds to re-use SAS tokens until the expiry is within this number of seconds.
+       This configuration is used together with `registerSasTokenProvider` for dynamic SAS token renewal.
+       When a SAS token is close to expiry, it will be renewed by getting a new token from the provider.
 
 Presto-specific Configuration
 -----------------------------
@@ -1012,15 +1247,18 @@ Spark-specific Configuration
      - integer
      - 1000000
      - The default number of expected items for the bloom filter in :spark:func:`bloom_filter_agg` function.
+   * - spark.bloom_filter.max_num_items
+     - integer
+     - 4000000
+     - The maximum number of items for the bloom filter in :spark:func:`bloom_filter_agg` function.
    * - spark.bloom_filter.num_bits
      - integer
      - 8388608
      - The default number of bits to use for the bloom filter in :spark:func:`bloom_filter_agg` function.
    * - spark.bloom_filter.max_num_bits
      - integer
-     - 4194304
-     - The maximum number of bits to use for the bloom filter in :spark:func:`bloom_filter_agg` function,
-       the value of this config can not exceed the default value.
+     - 67108864
+     - The maximum number of bits to use for the bloom filter in :spark:func:`bloom_filter_agg` function.
    * - spark.partition_id
      - integer
      -
@@ -1078,3 +1316,145 @@ Tracing
      - false
      - If true, we only collect the input trace for a given operator but without the actual
        execution. This is used for crash debugging.
+
+Cudf-specific Configuration (Experimental)
+------------------------------------------
+These configurations are available when `compiled with cuDF <https://github.com/facebookincubator/velox/blob/main/velox/experimental/cudf/README.md#getting-started-with-velox-cudf>`_.
+Note: These configurations are experimental and subject to change.
+
+.. list-table::
+   :widths: 30 10 10 70
+   :header-rows: 1
+
+   * - Property Name
+     - Type
+     - Default Value
+     - Description
+   * - cudf.enabled
+     - bool
+     - true
+     - If true, enable cuDF. By default, it is enabled if compiled with cuDF.
+   * - cudf.memory_resource
+     - string
+     - async
+     - The memory resource to use for cuDF. Possible values are (cuda, pool, async, arena, managed, managed_pool, prefetch_managed, prefetch_managed_pool).
+       The prefetch options enable automatic prefetching for better GPU memory performance: prefetch_managed uses CUDA unified memory with prefetching,
+       prefetch_managed_pool uses a pooled version of CUDA unified memory with prefetching.
+   * - cudf.memory_percent
+     - integer
+     - 50
+     - The initial percent of GPU memory to allocate for pool or arena memory resources.
+   * - cudf.function_name_prefix
+     - string
+     - ""
+     - The prefix to use for the function names in cuDF.
+   * - cudf.ast_expression_enabled
+     - bool
+     - true
+     - If true, enable using cuDF AST-based expression evaluation when supported.
+   * - cudf.ast_expression_priority
+     - integer
+     - 100
+     - Priority of cuDF AST expressions. Higher value wins when multiple cuDF execution options are available for the same Velox expression. Standalone cuDF functions have priority 50. If enabled, with a default priority of 100, AST will be chosen as replacement for cudf execution.
+   * - cudf.allow_cpu_fallback
+     - bool
+     - true
+     - If true, allow falling back to Velox CPU execution when an operation is not supported in cuDF execution. If false, an error will be thrown if an operation is not supported in cuDF execution.
+   * - cudf.debug_enabled
+     - bool
+     - false
+     - If true, enable debug printing.
+   * - cudf.log_fallback
+     - bool
+     - true
+     - If true, log a reason for falling back to Velox CPU execution, when an operation is not supported in cuDF execution.
+   * - cudf.function_engine
+     - string
+     - presto
+   * - cudf.timestamp_unit
+     - string
+     - ns
+     - Timestamp precision unit for cuDF timestamp types. Valid values are: "s" (seconds), "ms" (milliseconds), "us" (microseconds), "ns" (nanoseconds). This controls the precision of timestamp data when converting between Velox and cuDF formats.
+     - Register the function for a specific engine. The optional values are presto or spark.
+
+Cudf Hive Connector Configuration (Experimental)
+------------------------------------------------
+These configurations apply to the cuDF Hive connector (Parquet reader/writer via cuDF).
+Connector config is initialized on velox runtime startup and is shared among queries as the default config.
+Each query can override the config by setting the corresponding session property.
+Reader options map to `libcudf parquet_reader_options <https://docs.rapids.ai/api/libcudf/stable/classcudf_1_1io_1_1parquet__reader__options>`_ (used with the chunked reader when applicable).
+
+.. list-table::
+   :widths: 20 20 10 10 70
+   :header-rows: 1
+
+   * - Configuration Property Name
+     - Session Property Name
+     - Type
+     - Default Value
+     - Description
+   * - cudf.hive.use-buffered-input
+     - cudf.hive.use_buffered_input
+     - bool
+     - true
+     - Whether to use BufferedInput for CudfHiveDataSource (can use AsyncDataCache when HiveConfig file handle cache is enabled).
+   * - cudf.hive.use-experimental-reader
+     - cudf.hive.use_experimental_reader
+     - bool
+     - false
+     - Whether to use the experimental cuDF Parquet reader (Hybrid Scan) for highly selective filters. When enabled, uses `libcudf hybrid_scan_reader <https://docs.rapids.ai/api/libcudf/stable/classcudf_1_1io_1_1parquet_1_1experimental_1_1hybrid__scan__reader>`_.
+   * - parquet.reader.use-pandas-metadata
+     - parquet.reader.use_pandas_metadata
+     - bool
+     - true
+     - Enable or disable use of pandas metadata while reading. Maps to ``enable_use_pandas_metadata`` in `libcudf parquet_reader_options <https://docs.rapids.ai/api/libcudf/stable/classcudf_1_1io_1_1parquet__reader__options>`_.
+   * - parquet.reader.use-arrow-schema
+     - parquet.reader.use_arrow_schema
+     - bool
+     - true
+     - Enable or disable use of Arrow schema while reading. Maps to ``enable_use_arrow_schema`` in `libcudf parquet_reader_options <https://docs.rapids.ai/api/libcudf/stable/classcudf_1_1io_1_1parquet__reader__options>`_.
+   * - parquet.reader.allow-mismatched-parquet-schemas
+     - parquet.reader.allow_mismatched_parquet_schemas
+     - bool
+     - false
+     - Enable or disable reading matching projected and filter columns from mismatched Parquet sources. Maps to ``enable_allow_mismatched_pq_schemas`` in `libcudf parquet_reader_options <https://docs.rapids.ai/api/libcudf/stable/classcudf_1_1io_1_1parquet__reader__options>`_.
+   * - parquet.reader.timestamp-type
+     - parquet.reader.timestamp_type
+     - string
+     - TIMESTAMP_MILLISECONDS
+     - Timestamp type used to cast all timestamp columns (e.g. TIMESTAMP_DAYS, TIMESTAMP_SECONDS, TIMESTAMP_MILLISECONDS, TIMESTAMP_MICROSECONDS, TIMESTAMP_NANOSECONDS). Maps to ``set_timestamp_type`` in `libcudf parquet_reader_options <https://docs.rapids.ai/api/libcudf/stable/classcudf_1_1io_1_1parquet__reader__options>`_.
+   * - parquet.reader.chunk-read-limit
+     - parquet.reader.chunk_read_limit
+     - integer
+     - 0
+     - Limit on total number of bytes to be returned per read (per table chunk); 0 means no limit. Maps to ``chunk_read_limit`` in `libcudf hybrid_scan_reader <https://docs.rapids.ai/api/libcudf/stable/classcudf_1_1io_1_1parquet_1_1experimental_1_1hybrid__scan__reader>`_ (e.g. ``setup_chunking_for_filter_columns``, ``setup_chunking_for_payload_columns``).
+   * - parquet.reader.pass-read-limit
+     - parquet.reader.pass_read_limit
+     - integer
+     - 0
+     - Limit on the amount of memory (bytes) used for reading and decompressing data; 0 means no limit. This is a hint, not an absolute limit—if a single row group cannot fit within the limit, it will still be loaded. Affects how many row groups can be read at a time by limiting decompression space. Maps to ``pass_read_limit`` in `libcudf hybrid_scan_reader <https://docs.rapids.ai/api/libcudf/stable/classcudf_1_1io_1_1parquet_1_1experimental_1_1hybrid__scan__reader>`_ (e.g. ``setup_chunking_for_filter_columns``, ``setup_chunking_for_payload_columns``).
+   * - parquet.reader.convert-strings-to-categories
+     - parquet.reader.convert_strings_to_categories
+     - bool
+     - false
+     - Whether to store string data as categorical type.
+   * - parquet.writer.write-timestamps-as-utc
+     - parquet.writer.write_timestamps_as_utc
+     - bool
+     - true
+     - Whether to write timestamps as UTC.
+   * - sort-writer_finish_time_slice_limit_ms
+     - sort_writer_finish_time_slice_limit_ms
+     - integer
+     - 5000
+     - Sort writer exits finish() after this many milliseconds even if work is not complete; 0 means no time limit.
+   * - parquet.writer.write-arrow-schema
+     - parquet.writer.write_arrow_schema
+     - bool
+     - false
+     - Whether to write ARROW schema.
+   * - parquet.writer.write-v2-page-headers
+     - parquet.writer.write_v2_page_headers
+     - bool
+     - false
+     - Whether to write V2 page headers.

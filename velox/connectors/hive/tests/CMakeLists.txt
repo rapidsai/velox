@@ -13,6 +13,10 @@
 # limitations under the License.
 add_executable(
   velox_hive_connector_test
+  FileColumnHandleTest.cpp
+  FileConfigTest.cpp
+  FileConnectorSplitTest.cpp
+  FileConnectorUtilTest.cpp
   FileHandleTest.cpp
   HiveConfigTest.cpp
   HiveDataSinkTest.cpp
@@ -20,7 +24,7 @@ add_executable(
   HiveConnectorUtilTest.cpp
   HiveConnectorSerDeTest.cpp
   HivePartitionFunctionTest.cpp
-  HivePartitionUtilTest.cpp
+  HivePartitionNameTest.cpp
   HiveSplitTest.cpp
   PartitionIdGeneratorTest.cpp
   TableHandleTest.cpp
@@ -36,6 +40,7 @@ target_link_libraries(
   velox_vector_test_lib
   velox_exec
   velox_exec_test_lib
+  GTest::gmock
   GTest::gtest
   GTest::gtest_main
 )

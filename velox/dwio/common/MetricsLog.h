@@ -19,17 +19,15 @@
 #include "velox/dwio/common/FilterNode.h"
 #include "velox/dwio/common/exception/Exception.h"
 
-namespace facebook {
-namespace velox {
-namespace dwio {
-namespace common {
+namespace facebook::velox::dwio::common {
 
 class MetricsLog {
  public:
   static constexpr std::string_view LIB_VERSION_STRING{"1.1"};
-  static constexpr folly::StringPiece WRITE_OPERATION{"WRITE"};
+  static constexpr std::string_view WRITE_OPERATION{"WRITE"};
 
-  enum class MetricsType {
+  /// Identifies the type of metadata being read or logged for metrics purposes.
+  enum class Type {
     HEADER,
     FOOTER,
     FILE,
@@ -39,8 +37,10 @@ class MetricsLog {
     STREAM,
     STREAM_BUNDLE,
     GROUP,
+    GROUP_INDEX,
     BLOCK,
-    TEST
+    TEST,
+    METADATA
   };
 
   virtual ~MetricsLog() = default;
@@ -54,7 +54,7 @@ class MetricsLog {
       uint64_t footerSize,
       uint64_t readOffset,
       uint64_t readSize,
-      MetricsType type,
+      Type type,
       uint32_t numFileRead,
       uint32_t numStripeCache) const {}
 
@@ -127,45 +127,17 @@ class MetricsLog {
 
   virtual void logFileClose(const FileCloseMetrics& /* metrics */) const {}
 
-  static std::shared_ptr<const MetricsLog> voidLog() {
-    static const MetricsLog kInstance{{}};
-    return {std::shared_ptr<const MetricsLog>{}, &kInstance};
-  }
+  static std::shared_ptr<const MetricsLog> voidLog();
 
  protected:
   MetricsLog(const std::string& file) : file_{file} {}
 
-  static std::string getMetricTypeName(MetricsType type) {
-    switch (type) {
-      case MetricsType::HEADER:
-        return "HEADER";
-      case MetricsType::FOOTER:
-        return "FOOTER";
-      case MetricsType::FILE:
-        return "FILE";
-      case MetricsType::STRIPE:
-        return "STRIPE";
-      case MetricsType::STRIPE_INDEX:
-        return "STRIPE_INDEX";
-      case MetricsType::STRIPE_FOOTER:
-        return "STRIPE_FOOTER";
-      case MetricsType::STREAM:
-        return "STREAM";
-      case MetricsType::STREAM_BUNDLE:
-        return "STREAM_BUNDLE";
-      case MetricsType::GROUP:
-        return "GROUP";
-      case MetricsType::BLOCK:
-        return "BLOCK";
-      case MetricsType::TEST:
-        return "TEST";
-    }
-  }
+  static std::string getMetricTypeName(Type type);
 
   std::string file_;
 };
 
-using LogType = MetricsLog::MetricsType;
+using LogType = MetricsLog::Type;
 using MetricsLogPtr = std::shared_ptr<const MetricsLog>;
 
 class DwioMetricsLogFactory {
@@ -178,7 +150,4 @@ void registerMetricsLogFactory(std::shared_ptr<DwioMetricsLogFactory> factory);
 
 DwioMetricsLogFactory& getMetricsLogFactory();
 
-} // namespace common
-} // namespace dwio
-} // namespace velox
-} // namespace facebook
+} // namespace facebook::velox::dwio::common

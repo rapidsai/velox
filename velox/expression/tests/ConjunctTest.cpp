@@ -19,7 +19,6 @@
 #include "velox/exec/tests/utils/AssertQueryBuilder.h"
 #include "velox/exec/tests/utils/OperatorTestBase.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
-#include "velox/parse/Expressions.h"
 
 using namespace facebook::velox;
 using namespace facebook::velox::exec;
@@ -102,4 +101,19 @@ TEST_F(ConjunctTest, constant) {
     assertQuery(
         plan, "select c0, c1, c2, if (c0 < 9, c1 and c2, c1 or c2) from tmp");
   }
+}
+
+TEST_F(ConjunctTest, notOperator) {
+  auto data = makeRowVector(
+      {makeFlatVector<int32_t>(10, [](auto row) { return row; }),
+       makeFlatVector<bool>(
+           10,
+           [](auto row) { return row % 2 == 0; },
+           [](auto row) { return row == 5; })});
+
+  auto plan =
+      PlanBuilder().values({data}).project({"c0", "c1", "not c1"}).planNode();
+  createDuckDbTable({data});
+
+  assertQuery(plan, "select c0, c1, not c1 from tmp");
 }

@@ -16,8 +16,10 @@
 
 #include "velox/common/base/VeloxException.h"
 
-#include <folly/synchronization/AtomicStruct.h>
+#include <chrono>
 #include <exception>
+
+#include <folly/synchronization/AtomicStruct.h>
 
 namespace facebook {
 namespace velox {
@@ -103,6 +105,35 @@ VeloxException::VeloxException(
       })) {}
 
 VeloxException::VeloxException(
+    const char* file,
+    size_t line,
+    const char* function,
+    std::string_view failingExpression,
+    std::string_view message,
+    std::string_view errorSource,
+    std::string_view errorCode,
+    bool isRetriable,
+    CompileTimeStringLiteral messageTemplate,
+    Type exceptionType,
+    std::string_view exceptionName)
+    : VeloxException(State::make(exceptionType, [&](auto& state) {
+        state.exceptionType = exceptionType;
+        state.exceptionName = exceptionName;
+        state.file = file;
+        state.line = line;
+        state.function = function;
+        state.failingExpression = failingExpression;
+        state.message = message;
+        state.messageTemplate = messageTemplate;
+        state.errorSource = errorSource;
+        state.errorCode = errorCode;
+        state.context = getExceptionContext().message(exceptionType);
+        state.additionalContext =
+            getAdditionalExceptionContextString(exceptionType, state.context);
+        state.isRetriable = isRetriable;
+      })) {}
+
+VeloxException::VeloxException(
     const std::exception_ptr& e,
     std::string_view message,
     std::string_view errorSource,
@@ -167,6 +198,18 @@ bool isStackTraceEnabled(VeloxException::Type type) {
   // only computation of the stacktrace but also contention on this atomic
   // variable
   return last->compare_exchange_strong(latest, now, std::memory_order_relaxed);
+}
+
+void stringAppendNumber(std::string& str, size_t number) {
+  // Manual implementation of itoa to avoid the cost of std::to_string.
+  const auto numberStartOffset = str.end() -
+      str.begin(); // Not `size()`. We need distance. The type is different.
+  size_t remaining = number;
+  do {
+    str += static_cast<char>('0' + remaining % 10);
+    remaining /= 10;
+  } while (remaining);
+  reverse(str.begin() + numberStartOffset, str.end());
 }
 
 } // namespace
@@ -248,13 +291,7 @@ void VeloxException::State::finalize() const {
 
   if (line) {
     elaborateMessage += "Line: ";
-    auto len = elaborateMessage.size();
-    size_t t = line;
-    do {
-      elaborateMessage += static_cast<char>('0' + t % 10);
-      t /= 10;
-    } while (t);
-    reverse(elaborateMessage.begin() + len, elaborateMessage.end());
+    stringAppendNumber(elaborateMessage, line);
     elaborateMessage += '\n';
   }
 

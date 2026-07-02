@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <folly/system/HardwareConcurrency.h>
 #include <utility>
 
 #include "velox/core/PlanNode.h"
@@ -45,14 +46,14 @@ class PartitionedOutputReplayer final : public OperatorReplayerBase {
       const std::string& queryId,
       const std::string& taskId,
       const std::string& nodeId,
-      VectorSerde::Kind serdeKind,
+      std::string serdeKind,
       const std::string& operatorType,
       const std::string& driverIds,
       uint64_t queryCapacity,
       folly::Executor* executor,
       const ConsumerCallBack& consumerCb = [](auto partition, auto page) {});
 
-  RowVectorPtr run(bool /*unused*/) override;
+  RowVectorPtr run(bool /*copyResults*/, bool /*cursorCopyResult*/) override;
 
  private:
   core::PlanNodePtr createPlanNode(
@@ -61,12 +62,12 @@ class PartitionedOutputReplayer final : public OperatorReplayerBase {
       const core::PlanNodePtr& source) const override;
 
   const core::PartitionedOutputNode* const originalNode_;
-  const VectorSerde::Kind serdeKind_;
+  const std::string serdeKind_;
   const std::shared_ptr<exec::OutputBufferManager> bufferManager_{
       exec::OutputBufferManager::getInstanceRef()};
   const std::unique_ptr<folly::Executor> executor_{
       std::make_unique<folly::CPUThreadPoolExecutor>(
-          std::thread::hardware_concurrency(),
+          folly::available_concurrency(),
           std::make_shared<folly::NamedThreadFactory>("Driver"))};
   const ConsumerCallBack consumerCb_;
   std::unique_ptr<folly::CPUThreadPoolExecutor> consumerExecutor_;

@@ -462,14 +462,15 @@ TEST_F(VectorHasherTest, stringDistinctOverflow) {
   for (auto i = 0; i < 7; ++i) {
     auto& stringVec = strings[i];
     stringVec.resize(numRows);
-    batches.emplace_back(makeFlatVector<StringView>(
-        numRows, [&i, &stringVec, numRows](vector_size_t row) {
-          const auto num = numRows * i + row;
-          stringVec[row] = (row != 0)
-              ? fmt::format("abcdefghijabcdefghij{}", num)
-              : fmt::format("s{}", num);
-          return StringView(stringVec[row]);
-        }));
+    batches.emplace_back(
+        makeFlatVector<StringView>(
+            numRows, [&i, &stringVec, numRows](vector_size_t row) {
+              const auto num = numRows * i + row;
+              stringVec[row] = (row != 0)
+                  ? fmt::format("abcdefghijabcdefghij{}", num)
+                  : fmt::format("s{}", num);
+              return StringView(stringVec[row]);
+            }));
   }
 
   SelectivityVector rows(numRows, true);
@@ -680,9 +681,9 @@ TEST_F(VectorHasherTest, merge) {
   VectorHasher emptyHasher(BIGINT(), 0);
   VectorHasher otherEmptyHasher(BIGINT(), 0);
   EXPECT_TRUE(emptyHasher.empty());
-  emptyHasher.merge(otherHasher);
-  hasher.merge(emptyHasher);
-  hasher.merge(otherEmptyHasher);
+  emptyHasher.merge(otherHasher, 1'000'000);
+  hasher.merge(emptyHasher, 1'000'000);
+  hasher.merge(otherEmptyHasher, 1'000'000);
   uint64_t numRange;
   uint64_t numDistinct;
   hasher.cardinality(0, numRange, numDistinct);
@@ -718,6 +719,45 @@ TEST_F(VectorHasherTest, merge) {
   // Check all values have distinct id. -1 to account for null that
   // does not occur in the data.
   EXPECT_EQ(numDistinct - 1, ids.size());
+}
+
+TEST_F(VectorHasherTest, mergeMaxNumDistinct) {
+  constexpr vector_size_t kSize = 100;
+  SelectivityVector rows(kSize);
+  raw_vector<uint64_t> hashes(kSize);
+
+  auto vector1 =
+      makeFlatVector<int64_t>(kSize, [](vector_size_t row) { return row; });
+  auto vector2 = makeFlatVector<int64_t>(
+      kSize, [](vector_size_t row) { return 1000 + row; });
+  auto vector3 = makeFlatVector<int64_t>(
+      kSize, [](vector_size_t row) { return 2000 + row; });
+
+  VectorHasher hasher1(BIGINT(), 0);
+  hasher1.decode(*vector1, rows);
+  hasher1.computeValueIds(rows, hashes);
+
+  VectorHasher hasher2(BIGINT(), 0);
+  hasher2.decode(*vector2, rows);
+  hasher2.computeValueIds(rows, hashes);
+
+  VectorHasher hasher3(BIGINT(), 0);
+  hasher3.decode(*vector3, rows);
+  hasher3.computeValueIds(rows, hashes);
+
+  hasher1.merge(hasher2, kSize * 2);
+  uint64_t numRange;
+  uint64_t numDistinct;
+  hasher1.cardinality(0, numRange, numDistinct);
+  EXPECT_EQ(numDistinct, kSize * 2 + 1);
+
+  hasher1.merge(hasher3, kSize * 2);
+  hasher1.cardinality(0, numRange, numDistinct);
+  EXPECT_EQ(numDistinct, VectorHasher::kRangeTooLarge);
+
+  hasher1.merge(hasher3, kSize * 10);
+  hasher1.cardinality(0, numRange, numDistinct);
+  EXPECT_EQ(numDistinct, VectorHasher::kRangeTooLarge);
 }
 
 TEST_F(VectorHasherTest, computeValueIdsBigint) {
@@ -1061,6 +1101,52 @@ TEST_F(VectorHasherTest, simdRange) {
   }
 }
 
+TEST_F(VectorHasherTest, lookupValueIdsDictionaryWithLargerBase) {
+  auto base = makeNullableFlatVector<int32_t>({10, 11, 12, 13, 14, 15});
+
+  auto hasher = VectorHasher::create(INTEGER(), 0);
+  raw_vector<uint64_t> result(8, pool());
+  std::fill(result.begin(), result.end(), 0);
+  SelectivityVector allRows(base->size());
+  hasher->decode(*base, allRows);
+  hasher->computeValueIds(allRows, result);
+
+  auto probeBase =
+      makeNullableFlatVector<int32_t>({15, 100, 11, 14, std::nullopt, 10});
+  auto indices = makeIndices(8, [](vector_size_t row) {
+    static constexpr vector_size_t kIndices[] = {0, 1, 2, 3, 4, 5, 0, 2};
+    return kIndices[row];
+  });
+  auto probe =
+      BaseVector::wrapInDictionary(BufferPtr(nullptr), indices, 8, probeBase);
+
+  SelectivityVector rows(8);
+  rows.clearAll();
+  rows.setValid(0, true);
+  rows.setValid(1, true);
+  rows.setValid(2, true);
+  rows.setValid(4, true);
+  rows.setValid(6, true);
+  rows.updateBounds();
+  std::fill(result.begin(), result.end(), 0);
+
+  VectorHasher::ScratchMemory scratch;
+  hasher->lookupValueIds(*probe, rows, scratch, result);
+
+  EXPECT_TRUE(rows.isValid(0));
+  EXPECT_FALSE(rows.isValid(1));
+  EXPECT_TRUE(rows.isValid(2));
+  EXPECT_TRUE(rows.isValid(4));
+  EXPECT_TRUE(rows.isValid(6));
+  EXPECT_EQ(rows.countSelected(), 4);
+
+  EXPECT_EQ(result[0], 6);
+  EXPECT_EQ(result[1], 0);
+  EXPECT_EQ(result[2], 2);
+  EXPECT_EQ(result[4], 0);
+  EXPECT_EQ(result[6], 6);
+}
+
 TEST_F(VectorHasherTest, typeMismatch) {
   auto hasher = VectorHasher::create(BIGINT(), 0);
 
@@ -1196,4 +1282,201 @@ TEST_F(VectorHasherTest, customComparisonRow) {
           {makeNullableFlatVector<int64_t>(
               {std::nullopt, 0, 1, 0, 1, 0, 1},
               velox::test::BIGINT_TYPE_WITH_CUSTOM_COMPARISON())}));
+}
+
+TEST_F(VectorHasherTest, customComparisonValueIds) {
+  // Test that VectorHasher created with custom comparison type
+  // has value IDs disabled (distinctOverflow_ and rangeOverflow_ set).
+  auto vectorHasher = exec::VectorHasher::create(
+      velox::test::BIGINT_TYPE_WITH_CUSTOM_COMPARISON(), 1);
+
+  // Test that types with custom comparison do not support value IDs.
+  EXPECT_FALSE(vectorHasher->typeSupportsValueIds());
+
+  // Verify that mayUseValueIds() returns false for custom comparison types.
+  EXPECT_FALSE(vectorHasher->mayUseValueIds());
+}
+
+TEST_F(VectorHasherTest, stringFilter) {
+  // Test that getFilter() returns a BytesValues filter for string types.
+  auto vector = makeFlatVector<StringView>(
+      {"apple", "banana", "cherry", "apple", "banana", "date"});
+
+  auto hasher = exec::VectorHasher::create(VARCHAR(), 0);
+  SelectivityVector rows(vector->size());
+  raw_vector<uint64_t> hashes(vector->size());
+
+  // Analyze the sample data.
+  hasher->decode(*vector, rows);
+  hasher->computeValueIds(rows, hashes);
+
+  // Test nullAllowed = false.
+  auto filter = hasher->getFilter(false);
+  ASSERT_TRUE(filter != nullptr);
+
+  auto bytesValues = dynamic_cast<common::BytesValues*>(filter.get());
+  ASSERT_TRUE(bytesValues != nullptr);
+  ASSERT_FALSE(bytesValues->testNull());
+
+  ASSERT_TRUE(bytesValues->testBytes("apple", 5));
+  ASSERT_TRUE(bytesValues->testBytes("banana", 6));
+  ASSERT_TRUE(bytesValues->testBytes("cherry", 6));
+  ASSERT_TRUE(bytesValues->testBytes("date", 4));
+  ASSERT_FALSE(bytesValues->testBytes("elderberry", 10));
+  ASSERT_FALSE(bytesValues->testBytes("fig", 3));
+  ASSERT_FALSE(bytesValues->testBytes("grape", 5));
+
+  // Test nullAllowed = true.
+  auto filterWithNull = hasher->getFilter(true);
+  ASSERT_TRUE(filterWithNull != nullptr);
+
+  auto bytesValuesWithNull =
+      dynamic_cast<common::BytesValues*>(filterWithNull.get());
+  ASSERT_TRUE(bytesValuesWithNull != nullptr);
+  ASSERT_TRUE(bytesValuesWithNull->testNull());
+  ASSERT_TRUE(bytesValuesWithNull->testBytes("apple", 5));
+  ASSERT_FALSE(bytesValuesWithNull->testBytes("unknown", 7));
+}
+
+TEST_F(VectorHasherTest, stringFilterWithLongStrings) {
+  // Test string filter with strings longer than 8 bytes (stored as pointers).
+  // Keep strings in a vector to ensure they persist throughout the test.
+  std::vector<std::string> strings = {
+      "short",
+      "this is a very very very very very long string",
+      "this is a very long string",
+      "short",
+      "medium length",
+  };
+
+  auto vector = makeFlatVector<StringView>(
+      strings.size(),
+      [&strings](vector_size_t row) { return StringView(strings[row]); });
+
+  auto hasher = exec::VectorHasher::create(VARCHAR(), 0);
+  SelectivityVector rows(vector->size());
+  raw_vector<uint64_t> hashes(vector->size());
+
+  // Analyze the data.
+  hasher->decode(*vector, rows);
+  hasher->computeValueIds(rows, hashes);
+
+  // Get the filter.
+  auto filter = hasher->getFilter(false);
+  ASSERT_TRUE(filter != nullptr);
+
+  auto bytesValues = dynamic_cast<common::BytesValues*>(filter.get());
+  ASSERT_TRUE(bytesValues != nullptr);
+
+  // Test that both short and long strings are handled correctly.
+  ASSERT_TRUE(bytesValues->testBytes(strings[0].data(), strings[0].size()));
+  ASSERT_TRUE(bytesValues->testBytes(strings[1].data(), strings[1].size()));
+  ASSERT_TRUE(bytesValues->testBytes(strings[2].data(), strings[2].size()));
+  ASSERT_TRUE(bytesValues->testBytes(strings[4].data(), strings[4].size()));
+
+  // Test rejection of non-existent strings.
+  ASSERT_FALSE(bytesValues->testBytes("not in the set", 14));
+  ASSERT_FALSE(bytesValues->testBytes("different", 9));
+}
+
+TEST_F(VectorHasherTest, stringFilterDistinctOverflow) {
+  // Test that getFilter() returns nullptr when distinctOverflow_ is true.
+  auto hasher = exec::VectorHasher::create(VARCHAR(), 0);
+
+  constexpr uint32_t numRows = 10000;
+  constexpr int numBatches = 15;
+
+  SelectivityVector rows(numRows);
+  raw_vector<uint64_t> hashes(numRows);
+
+  // Process enough batches with distinct strings to trigger overflow.
+  // kMaxDistinct is 100,000, so 15 batches * 10,000 = 150,000 distinct strings.
+  for (int batch = 0; batch < numBatches; ++batch) {
+    std::vector<std::string> strings;
+    strings.resize(numRows);
+
+    // Create distinct strings for each batch.
+    for (auto i = 0; i < numRows; ++i) {
+      strings[i] = fmt::format("batch_{}_string_{}", batch, i);
+    }
+
+    auto vector = makeFlatVector<StringView>(
+        numRows,
+        [&strings](vector_size_t row) { return StringView(strings[row]); });
+
+    hasher->decode(*vector, rows);
+    hasher->computeValueIds(rows, hashes);
+  }
+
+  // After overflow, getFilter should return nullptr.
+  auto filter = hasher->getFilter(false);
+  ASSERT_TRUE(filter == nullptr);
+}
+
+DEBUG_ONLY_TEST_F(VectorHasherTest, customComparisonNoValueIds) {
+  // Test that custom comparison types cannot use value IDs for optimization.
+  auto data = makeRowVector({makeNullableFlatVector<int64_t>(
+      {0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
+      velox::test::BIGINT_TYPE_WITH_CUSTOM_COMPARISON())});
+
+  auto hasher = exec::VectorHasher::create(
+      velox::test::BIGINT_TYPE_WITH_CUSTOM_COMPARISON(), 0);
+
+  SelectivityVector allRows(data->size());
+  raw_vector<uint64_t> result(data->size());
+  std::fill(result.begin(), result.end(), 0);
+
+  hasher->decode(*data->childAt(0), allRows);
+
+  VELOX_ASSERT_THROW(
+      hasher->computeValueIds(allRows, result), "Value IDs cannot be used");
+  VectorHasher::ScratchMemory scratchMemory;
+  VELOX_ASSERT_THROW(
+      hasher->lookupValueIds(*data->childAt(0), allRows, scratchMemory, result),
+      "Value IDs cannot be used");
+  EXPECT_EQ(nullptr, hasher->getFilter(true));
+  VELOX_ASSERT_THROW(
+      hasher->enableValueRange(1, 50), "Value IDs cannot be used");
+  VELOX_ASSERT_THROW(
+      hasher->enableValueRange(1, 50), "Value IDs cannot be used");
+}
+
+DEBUG_ONLY_TEST_F(VectorHasherTest, computeValueIdsForRowsCustomComparison) {
+  // Test that computeValueIdsForRows throws an exception for types with custom
+  // comparison.
+  auto hasher = exec::VectorHasher::create(
+      velox::test::BIGINT_TYPE_WITH_CUSTOM_COMPARISON(), 0);
+
+  constexpr int32_t kNumGroups = 5;
+  constexpr int32_t kRowSize = 16;
+  constexpr int32_t kValueOffset = 0;
+  constexpr int32_t kNullByte = 8;
+  constexpr uint8_t kNullMask = 1;
+
+  // Allocate memory for row-wise data.
+  std::vector<std::vector<char>> rowData(kNumGroups);
+  std::vector<char*> groups(kNumGroups);
+
+  for (int i = 0; i < kNumGroups; ++i) {
+    rowData[i].resize(kRowSize, 0);
+    groups[i] = rowData[i].data();
+
+    // Set values for all rows (no nulls for simplicity).
+    *reinterpret_cast<int64_t*>(groups[i] + kValueOffset) = i * 256;
+  }
+
+  raw_vector<uint64_t> result(kNumGroups);
+  std::fill(result.begin(), result.end(), 0);
+
+  // computeValueIdsForRows should throw an exception for types with custom
+  // comparison.
+  VELOX_ASSERT_THROW(
+      hasher->computeValueIdsForRows(
+          groups.data(),
+          kNumGroups,
+          kValueOffset,
+          kNullByte,
+          kNullMask,
+          result),
+      "Value IDs cannot be used");
 }

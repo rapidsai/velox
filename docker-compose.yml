@@ -77,13 +77,17 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    environment:
+      CC: /opt/rh/gcc-toolset-14/root/bin/gcc # Default to gcc-14
+      CXX: /opt/rh/gcc-toolset-14/root/bin/g++ # Default to gcc-14
+      CUDAHOSTCXX: /opt/rh/gcc-toolset-14/root/bin/g++ # Default to gcc-14
 
   presto-java:
     extends: base-block
     image: ghcr.io/facebookincubator/velox-dev:presto-java
     build:
       args:
-        - PRESTO_VERSION=0.293
+        - PRESTO_VERSION=0.295
       dockerfile: scripts/docker/java.dockerfile
 
   spark-server:
@@ -93,6 +97,7 @@ services:
       args:
         - SPARK_VERSION=3.5.1
       dockerfile: scripts/docker/java.dockerfile
+      target: spark-server
 
   fedora:
     extends: base-block

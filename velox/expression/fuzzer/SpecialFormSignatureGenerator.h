@@ -45,8 +45,14 @@ class SpecialFormSignatureGenerator {
       const std::string& toType,
       std::vector<exec::FunctionSignaturePtr>& signatures) const;
 
-  /// Generates signatures for cast from varchar to the given type and adds them
-  /// to signatures.
+  /// Generates signatures for cast from decimal types to the given type
+  /// and adds them to signatures.
+  void addCastFromDecimalSignatures(
+      const std::string& toType,
+      std::vector<exec::FunctionSignaturePtr>& signatures) const;
+
+  /// Generates signatures for cast from varchar to the given type and adds
+  /// them to signatures.
   void addCastFromVarcharSignature(
       const std::string& toType,
       std::vector<exec::FunctionSignaturePtr>& signatures) const;
@@ -54,6 +60,12 @@ class SpecialFormSignatureGenerator {
   /// Generates signatures for cast from timestamp to the given type and adds
   /// them to signatures.
   void addCastFromTimestampSignature(
+      const std::string& toType,
+      std::vector<exec::FunctionSignaturePtr>& signatures) const;
+
+  /// Generates signatures for cast from time to the given type and adds
+  /// them to signatures.
+  void addCastFromTimeSignature(
       const std::string& toType,
       std::vector<exec::FunctionSignaturePtr>& signatures) const;
 
@@ -85,6 +97,9 @@ class SpecialFormSignatureGenerator {
   virtual std::vector<exec::FunctionSignaturePtr> getSignaturesForSwitch()
       const;
 
+  // Returns the common signatures for the 'cast' special form.
+  std::vector<exec::FunctionSignaturePtr> getCommonSignaturesForCast() const;
+
   // Returns the signatures for the 'cast' special form.
   virtual std::vector<exec::FunctionSignaturePtr> getSignaturesForCast() const;
 
@@ -101,6 +116,12 @@ class SpecialFormSignatureGenerator {
       "boolean"};
 
   const std::vector<std::string> kFloatingPointTypes_{"real", "double"};
+
+  const std::vector<std::string> kDecimalTypes_{
+      "DECIMAL(6, 0)",
+      "DECIMAL(18, 6)",
+      "DECIMAL(38, 18)",
+      "DECIMAL(38, 38)"};
 };
 
 } // namespace facebook::velox::fuzzer

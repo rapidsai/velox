@@ -14,8 +14,9 @@
  * limitations under the License.
  */
 #include "velox/exec/OutputBufferManager.h"
+#include <folly/system/HardwareConcurrency.h>
 #include <gtest/gtest.h>
-#include "folly/experimental/EventCount.h"
+#include "folly/synchronization/EventCount.h"
 #include "velox/common/base/tests/GTestUtils.h"
 #include "velox/dwio/common/tests/utils/BatchMaker.h"
 #include "velox/exec/Task.h"
@@ -33,23 +34,25 @@ using facebook::velox::test::BatchMaker;
 
 struct TestParam {
   PartitionedOutputNode::Kind outputKind;
-  VectorSerde::Kind serdeKind;
+  std::string serdeKind;
 
-  TestParam(
-      PartitionedOutputNode::Kind _outputKind,
-      VectorSerde::Kind _serdeKind)
+  TestParam(PartitionedOutputNode::Kind _outputKind, std::string _serdeKind)
       : outputKind(_outputKind), serdeKind(_serdeKind) {}
 };
 
+inline void PrintTo(const TestParam& param, std::ostream* os) {
+  *os << fmt::format("{}_{}", param.outputKind, param.serdeKind);
+}
+
 class OutputBufferManagerTest : public testing::Test {
  protected:
-  OutputBufferManagerTest() : serdeKind_(VectorSerde::Kind::kPresto) {
+  OutputBufferManagerTest() : serdeKind_("Presto") {
     std::vector<std::string> names = {"c0", "c1"};
     std::vector<TypePtr> types = {BIGINT(), VARCHAR()};
     rowType_ = ROW(std::move(names), std::move(types));
   }
 
-  explicit OutputBufferManagerTest(VectorSerde::Kind serdeKind)
+  explicit OutputBufferManagerTest(std::string serdeKind)
       : serdeKind_(serdeKind) {
     std::vector<std::string> names = {"c0", "c1"};
     std::vector<TypePtr> types = {BIGINT(), VARCHAR()};
@@ -71,14 +74,14 @@ class OutputBufferManagerTest : public testing::Test {
             serializer::presto::PrestoOutputStreamListener>();
       });
     }
-    if (!isRegisteredNamedVectorSerde(VectorSerde::Kind::kPresto)) {
+    if (!isRegisteredNamedVectorSerde("Presto")) {
       facebook::velox::serializer::presto::PrestoVectorSerde::
           registerNamedVectorSerde();
     }
-    if (!isRegisteredNamedVectorSerde(VectorSerde::Kind::kCompactRow)) {
+    if (!isRegisteredNamedVectorSerde("CompactRow")) {
       serializer::CompactRowVectorSerde::registerNamedVectorSerde();
     }
-    if (!isRegisteredNamedVectorSerde(VectorSerde::Kind::kUnsafeRow)) {
+    if (!isRegisteredNamedVectorSerde("UnsafeRow")) {
       serializer::spark::UnsafeRowVectorSerde::registerNamedVectorSerde();
     }
   }
@@ -109,13 +112,14 @@ class OutputBufferManagerTest : public testing::Test {
         std::move(planFragment),
         0,
         std::move(queryCtx),
-        Task::ExecutionMode::kParallel);
+        Task::ExecutionMode::kParallel,
+        exec::Consumer{});
 
     bufferManager_->initializeTask(task, kind, numDestinations, numDrivers);
     return task;
   }
 
-  std::unique_ptr<SerializedPage> makeSerializedPage(
+  std::unique_ptr<SerializedPageBase> makeSerializedPage(
       RowTypePtr rowType,
       vector_size_t size) {
     auto vector = std::dynamic_pointer_cast<RowVector>(
@@ -375,8 +379,9 @@ class OutputBufferManagerTest : public testing::Test {
               std::vector<std::unique_ptr<folly::IOBuf>> pages,
               int64_t inSequence,
               std::vector<int64_t> remainingBytes) {
-            promise.setValue(Response{
-                std::move(pages), inSequence, std::move(remainingBytes)});
+            promise.setValue(
+                Response{
+                    std::move(pages), inSequence, std::move(remainingBytes)});
           });
       future.wait();
       ASSERT_TRUE(future.isReady());
@@ -432,10 +437,10 @@ class OutputBufferManagerTest : public testing::Test {
     }
   }
 
-  const VectorSerde::Kind serdeKind_;
+  const std::string serdeKind_;
   std::shared_ptr<folly::Executor> executor_{
       std::make_shared<folly::CPUThreadPoolExecutor>(
-          std::thread::hardware_concurrency())};
+          folly::available_concurrency())};
   std::shared_ptr<facebook::velox::memory::MemoryPool> pool_;
   std::shared_ptr<OutputBufferManager> bufferManager_;
   RowTypePtr rowType_;
@@ -443,13 +448,11 @@ class OutputBufferManagerTest : public testing::Test {
 
 class OutputBufferManagerWithDifferentSerdeKindsTest
     : public OutputBufferManagerTest,
-      public testing::WithParamInterface<VectorSerde::Kind> {
+      public testing::WithParamInterface<std::string> {
  public:
-  static std::vector<VectorSerde::Kind> getTestParams() {
-    static std::vector<VectorSerde::Kind> params = {
-        VectorSerde::Kind::kPresto,
-        VectorSerde::Kind::kCompactRow,
-        VectorSerde::Kind::kUnsafeRow};
+  static std::vector<std::string> getTestParams() {
+    static std::vector<std::string> params = {
+        "Presto", "CompactRow", "UnsafeRow"};
     return params;
   }
 };
@@ -460,21 +463,15 @@ class AllOutputBufferManagerTest
  public:
   static std::vector<TestParam> getTestParams() {
     static std::vector<TestParam> params = {
-        {PartitionedOutputNode::Kind::kBroadcast, VectorSerde::Kind::kPresto},
-        {PartitionedOutputNode::Kind::kBroadcast,
-         VectorSerde::Kind::kCompactRow},
-        {PartitionedOutputNode::Kind::kBroadcast,
-         VectorSerde::Kind::kUnsafeRow},
-        {PartitionedOutputNode::Kind::kPartitioned, VectorSerde::Kind::kPresto},
-        {PartitionedOutputNode::Kind::kPartitioned,
-         VectorSerde::Kind::kCompactRow},
-        {PartitionedOutputNode::Kind::kPartitioned,
-         VectorSerde::Kind::kUnsafeRow},
-        {PartitionedOutputNode::Kind::kArbitrary, VectorSerde::Kind::kPresto},
-        {PartitionedOutputNode::Kind::kArbitrary,
-         VectorSerde::Kind::kCompactRow},
-        {PartitionedOutputNode::Kind::kArbitrary,
-         VectorSerde::Kind::kUnsafeRow}};
+        {PartitionedOutputNode::Kind::kBroadcast, "Presto"},
+        {PartitionedOutputNode::Kind::kBroadcast, "CompactRow"},
+        {PartitionedOutputNode::Kind::kBroadcast, "UnsafeRow"},
+        {PartitionedOutputNode::Kind::kPartitioned, "Presto"},
+        {PartitionedOutputNode::Kind::kPartitioned, "CompactRow"},
+        {PartitionedOutputNode::Kind::kPartitioned, "UnsafeRow"},
+        {PartitionedOutputNode::Kind::kArbitrary, "Presto"},
+        {PartitionedOutputNode::Kind::kArbitrary, "CompactRow"},
+        {PartitionedOutputNode::Kind::kArbitrary, "UnsafeRow"}};
     return params;
   }
 
@@ -1470,7 +1467,7 @@ TEST_P(
   std::memcpy(iobuf->writableData(), payload.data(), payloadSize);
   iobuf->append(payloadSize);
 
-  auto page = std::make_unique<SerializedPage>(std::move(iobuf));
+  auto page = std::make_unique<PrestoSerializedPage>(std::move(iobuf));
 
   auto queue = std::make_shared<ExchangeQueue>(1, 0);
   std::vector<ContinuePromise> promises;

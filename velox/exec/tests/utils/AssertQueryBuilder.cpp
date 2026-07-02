@@ -266,7 +266,26 @@ RowVectorPtr AssertQueryBuilder::copyResults(
   return copy;
 }
 
-uint64_t AssertQueryBuilder::runWithoutResults(std::shared_ptr<Task>& task) {
+std::vector<RowVectorPtr> AssertQueryBuilder::copyResultBatches(
+    memory::MemoryPool* pool) {
+  auto [cursor, results] = readCursor();
+
+  if (results.empty()) {
+    return results;
+  }
+
+  std::vector<RowVectorPtr> copies;
+  copies.reserve(results.size());
+  for (const auto& result : results) {
+    copies.push_back(
+        BaseVector::create<RowVector>(result->type(), result->size(), pool));
+    copies.back()->copy(result.get(), 0, 0, result->size());
+  }
+
+  return copies;
+}
+
+uint64_t AssertQueryBuilder::countResults(std::shared_ptr<Task>& task) {
   auto [cursor, results] = readCursor();
   uint64_t count = 0;
   for (const auto& result : results) {
@@ -274,6 +293,11 @@ uint64_t AssertQueryBuilder::runWithoutResults(std::shared_ptr<Task>& task) {
   }
   task = cursor->task();
   return count;
+}
+
+uint64_t AssertQueryBuilder::countResults() {
+  std::shared_ptr<Task> task;
+  return countResults(task);
 }
 
 std::pair<std::unique_ptr<TaskCursor>, std::vector<RowVectorPtr>>
@@ -287,17 +311,14 @@ AssertQueryBuilder::readCursor() {
       static std::atomic<uint64_t> cursorQueryId{0};
       const std::string queryId =
           fmt::format("TaskCursorQuery_{}", cursorQueryId++);
-      auto queryPool = memory::memoryManager()->addRootPool(
-          queryId, params_.maxQueryCapacity);
-      params_.queryCtx = core::QueryCtx::create(
-          executor_.get(),
-          core::QueryConfig({}),
-          std::
-              unordered_map<std::string, std::shared_ptr<config::ConfigBase>>{},
-          cache::AsyncDataCache::getInstance(),
-          std::move(queryPool),
-          nullptr,
-          queryId);
+
+      params_.queryCtx = core::QueryCtx::Builder()
+                             .executor(executor_.get())
+                             .pool(
+                                 memory::memoryManager()->addRootPool(
+                                     queryId, params_.maxQueryCapacity))
+                             .queryId(queryId)
+                             .build();
     }
   }
   if (!configs_.empty()) {
@@ -310,52 +331,55 @@ AssertQueryBuilder::readCursor() {
     }
   }
 
-  return test::readCursor(params_, [&](exec::TaskCursor* taskCursor) {
-    if (taskCursor->noMoreSplits()) {
-      return;
-    }
-    auto& task = taskCursor->task();
-    VELOX_CHECK(!params_.barrierExecution || params_.serialExecution);
-    if (params_.barrierExecution) {
-      int numSplits{0};
-      for (auto& [nodeId, nodeSplits] : splits_) {
-        if (nodeSplits.empty()) {
-          task->noMoreSplits(nodeId);
-          continue;
+  return test::readCursorAsync(
+      params_,
+      [&](exec::TaskCursor* taskCursor) {
+        if (taskCursor->noMoreSplits()) {
+          return ContinueFuture::makeEmpty();
         }
-        ++numSplits;
-        if (addSplitWithSequence_) {
-          task->addSplitWithSequence(
-              nodeId, std::move(nodeSplits[0]), ++sequenceId_);
-          task->setMaxSplitSequenceId(nodeId, sequenceId_);
-        } else {
-          task->addSplit(nodeId, std::move(nodeSplits[0]));
-        }
-        nodeSplits.erase(nodeSplits.begin());
-      }
-      if (numSplits > 0) {
-        VELOX_CHECK_EQ(
-            numSplits,
-            splits_.size(),
-            "Barrier task execution mode requires all the sources have the same number of splits");
-        task->requestBarrier();
-      } else {
-        taskCursor->setNoMoreSplits();
-      }
-    } else {
-      for (auto& [nodeId, nodeSplits] : splits_) {
-        for (auto& split : nodeSplits) {
-          if (addSplitWithSequence_) {
-            task->addSplitWithSequence(nodeId, std::move(split), ++sequenceId_);
-            task->setMaxSplitSequenceId(nodeId, sequenceId_);
-          } else {
-            task->addSplit(nodeId, std::move(split));
+        auto& task = taskCursor->task();
+        if (params_.barrierExecution) {
+          int numSplits{0};
+          for (auto& [nodeId, nodeSplits] : splits_) {
+            if (nodeSplits.empty()) {
+              task->noMoreSplits(nodeId);
+              continue;
+            }
+            ++numSplits;
+            if (addSplitWithSequence_) {
+              task->addSplitWithSequence(
+                  nodeId, std::move(nodeSplits[0]), ++sequenceId_);
+              task->setMaxSplitSequenceId(nodeId, sequenceId_);
+            } else {
+              task->addSplit(nodeId, std::move(nodeSplits[0]));
+            }
+            nodeSplits.erase(nodeSplits.cbegin());
           }
+          if (numSplits > 0) {
+            VELOX_CHECK_EQ(
+                numSplits,
+                splits_.size(),
+                "Barrier task execution mode requires all the sources have the same number of splits");
+            return task->requestBarrier();
+          }
+          taskCursor->setNoMoreSplits();
+        } else {
+          for (auto& [nodeId, nodeSplits] : splits_) {
+            for (auto& split : nodeSplits) {
+              if (addSplitWithSequence_) {
+                task->addSplitWithSequence(
+                    nodeId, std::move(split), ++sequenceId_);
+                task->setMaxSplitSequenceId(nodeId, sequenceId_);
+              } else {
+                task->addSplit(nodeId, std::move(split));
+              }
+            }
+            task->noMoreSplits(nodeId);
+          }
+          taskCursor->setNoMoreSplits();
         }
-        task->noMoreSplits(nodeId);
-      }
-      taskCursor->setNoMoreSplits();
-    }
-  });
+        return ContinueFuture::makeEmpty();
+      },
+      maxWaitMicros_);
 }
 } // namespace facebook::velox::exec::test

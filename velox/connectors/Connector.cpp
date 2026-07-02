@@ -16,20 +16,41 @@
 
 #include "velox/connectors/Connector.h"
 
+#include "velox/common/EnumDefine.h"
+
+#include <memory>
+#include <string>
+
+#include "velox/common/ScopedRegistry.h"
+#include "velox/common/base/Exceptions.h"
+#include "velox/connectors/ConnectorRegistryInternal.h"
+
 namespace facebook::velox::connector {
-namespace {
-std::unordered_map<std::string, std::shared_ptr<ConnectorFactory>>&
-connectorFactories() {
-  static std::unordered_map<std::string, std::shared_ptr<ConnectorFactory>>
-      factories;
-  return factories;
+
+ScopedRegistry<std::string, Connector>& connectors() {
+  static ScopedRegistry<std::string, Connector> instance;
+  return instance;
 }
 
-std::unordered_map<std::string, std::shared_ptr<Connector>>& connectors() {
-  static std::unordered_map<std::string, std::shared_ptr<Connector>> connectors;
-  return connectors;
+bool registerConnector(const std::shared_ptr<Connector>& connector) {
+  connectors().insert(connector->connectorId(), connector);
+  return true;
 }
-} // namespace
+
+bool unregisterConnector(const std::string& connectorId) {
+  return connectors().erase(connectorId);
+}
+
+std::shared_ptr<Connector> getConnector(const std::string& connectorId) {
+  auto connector = connectors().find(connectorId);
+  VELOX_CHECK_NOT_NULL(
+      connector, "Connector with ID is not registered: {}", connectorId);
+  return connector;
+}
+
+bool hasConnector(const std::string& connectorId) {
+  return connectors().find(connectorId) != nullptr;
+}
 
 bool DataSink::Stats::empty() const {
   return numWrittenBytes == 0 && numWrittenFiles == 0 && spillStats.empty();
@@ -41,67 +62,6 @@ std::string DataSink::Stats::toString() const {
       succinctBytes(numWrittenBytes),
       numWrittenFiles,
       spillStats.toString());
-}
-
-bool registerConnectorFactory(std::shared_ptr<ConnectorFactory> factory) {
-  bool ok =
-      connectorFactories().insert({factory->connectorName(), factory}).second;
-  VELOX_CHECK(
-      ok,
-      "ConnectorFactory with name '{}' is already registered",
-      factory->connectorName());
-  return true;
-}
-
-bool hasConnectorFactory(const std::string& connectorName) {
-  return connectorFactories().count(connectorName) == 1;
-}
-
-bool unregisterConnectorFactory(const std::string& connectorName) {
-  auto count = connectorFactories().erase(connectorName);
-  return count == 1;
-}
-
-std::shared_ptr<ConnectorFactory> getConnectorFactory(
-    const std::string& connectorName) {
-  auto it = connectorFactories().find(connectorName);
-  VELOX_CHECK(
-      it != connectorFactories().end(),
-      "ConnectorFactory with name '{}' not registered",
-      connectorName);
-  return it->second;
-}
-
-bool registerConnector(std::shared_ptr<Connector> connector) {
-  bool ok = connectors().insert({connector->connectorId(), connector}).second;
-  VELOX_CHECK(
-      ok,
-      "Connector with ID '{}' is already registered",
-      connector->connectorId());
-  return true;
-}
-
-bool unregisterConnector(const std::string& connectorId) {
-  auto count = connectors().erase(connectorId);
-  return count == 1;
-}
-
-std::shared_ptr<Connector> getConnector(const std::string& connectorId) {
-  auto it = connectors().find(connectorId);
-  VELOX_CHECK(
-      it != connectors().end(),
-      "Connector with ID '{}' not registered",
-      connectorId);
-  return it->second;
-}
-
-bool hasConnector(const std::string& connectorId) {
-  return connectors().find(connectorId) != connectors().end();
-}
-
-const std::unordered_map<std::string, std::shared_ptr<Connector>>&
-getAllConnectors() {
-  return connectors();
 }
 
 folly::Synchronized<

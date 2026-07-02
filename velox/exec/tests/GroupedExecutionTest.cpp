@@ -17,16 +17,18 @@
 
 #include "velox/common/base/tests/GTestUtils.h"
 #include "velox/common/memory/MemoryArbitrator.h"
+#include "velox/common/testutil/TempDirectoryPath.h"
+#include "velox/common/testutil/TempFilePath.h"
 #include "velox/exec/Cursor.h"
 #include "velox/exec/OutputBufferManager.h"
 #include "velox/exec/PlanNodeStats.h"
 #include "velox/exec/tests/utils/AssertQueryBuilder.h"
 #include "velox/exec/tests/utils/HiveConnectorTestBase.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
-#include "velox/exec/tests/utils/TempDirectoryPath.h"
 #include "velox/type/Type.h"
 
 namespace facebook::velox::exec::test {
+using namespace facebook::velox::common::testutil;
 
 class GroupedExecutionTest : public virtual HiveConnectorTestBase {
  protected:
@@ -547,7 +549,7 @@ TEST_F(GroupedExecutionTest, hashJoinWithMixedGroupedExecutionWithSpill) {
     }
 
     TestScopedSpillInjection scopedSpillInjection(triggerSpill ? 100 : 0);
-    const auto spillDirectory = exec::test::TempDirectoryPath::create();
+    const auto spillDirectory = TempDirectoryPath::create();
     AssertQueryBuilder queryBuilder(duckDbQueryRunner_);
     queryBuilder.plan(plan)
         .spillDirectory(spillDirectory->getPath())
@@ -675,16 +677,25 @@ DEBUG_ONLY_TEST_F(
           }
         }));
 
+    const auto spillDirectory = TempDirectoryPath::create();
+    std::optional<common::SpillDiskOptions> spillOpts;
+    if (testData.enableSpill) {
+      spillOpts = common::SpillDiskOptions{
+          .spillDirPath = spillDirectory->getPath(),
+          .spillDirCreated = true,
+          .spillDirCreateCb = nullptr};
+    }
+
     auto task = exec::Task::create(
         "0",
         std::move(planFragment),
         0,
         std::move(queryCtx),
-        Task::ExecutionMode::kParallel);
-    const auto spillDirectory = exec::test::TempDirectoryPath::create();
-    if (testData.enableSpill) {
-      task->setSpillDirectory(spillDirectory->getPath());
-    }
+        Task::ExecutionMode::kParallel,
+        /*consumer=*/Consumer{},
+        /*memoryArbitrationPriority=*/0,
+        spillOpts,
+        /*onError=*/nullptr);
 
     // 'numDriversPerGroup' drivers max to execute one group at a time.
     task->start(numDriversPerGroup, testData.groupConcurrency);
@@ -817,15 +828,21 @@ DEBUG_ONLY_TEST_F(
         memory::testingRunArbitration(op->pool());
       }));
 
+  const auto spillDirectory = TempDirectoryPath::create();
+  common::SpillDiskOptions spillOpts{
+      .spillDirPath = spillDirectory->getPath(),
+      .spillDirCreated = true,
+      .spillDirCreateCb = nullptr};
+
   auto task = exec::Task::create(
       "0",
       std::move(planFragment),
       0,
       std::move(queryCtx),
-      Task::ExecutionMode::kParallel);
-  const auto spillDirectory = exec::test::TempDirectoryPath::create();
-
-  task->setSpillDirectory(spillDirectory->getPath());
+      Task::ExecutionMode::kParallel,
+      Consumer{},
+      /*memoryArbitrationPriority=*/0,
+      spillOpts);
 
   // 'numDriversPerGroup' drivers max to execute one group at a time.
   task->start(numDriversPerGroup, 1);
@@ -848,8 +865,8 @@ DEBUG_ONLY_TEST_F(
   }
 
   // Total drivers should be numDriversPerGroup * (numGroups + 1), but since
-  // probe does not receive termination signal, it cannot signal the build side
-  // to finish. we expect only build's numDriversPerGroup finished.
+  // probe does not receive termination signal, it cannot signal the build
+  // side to finish. we expect only build's numDriversPerGroup finished.
   waitForFinishedDrivers(task, numDriversPerGroup);
 
   // 'Delete results' from output buffer triggers 'set all output consumed',
@@ -1025,8 +1042,8 @@ TEST_F(GroupedExecutionTest, groupedExecutionWithHashAndNestedLoopJoin) {
       const std::unordered_set<int32_t> expectedSplitGroupIds({1, 5, 8});
       int numSplitGroupJoinNodes{0};
       task->pool()->visitChildren([&](memory::MemoryPool* childPool) -> bool {
-        if (folly::StringPiece(childPool->name())
-                .startsWith(fmt::format("node.{}[", joinNodeId))) {
+        if (childPool->name().starts_with(
+                fmt::format("node.{}[", joinNodeId))) {
           ++numSplitGroupJoinNodes;
           std::vector<std::string> parts;
           folly::split(".", childPool->name(), parts);

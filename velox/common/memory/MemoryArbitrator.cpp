@@ -99,7 +99,11 @@ class NoopArbitrator : public MemoryArbitrator {
   }
 
   void removePool(MemoryPool* pool) override {
-    VELOX_CHECK_EQ(pool->reservedBytes(), 0);
+    VELOX_CHECK_EQ(
+        pool->reservedBytes(),
+        0,
+        "Memory pool has unexpected reserved bytes on removal: {}",
+        pool->name());
   }
 
   // Noop arbitrator has no memory capacity limit so no operation needed for
@@ -263,9 +267,10 @@ uint64_t MemoryReclaimer::reclaim(
           nonReclaimableCandidates.push_back(Candidate{std::move(child), 0});
           continue;
         }
-        candidates.push_back(Candidate{
-            std::move(child),
-            static_cast<int64_t>(reclaimableBytesOpt.value())});
+        candidates.push_back(
+            Candidate{
+                std::move(child),
+                static_cast<int64_t>(reclaimableBytesOpt.value())});
       }
     }
   }
@@ -539,10 +544,14 @@ ScopedReclaimedBytesRecorder::~ScopedReclaimedBytesRecorder() {
   const int64_t reservedBytesAfterReclaim = pool_->reservedBytes();
   if (reservedBytesAfterReclaim > reservedBytesBeforeReclaim_) {
     LOG(ERROR) << "Unexpected reserved bytes growth from " << pool_->name()
+               << ", root pool: " << pool_->root()->name()
                << " after memory reclaim from "
                << succinctBytes(reservedBytesBeforeReclaim_) << " to "
-               << succinctBytes(reservedBytesAfterReclaim) << ", current usage "
-               << succinctBytes(pool_->usedBytes());
+               << succinctBytes(reservedBytesAfterReclaim)
+               << ", used: " << succinctBytes(pool_->usedBytes())
+               << ", reservation: " << succinctBytes(pool_->reservedBytes())
+               << ", root pool reservation: "
+               << succinctBytes(pool_->root()->reservedBytes());
   }
   *reclaimedBytes_ = reservedBytesBeforeReclaim_ - reservedBytesAfterReclaim;
 }

@@ -20,9 +20,9 @@ using namespace facebook::velox;
 
 namespace facebook::velox::exec::test {
 
-std::unique_ptr<SerializedPage> toSerializedPage(
+std::unique_ptr<SerializedPageBase> toSerializedPage(
     const RowVectorPtr& vector,
-    VectorSerde::Kind serdeKind,
+    std::string serdeKind,
     const std::shared_ptr<OutputBufferManager>& bufferManager,
     memory::MemoryPool* pool) {
   auto data =
@@ -34,7 +34,8 @@ std::unique_ptr<SerializedPage> toSerializedPage(
   auto listener = bufferManager->newListener();
   IOBufOutputStream stream(*pool, listener.get(), data->size());
   data->flush(&stream);
-  return std::make_unique<SerializedPage>(stream.getIOBuf(), nullptr, size);
+  return std::make_unique<PrestoSerializedPage>(
+      stream.getIOBuf(), nullptr, size);
 }
 
 } // namespace facebook::velox::exec::test

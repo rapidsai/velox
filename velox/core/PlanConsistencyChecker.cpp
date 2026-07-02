@@ -15,15 +15,47 @@
  */
 
 #include "velox/core/PlanConsistencyChecker.h"
+#include "velox/common/base/Exceptions.h"
 
 namespace facebook::velox::core {
 
 namespace {
 
+// Returns a message describing the plan node for exception context.
+std::string planNodeMessage(VeloxException::Type /*exceptionType*/, void* arg) {
+  auto* node = static_cast<const PlanNode*>(arg);
+  return fmt::format("Plan node: {}", node->toString(/*detailed=*/true));
+}
+
 class Checker : public PlanNodeVisitor {
  public:
+  explicit Checker(PlanNodeId rootId) : rootId_{std::move(rootId)} {}
+
   void visit(const AggregationNode& node, PlanNodeVisitorContext& ctx)
       const override {
+    const auto& rowType = node.sources().at(0)->outputType();
+    for (const auto& expr : node.groupingKeys()) {
+      checkInputs(expr, rowType);
+    }
+
+    for (const auto& expr : node.preGroupedKeys()) {
+      checkInputs(expr, rowType);
+    }
+
+    for (const auto& aggregate : node.aggregates()) {
+      checkInputs(aggregate.call, rowType);
+
+      for (const auto& expr : aggregate.sortingKeys) {
+        checkInputs(expr, rowType);
+      }
+
+      if (aggregate.mask) {
+        checkInputs(aggregate.mask, rowType);
+      }
+    }
+
+    verifyOutputNames(node);
+
     visitSources(&node, ctx);
   }
 
@@ -66,6 +98,26 @@ class Checker : public PlanNodeVisitor {
 
   void visit(const HashJoinNode& node, PlanNodeVisitorContext& ctx)
       const override {
+    std::unordered_set<std::pair<std::string, std::string>> keyNames;
+    for (auto i = 0; i < node.leftKeys().size(); ++i) {
+      const auto& leftKey = node.leftKeys().at(i);
+      const auto& rightKey = node.rightKeys().at(i);
+
+      auto [_, inserted] = keyNames.insert({leftKey->name(), rightKey->name()});
+      VELOX_USER_CHECK(
+          inserted,
+          "Duplicate join condition: \"{}\" = \"{}\"",
+          leftKey->name(),
+          rightKey->name());
+    }
+
+    if (node.filter()) {
+      const auto& leftRowType = node.sources().at(0)->outputType();
+      const auto& rightRowType = node.sources().at(1)->outputType();
+      auto rowType = leftRowType->unionWith(rightRowType);
+      checkInputs(node.filter(), rowType);
+    }
+
     visitSources(&node, ctx);
   }
 
@@ -89,7 +141,22 @@ class Checker : public PlanNodeVisitor {
     visitSources(&node, ctx);
   }
 
+  void visit(const MixedUnionNode& node, PlanNodeVisitorContext& ctx)
+      const override {
+    visitSources(&node, ctx);
+  }
+
   void visit(const MarkDistinctNode& node, PlanNodeVisitorContext& ctx)
+      const override {
+    visitSources(&node, ctx);
+  }
+
+  void visit(const EnforceDistinctNode& node, PlanNodeVisitorContext& ctx)
+      const override {
+    visitSources(&node, ctx);
+  }
+
+  void visit(const MarkSortedNode& node, PlanNodeVisitorContext& ctx)
       const override {
     visitSources(&node, ctx);
   }
@@ -106,6 +173,15 @@ class Checker : public PlanNodeVisitor {
 
   void visit(const NestedLoopJoinNode& node, PlanNodeVisitorContext& ctx)
       const override {
+    if (node.joinCondition() != nullptr) {
+      const auto& leftRowType = node.sources().at(0)->outputType();
+      const auto& rightRowType = node.sources().at(1)->outputType();
+      auto rowType = leftRowType->unionWith(rightRowType);
+      checkInputs(node.joinCondition(), rowType);
+    }
+
+    verifyOutputNames(node);
+
     visitSources(&node, ctx);
   }
 
@@ -131,12 +207,10 @@ class Checker : public PlanNodeVisitor {
       checkInputs(expr, rowType);
     }
 
-    // Verify that output column names are not empty and unique.
-    std::unordered_set<std::string> names;
-    for (const auto& name : node.outputType()->names()) {
-      VELOX_USER_CHECK(!name.empty(), "Output column name cannot be empty");
-      VELOX_USER_CHECK(
-          names.insert(name).second, "Duplicate output column: {}", name);
+    // The root ProjectNode may have empty or duplicate output names when used
+    // to apply user-specified column aliases (e.g. SELECT 1 as x, 2 as x).
+    if (node.id() != rootId_) {
+      verifyOutputNames(node);
     }
 
     visitSources(&node, ctx);
@@ -160,6 +234,22 @@ class Checker : public PlanNodeVisitor {
 
   void visit(const TableScanNode& node, PlanNodeVisitorContext& ctx)
       const override {
+    verifyOutputNames(node);
+
+    // Verify assignments match outputType 1:1.
+    const auto& names = node.outputType()->names();
+    VELOX_USER_CHECK_EQ(
+        names.size(),
+        node.assignments().size(),
+        "Column assignments must match output type");
+
+    for (const auto& name : names) {
+      VELOX_USER_CHECK(
+          node.assignments().contains(name),
+          "Column assignment is missing for {}",
+          name);
+    }
+
     visitSources(&node, ctx);
   }
 
@@ -209,7 +299,19 @@ class Checker : public PlanNodeVisitor {
  private:
   void visitSources(const PlanNode* node, PlanNodeVisitorContext& ctx) const {
     for (auto& source : node->sources()) {
+      ExceptionContextSetter exceptionContext(
+          {planNodeMessage, (void*)source.get()});
       source->accept(*this, ctx);
+    }
+  }
+
+  // Verify that output column names are not empty and unique.
+  static void verifyOutputNames(const PlanNode& node) {
+    folly::F14FastSet<std::string_view> names;
+    for (const auto& name : node.outputType()->names()) {
+      VELOX_USER_CHECK(!name.empty(), "Output column name cannot be empty");
+      VELOX_USER_CHECK(
+          names.emplace(name).second, "Duplicate output column: {}", name);
     }
   }
 
@@ -233,16 +335,27 @@ class Checker : public PlanNodeVisitor {
       }
     }
 
+    if (expr->isLambdaKind()) {
+      const auto& lambda = expr->asUnchecked<core::LambdaTypedExpr>();
+      checkInputs(lambda->body(), lambda->signature()->unionWith(rowType));
+    }
+
     for (const auto& input : expr->inputs()) {
       checkInputs(input, rowType);
     }
   }
+
+  // ID of the root node. Used to skip output name validation on the root
+  // ProjectNode, which may have user-specified aliases that are empty or
+  // duplicated.
+  const PlanNodeId rootId_;
 };
 } // namespace
 
 void PlanConsistencyChecker::check(const core::PlanNodePtr& plan) {
+  ExceptionContextSetter exceptionContext({planNodeMessage, (void*)plan.get()});
   PlanNodeVisitorContext ctx;
-  Checker checker;
+  Checker checker{plan->id()};
   plan->accept(checker, ctx);
 }
 }; // namespace facebook::velox::core

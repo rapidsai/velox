@@ -22,6 +22,9 @@
 #include "velox/exec/Operator.h"
 #include "velox/vector/ComplexVector.h"
 
+#ifdef BLOCK_SIZE
+#undef BLOCK_SIZE
+#endif
 #include <duckdb.hpp> // @manual
 
 namespace facebook::velox::exec::test {
@@ -185,6 +188,19 @@ std::pair<std::unique_ptr<TaskCursor>, std::vector<RowVectorPtr>> readCursor(
         },
     uint64_t maxWaitMicros = 5'000'000);
 
+std::pair<std::unique_ptr<TaskCursor>, std::vector<RowVectorPtr>>
+readCursorAsync(
+    const CursorParameters& params,
+    std::function<ContinueFuture(TaskCursor*)> addSplits =
+        [](TaskCursor* taskCursor) {
+          if (taskCursor->noMoreSplits()) {
+            return ContinueFuture::makeEmpty();
+          }
+          taskCursor->setNoMoreSplits();
+          return ContinueFuture::makeEmpty();
+        },
+    uint64_t maxWaitMicros = 5'000'000);
+
 /// The Task can return results before the Driver is finished executing.
 /// Wait upto maxWaitMicros for the Task to finish as 'expectedState' before
 /// returning to ensure it's stable e.g. the Driver isn't updating it anymore.
@@ -220,6 +236,11 @@ bool waitForTaskStateChange(
 /// NOTE: it is assumed that there is no more task to be created after or
 /// during this wait call. This is for testing purpose for now.
 void waitForAllTasksToBeDeleted(uint64_t maxWaitUs = 3'000'000);
+
+/// Cancels all currently running tasks across all available task managers.
+/// This is primarily used in testing scenarios to clean up active tasks
+/// and ensure test isolation between test cases.
+void cancelAllTasks();
 
 std::shared_ptr<Task> assertQuery(
     const core::PlanNodePtr& plan,
@@ -306,6 +327,13 @@ bool assertEqualResults(
 bool assertEqualResults(
     const core::PlanNodePtr& plan1,
     const core::PlanNodePtr& plan2);
+
+bool assertEqualResults(
+    const MaterializedRowMultiset& expectedRows,
+    const TypePtr& expectedType,
+    const MaterializedRowMultiset& actualRows,
+    const TypePtr& actualType,
+    const std::string& message);
 
 /// Ensure both datasets have the same type and number of rows.
 void assertEqualTypeAndNumRows(

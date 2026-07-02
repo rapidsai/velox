@@ -14,14 +14,14 @@
  * limitations under the License.
  */
 
+#include <folly/system/HardwareConcurrency.h>
 #include "velox/common/file/FileSystems.h"
+#include "velox/common/testutil/TempDirectoryPath.h"
 #include "velox/exec/SortBuffer.h"
 #include "velox/exec/Spill.h"
 #include "velox/exec/tests/utils/OperatorTestBase.h"
-#include "velox/exec/tests/utils/TempDirectoryPath.h"
 #include "velox/type/Type.h"
 #include "velox/vector/fuzzer/VectorFuzzer.h"
-#include "velox/vector/tests/utils/VectorTestBase.h"
 
 #include <gtest/gtest.h>
 
@@ -31,6 +31,7 @@ using namespace facebook::velox;
 using namespace facebook::velox::memory;
 
 namespace facebook::velox::exec::test {
+using namespace facebook::velox::common::testutil;
 
 class ConcatFilesSpillMergeStreamTest : public OperatorTestBase {
  protected:
@@ -99,8 +100,12 @@ class ConcatFilesSpillMergeStreamTest : public OperatorTestBase {
       std::vector<std::unique_ptr<SpillReadFile>> spillReadFiles;
       spillReadFiles.reserve(spillFiles.size());
       for (const auto& spillFile : spillFiles) {
-        spillReadFiles.emplace_back(SpillReadFile::create(
-            spillFile, spillConfig_.readBufferSize, pool_.get(), &spillStats_));
+        spillReadFiles.emplace_back(
+            SpillReadFile::create(
+                spillFile,
+                spillConfig_.readBufferSize,
+                pool_.get(),
+                &spillStats_));
       }
       auto stream =
           ConcatFilesSpillMergeStream::create(i - 1, std::move(spillReadFiles));
@@ -196,7 +201,7 @@ class ConcatFilesSpillMergeStreamTest : public OperatorTestBase {
        {"c3", VARCHAR()}});
   const std::shared_ptr<folly::Executor> executor_{
       std::make_shared<folly::CPUThreadPoolExecutor>(
-          std::thread::hardware_concurrency())};
+          folly::available_concurrency())};
   const std::vector<column_index_t> sortColumnIndices_{0, 2};
   const std::vector<CompareFlags> sortCompareFlags_{
       CompareFlags{},
@@ -204,7 +209,7 @@ class ConcatFilesSpillMergeStreamTest : public OperatorTestBase {
   const std::vector<SpillSortKey> sortingKeys_ =
       SpillState::makeSortingKeys(sortColumnIndices_, sortCompareFlags_);
   const std::shared_ptr<TempDirectoryPath> spillDirectory_ =
-      exec::test::TempDirectoryPath::create();
+      TempDirectoryPath::create();
   const common::SpillConfig spillConfig_{
       [&]() -> const std::string& { return spillDirectory_->getPath(); },
       [&](uint64_t) {},
@@ -221,9 +226,10 @@ class ConcatFilesSpillMergeStreamTest : public OperatorTestBase {
       0,
       0,
       "none",
+      0,
       std::nullopt};
 
-  folly::Synchronized<common::SpillStats> spillStats_;
+  exec::SpillStats spillStats_;
   tsan_atomic<bool> nonReclaimableSection_{false};
 };
 } // namespace facebook::velox::exec::test

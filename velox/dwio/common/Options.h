@@ -17,7 +17,8 @@
 #pragma once
 
 #include <limits>
-#include <unordered_set>
+#include <string>
+#include <unordered_map>
 
 #include <folly/Executor.h>
 #include "velox/common/base/RandomUtil.h"
@@ -51,6 +52,8 @@ enum class FileFormat {
   NIMBLE = 8,
   ORC = 9,
   SST = 10, // rocksdb sst format
+  FLUX = 11,
+  AVRO = 12,
 };
 
 FileFormat toFileFormat(std::string_view s);
@@ -282,6 +285,22 @@ class RowReaderOptions {
     scanSpec_ = std::move(scanSpec);
   }
 
+  folly::Executor* ioExecutor() const {
+    return ioExecutor_;
+  }
+
+  void setIOExecutor(folly::Executor* const ioExecutor) {
+    ioExecutor_ = ioExecutor;
+  }
+
+  const size_t parallelUnitLoadCount() const {
+    return parallelUnitLoadCount_;
+  }
+
+  void setParallelUnitLoadCount(size_t parallelUnitLoadCount) {
+    parallelUnitLoadCount_ = parallelUnitLoadCount;
+  }
+
   const std::shared_ptr<velox::common::MetadataFilter>& metadataFilter() const {
     return metadataFilter_;
   }
@@ -296,8 +315,8 @@ class RowReaderOptions {
           flatmapNodeIdsAsStruct) {
     VELOX_CHECK(
         std::all_of(
-            flatmapNodeIdsAsStruct.begin(),
-            flatmapNodeIdsAsStruct.end(),
+            flatmapNodeIdsAsStruct.cbegin(),
+            flatmapNodeIdsAsStruct.cend(),
             [](const auto& kv) { return !kv.second.empty(); }),
         "To use struct encoding for flatmap, keys to project must be specified");
     flatmapNodeIdAsStruct_ = std::move(flatmapNodeIdsAsStruct);
@@ -428,12 +447,64 @@ class RowReaderOptions {
     serdeParameters_ = std::move(serdeParameters);
   }
 
+  bool trackRowSize() const {
+    return trackRowSize_;
+  }
+
+  void setTrackRowSize(bool trackRowSize) {
+    trackRowSize_ = trackRowSize;
+  }
+
+  bool indexEnabled() const {
+    return indexEnabled_;
+  }
+
+  /// Sets whether to use the cluster index for filter-based row pruning.
+  /// When enabled, filters from ScanSpec are converted to index bounds for
+  /// efficient row skipping based on the file's cluster index.
+  ///
+  /// NOTE: currently only supported by Nimble format.
+  void setIndexEnabled(bool enabled) {
+    indexEnabled_ = enabled;
+  }
+
+  bool stringDecoderZeroCopy() const {
+    return stringDecoderZeroCopy_;
+  }
+
+  void setStringDecoderZeroCopy(bool stringDecoderZeroCopy) {
+    stringDecoderZeroCopy_ = stringDecoderZeroCopy;
+  }
+
+  bool nimblePreserveDictionaryEncoding() const {
+    return nimblePreserveDictionaryEncoding_;
+  }
+
+  void setNimblePreserveDictionaryEncoding(bool value) {
+    nimblePreserveDictionaryEncoding_ = value;
+  }
+
+  bool collectColumnCpuMetrics() const {
+    return collectColumnCpuMetrics_;
+  }
+
+  RowReaderOptions& setCollectColumnCpuMetrics(bool collect) {
+    collectColumnCpuMetrics_ = collect;
+    return *this;
+  }
+
+  // Legacy alias — remove after Nimble OSS bumps Velox.
+  RowReaderOptions& setCollectColumnStats(bool collect) {
+    return setCollectColumnCpuMetrics(collect);
+  }
+
  private:
   uint64_t dataStart_;
   uint64_t dataLength_;
   bool preloadStripe_;
   bool projectSelectedType_;
   bool returnFlatVector_ = false;
+  size_t parallelUnitLoadCount_ = 0;
   ErrorTolerance errorTolerance_;
   std::shared_ptr<ColumnSelector> selector_;
   RowTypePtr requestedType_;
@@ -446,7 +517,8 @@ class RowReaderOptions {
   // Whether to generate FlatMapVectors when reading flat maps from the file. By
   // default, converts flat maps in the file to MapVectors.
   bool preserveFlatMapsInMemory_ = false;
-
+  // Optional io executor to enable parallel unit loader.
+  folly::Executor* ioExecutor_{nullptr};
   // Optional executors to enable internal reader parallelism.
   // 'decodingExecutor' allow parallelising the vector decoding process.
   // 'ioExecutor' enables parallelism when performing file system read
@@ -485,25 +557,39 @@ class RowReaderOptions {
   TimestampPrecision timestampPrecision_ = TimestampPrecision::kMilliseconds;
 
   std::shared_ptr<FormatSpecificOptions> formatSpecificOptions_;
+  bool trackRowSize_{false};
+  bool indexEnabled_{false};
+  // Enables zero-copy string decoding in the Nimble selective reader,
+  // using the non-legacy encoding path. Controlled via session property.
+  bool stringDecoderZeroCopy_{false};
+  // Controls whether dictionary-encoded Nimble string columns return
+  // DictionaryVector instead of FlatVector. Controlled via session property.
+  bool nimblePreserveDictionaryEncoding_{false};
+  bool collectColumnCpuMetrics_{false};
 };
 
 /// Options for creating a Reader.
 class ReaderOptions : public io::ReaderOptions {
  public:
-  static constexpr uint64_t kDefaultFooterEstimatedSize = 1024 * 1024; // 1MB
+  static constexpr uint64_t kDefaultFooterSpeculativeIoSize =
+      1024 * 1024; // 1MB
   static constexpr uint64_t kDefaultFilePreloadThreshold =
       1024 * 1024 * 8; // 8MB
 
   explicit ReaderOptions(velox::memory::MemoryPool* pool)
-      : io::ReaderOptions(pool),
-        tailLocation_(std::numeric_limits<uint64_t>::max()),
-        fileFormat_(FileFormat::UNKNOWN),
-        fileSchema_(nullptr) {}
+      : io::ReaderOptions(pool) {}
 
   /// Sets the format of the file, such as "rc" or "dwrf". The default is
   /// "dwrf".
   ReaderOptions& setFileFormat(FileFormat format) {
     fileFormat_ = format;
+    return *this;
+  }
+
+  /// Sets the property bag.
+  ReaderOptions& setProperties(
+      std::unordered_map<std::string, std::string> properties) {
+    properties_ = std::move(properties);
     return *this;
   }
 
@@ -535,8 +621,8 @@ class ReaderOptions : public io::ReaderOptions {
     return *this;
   }
 
-  ReaderOptions& setFooterEstimatedSize(uint64_t size) {
-    footerEstimatedSize_ = size;
+  ReaderOptions& setFooterSpeculativeIoSize(uint64_t size) {
+    footerSpeculativeIoSize_ = size;
     return *this;
   }
 
@@ -552,11 +638,6 @@ class ReaderOptions : public io::ReaderOptions {
 
   ReaderOptions& setUseColumnNamesForColumnMapping(bool flag) {
     useColumnNamesForColumnMapping_ = flag;
-    return *this;
-  }
-
-  ReaderOptions& setIOExecutor(std::shared_ptr<folly::Executor> executor) {
-    ioExecutor_ = std::move(executor);
     return *this;
   }
 
@@ -580,6 +661,11 @@ class ReaderOptions : public io::ReaderOptions {
     return fileFormat_;
   }
 
+  /// Gets the property bag.
+  const std::unordered_map<std::string, std::string>& properties() const {
+    return properties_;
+  }
+
   /// Gets the file schema.
   const std::shared_ptr<const velox::RowType>& fileSchema() const {
     return fileSchema_;
@@ -597,16 +683,12 @@ class ReaderOptions : public io::ReaderOptions {
     return decrypterFactory_;
   }
 
-  uint64_t footerEstimatedSize() const {
-    return footerEstimatedSize_;
+  uint64_t footerSpeculativeIoSize() const {
+    return footerSpeculativeIoSize_;
   }
 
   uint64_t filePreloadThreshold() const {
     return filePreloadThreshold_;
-  }
-
-  const std::shared_ptr<folly::Executor>& ioExecutor() const {
-    return ioExecutor_;
   }
 
   const tz::TimeZone* sessionTimezone() const {
@@ -633,12 +715,12 @@ class ReaderOptions : public io::ReaderOptions {
     randomSkip_ = std::move(randomSkip);
   }
 
-  bool noCacheRetention() const {
-    return noCacheRetention_;
+  bool cacheable() const {
+    return cacheable_;
   }
 
-  void setNoCacheRetention(bool noCacheRetention) {
-    noCacheRetention_ = noCacheRetention;
+  void setCacheable(bool cacheable) {
+    cacheable_ = cacheable;
   }
 
   const std::shared_ptr<velox::common::ScanSpec>& scanSpec() const {
@@ -657,6 +739,52 @@ class ReaderOptions : public io::ReaderOptions {
     selectiveNimbleReaderEnabled_ = value;
   }
 
+  /// Whether to cache file metadata (footer, stripes, index) in the
+  /// process-wide AsyncDataCache. When enabled, the first reader performs a
+  /// speculative tail read and populates the cache; subsequent readers on the
+  /// same file initialize from the cache with zero additional IO.
+  bool fileMetadataCacheEnabled() const {
+    return fileMetadataCacheEnabled_;
+  }
+
+  void setFileMetadataCacheEnabled(bool value) {
+    fileMetadataCacheEnabled_ = value;
+  }
+
+  /// If true, pins parsed metadata objects (e.g., StripeGroup, IndexGroup) in
+  /// the reader's metadata cache with strong references so they are never
+  /// evicted. This avoids re-reading and re-parsing metadata on every stripe
+  /// access when weak-pointer cache entries would otherwise expire.
+  bool pinFileMetadata() const {
+    return pinFileMetadata_;
+  }
+
+  void setPinFileMetadata(bool value) {
+    pinFileMetadata_ = value;
+  }
+
+  /// Whether to load and initialize the cluster index during file open.
+  /// When true, the cluster index section is preloaded and the structured
+  /// ClusterIndex object is created. Default true.
+  bool loadClusterIndex() const {
+    return loadClusterIndex_;
+  }
+
+  void setLoadClusterIndex(bool value) {
+    loadClusterIndex_ = value;
+  }
+
+  /// Whether to load and initialize the chunk index during file open.
+  /// When true, the chunk index section is preloaded and the structured
+  /// ChunkIndex object is created. Default true.
+  bool loadChunkIndex() const {
+    return loadChunkIndex_;
+  }
+
+  void setLoadChunkIndex(bool value) {
+    loadChunkIndex_ = value;
+  }
+
   bool allowEmptyFile() const {
     return allowEmptyFile_;
   }
@@ -665,23 +793,42 @@ class ReaderOptions : public io::ReaderOptions {
     allowEmptyFile_ = value;
   }
 
+  /// Allows reading INT32 physical type columns as a narrower integer type
+  /// (e.g., INT32 -> TINYINT/SMALLINT). Some Parquet writers store INT_8 and
+  /// INT_16 values as plain INT32 without a converted type annotation. When
+  /// enabled, the value is silently truncated on overflow. When disabled
+  /// (default), only annotated type-matching reads are allowed (e.g.,
+  /// INT_8 -> TINYINT, INT_16 -> SMALLINT, INT_32 -> INTEGER).
+  bool allowInt32Narrowing() const {
+    return allowInt32Narrowing_;
+  }
+
+  void setAllowInt32Narrowing(bool value) {
+    allowInt32Narrowing_ = value;
+  }
+
  private:
-  uint64_t tailLocation_;
-  FileFormat fileFormat_;
+  uint64_t tailLocation_{std::numeric_limits<uint64_t>::max()};
+  FileFormat fileFormat_{FileFormat::UNKNOWN};
   RowTypePtr fileSchema_;
   SerDeOptions serDeOptions_;
+  std::unordered_map<std::string, std::string> properties_{};
   std::shared_ptr<encryption::DecrypterFactory> decrypterFactory_;
-  uint64_t footerEstimatedSize_{kDefaultFooterEstimatedSize};
+  uint64_t footerSpeculativeIoSize_{kDefaultFooterSpeculativeIoSize};
   uint64_t filePreloadThreshold_{kDefaultFilePreloadThreshold};
   bool fileColumnNamesReadAsLowerCase_{false};
   bool useColumnNamesForColumnMapping_{false};
-  std::shared_ptr<folly::Executor> ioExecutor_;
   std::shared_ptr<random::RandomSkipTracker> randomSkip_;
   std::shared_ptr<velox::common::ScanSpec> scanSpec_;
   const tz::TimeZone* sessionTimezone_{nullptr};
   bool adjustTimestampToTimezone_{false};
   bool selectiveNimbleReaderEnabled_{false};
+  bool fileMetadataCacheEnabled_{false};
+  bool pinFileMetadata_{false};
+  bool loadClusterIndex_{true};
+  bool loadChunkIndex_{true};
   bool allowEmptyFile_{false};
+  bool allowInt32Narrowing_{false};
 };
 
 struct WriterOptions {

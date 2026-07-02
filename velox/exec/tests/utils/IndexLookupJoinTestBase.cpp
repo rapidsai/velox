@@ -17,13 +17,14 @@
 #include "velox/exec/tests/utils/IndexLookupJoinTestBase.h"
 #include "velox/exec/tests/utils/AssertQueryBuilder.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
+#include "velox/exec/tests/utils/TestIndexStorageConnector.h"
 
-namespace fecebook::velox::exec::test {
-using namespace facebook::velox::test;
+namespace facebook::velox::exec::test {
+using namespace facebook::velox::common::testutil;
+using velox::test::assertEqualVectors;
 
 namespace {
-std::vector<std::string> appendMatchColumn(
-    const std::vector<std::string> columns) {
+std::vector<std::string> appendMarker(const std::vector<std::string> columns) {
   std::vector<std::string> resultColumns;
   resultColumns.reserve(columns.size() + 1);
   for (const auto& column : columns) {
@@ -56,7 +57,7 @@ std::vector<RowVectorPtr> IndexLookupJoinTestBase::generateProbeInput(
     size_t numBatches,
     size_t batchSize,
     size_t numDuplicateProbeRows,
-    SequenceTableData& tableData,
+    IndexTableData& tableData,
     std::shared_ptr<memory::MemoryPool>& pool,
     const std::vector<std::string>& probeJoinKeys,
     bool hasNullKeys,
@@ -80,7 +81,7 @@ std::vector<RowVectorPtr> IndexLookupJoinTestBase::generateProbeInput(
     probeInputs.push_back(fuzzer.fuzzInputRow(probeType_));
     // NOTE: index connector doesn't expect in condition column rray elements to
     // be null.
-    if ((!inMatchPct.has_value() || tableData.keyData->size() == 0) &&
+    if ((!inMatchPct.has_value() || tableData.keyVectors->size() == 0) &&
         hasNullKeys) {
       for (int i = 0; i < probeType_->size(); ++i) {
         const auto columnType = probeType_->childAt(i);
@@ -97,14 +98,14 @@ std::vector<RowVectorPtr> IndexLookupJoinTestBase::generateProbeInput(
     }
   }
 
-  if (tableData.keyData->size() == 0) {
+  if (tableData.keyVectors->size() == 0) {
     return probeInputs;
   }
 
-  const auto numTableRows = tableData.keyData->size();
+  const auto numTableRows = tableData.keyVectors->size();
   std::vector<FlatVectorPtr<int64_t>> tableKeyVectors;
   for (int i = 0; i < probeJoinKeys.size(); ++i) {
-    auto keyVector = tableData.keyData->childAt(i);
+    auto keyVector = tableData.keyVectors->childAt(i);
     keyVector->loadedVector();
     BaseVector::flattenVector(keyVector);
     tableKeyVectors.push_back(
@@ -117,10 +118,11 @@ std::vector<RowVectorPtr> IndexLookupJoinTestBase::generateProbeInput(
     for (int i = 0; i < numBatches; ++i) {
       std::vector<FlatVectorPtr<int64_t>> probeKeyVectors;
       for (int j = 0; j < probeJoinKeys.size(); ++j) {
-        probeKeyVectors.push_back(BaseVector::create<FlatVector<int64_t>>(
-            probeType_->findChild(probeJoinKeys[j]),
-            probeInputs[i]->size(),
-            pool.get()));
+        probeKeyVectors.push_back(
+            BaseVector::create<FlatVector<int64_t>>(
+                probeType_->findChild(probeJoinKeys[j]),
+                probeInputs[i]->size(),
+                pool.get()));
       }
       for (int row = 0; row < probeInputs[i]->size();
            row += numDuplicateProbeRows) {
@@ -259,7 +261,7 @@ PlanNodePtr IndexLookupJoinTestBase::makeLookupPlan(
     const std::vector<std::string>& leftKeys,
     const std::vector<std::string>& rightKeys,
     const std::vector<std::string>& joinConditions,
-    bool includeMatchColumn,
+    bool hasMarker,
     JoinType joinType,
     const std::vector<std::string>& outputColumns,
     PlanNodeId& joinNodeId) {
@@ -267,14 +269,15 @@ PlanNodePtr IndexLookupJoinTestBase::makeLookupPlan(
   VELOX_CHECK_LE(leftKeys.size(), keyType_->size());
   return PlanBuilder(planNodeIdGenerator, pool_.get())
       .values(probeVectors)
-      .indexLookupJoin(
-          leftKeys,
-          rightKeys,
-          indexScanNode,
-          joinConditions,
-          includeMatchColumn,
-          includeMatchColumn ? appendMatchColumn(outputColumns) : outputColumns,
-          joinType)
+      .startIndexLookupJoin()
+      .leftKeys(leftKeys)
+      .rightKeys(rightKeys)
+      .indexSource(indexScanNode)
+      .joinConditions(joinConditions)
+      .hasMarker(hasMarker)
+      .outputLayout(hasMarker ? appendMarker(outputColumns) : outputColumns)
+      .joinType(joinType)
+      .endIndexLookupJoin()
       .capturePlanNodeId(joinNodeId)
       .planNode();
 }
@@ -285,7 +288,8 @@ PlanNodePtr IndexLookupJoinTestBase::makeLookupPlan(
     const std::vector<std::string>& leftKeys,
     const std::vector<std::string>& rightKeys,
     const std::vector<std::string>& joinConditions,
-    bool includeMatchColumn,
+    const std::string& filter,
+    bool hasMarker,
     JoinType joinType,
     const std::vector<std::string>& outputColumns) {
   VELOX_CHECK_EQ(leftKeys.size(), rightKeys.size());
@@ -295,14 +299,16 @@ PlanNodePtr IndexLookupJoinTestBase::makeLookupPlan(
       .outputType(probeType_)
       .endTableScan()
       .captureScanNodeId(probeScanNodeId_)
-      .indexLookupJoin(
-          leftKeys,
-          rightKeys,
-          indexScanNode,
-          joinConditions,
-          includeMatchColumn,
-          includeMatchColumn ? appendMatchColumn(outputColumns) : outputColumns,
-          joinType)
+      .startIndexLookupJoin()
+      .leftKeys(leftKeys)
+      .rightKeys(rightKeys)
+      .indexSource(indexScanNode)
+      .joinConditions(joinConditions)
+      .filter(filter)
+      .hasMarker(hasMarker)
+      .outputLayout(hasMarker ? appendMarker(outputColumns) : outputColumns)
+      .joinType(joinType)
+      .endIndexLookupJoin()
       .capturePlanNodeId(joinNodeId_)
       .planNode();
 }
@@ -346,7 +352,7 @@ TableScanNodePtr IndexLookupJoinTestBase::makeIndexScanNode(
 
 void IndexLookupJoinTestBase::generateIndexTableData(
     const std::vector<int>& keyCardinalities,
-    SequenceTableData& tableData,
+    IndexTableData& tableData,
     std::shared_ptr<memory::MemoryPool>& pool) {
   VELOX_CHECK_EQ(keyCardinalities.size(), keyType_->size());
   const auto numRows = getNumRows(keyCardinalities);
@@ -356,10 +362,10 @@ void IndexLookupJoinTestBase::generateIndexTableData(
   opts.allowSlice = false;
   VectorFuzzer fuzzer(opts, pool.get());
 
-  tableData.keyData = fuzzer.fuzzInputFlatRow(keyType_);
-  tableData.valueData = fuzzer.fuzzInputFlatRow(valueType_);
+  tableData.keyVectors = fuzzer.fuzzInputFlatRow(keyType_);
+  tableData.valueVectors = fuzzer.fuzzInputFlatRow(valueType_);
 
-  VELOX_CHECK_EQ(numRows, tableData.keyData->size());
+  VELOX_CHECK_EQ(numRows, tableData.keyVectors->size());
   tableData.maxKeys.resize(keyType_->size());
   tableData.minKeys.resize(keyType_->size());
   // Set the key column vector to the same value to easy testing with
@@ -369,8 +375,8 @@ void IndexLookupJoinTestBase::generateIndexTableData(
     int64_t minKey = std::numeric_limits<int64_t>::max();
     int64_t maxKey = std::numeric_limits<int64_t>::min();
     int numKeys = keyCardinalities[i];
-    tableData.keyData->childAt(i) =
-        makeFlatVector<int64_t>(tableData.keyData->size(), [&](auto row) {
+    tableData.keyVectors->childAt(i) =
+        makeFlatVector<int64_t>(tableData.keyVectors->size(), [&](auto row) {
           const int64_t keyValue = 1 + (row / numRepeats) % numKeys;
           minKey = std::min(minKey, keyValue);
           maxKey = std::max(maxKey, keyValue);
@@ -384,12 +390,12 @@ void IndexLookupJoinTestBase::generateIndexTableData(
   VELOX_CHECK_EQ(tableType_->size(), keyType_->size() + valueType_->size());
   tableColumns.reserve(tableType_->size());
   for (auto i = 0; i < keyType_->size(); ++i) {
-    tableColumns.push_back(tableData.keyData->childAt(i));
+    tableColumns.push_back(tableData.keyVectors->childAt(i));
   }
   for (auto i = 0; i < valueType_->size(); ++i) {
-    tableColumns.push_back(tableData.valueData->childAt(i));
+    tableColumns.push_back(tableData.valueVectors->childAt(i));
   }
-  tableData.tableData = makeRowVector(tableType_->names(), tableColumns);
+  tableData.tableVectors = makeRowVector(tableType_->names(), tableColumns);
 }
 
 RowTypePtr IndexLookupJoinTestBase::makeScanOutputType(
@@ -415,13 +421,13 @@ bool IndexLookupJoinTestBase::isFilter(const std::string& conditionSql) const {
 std::shared_ptr<Task> IndexLookupJoinTestBase::runLookupQuery(
     const PlanNodePtr& plan,
     int numPrefetchBatches,
-    const std::string& duckDbVefifySql) {
+    const std::string& duckDbVerifySql) {
   return AssertQueryBuilder(duckDbQueryRunner_)
       .plan(plan)
       .config(
           QueryConfig::kIndexLookupJoinMaxPrefetchBatches,
           std::to_string(numPrefetchBatches))
-      .assertResults(duckDbVefifySql);
+      .assertResults(duckDbVerifySql);
 }
 
 std::shared_ptr<Task> IndexLookupJoinTestBase::runLookupQuery(
@@ -431,17 +437,30 @@ std::shared_ptr<Task> IndexLookupJoinTestBase::runLookupQuery(
     bool barrierExecution,
     int maxOutputRows,
     int numPrefetchBatches,
-    const std::string& duckDbVefifySql) {
-  return AssertQueryBuilder(duckDbQueryRunner_)
-      .plan(plan)
+    bool needsIndexSplit,
+    const std::string& duckDbVerifySql,
+    int maxDrivers) {
+  AssertQueryBuilder queryBuilder(duckDbQueryRunner_);
+  queryBuilder.plan(plan)
       .splits(probeScanNodeId_, makeHiveConnectorSplits(probeFiles))
       .serialExecution(serialExecution)
       .barrierExecution(barrierExecution)
+      .maxDrivers(maxDrivers)
       .config(QueryConfig::kMaxOutputBatchRows, std::to_string(maxOutputRows))
       .config(
           QueryConfig::kIndexLookupJoinMaxPrefetchBatches,
-          std::to_string(numPrefetchBatches))
-      .assertResults(duckDbVefifySql);
+          std::to_string(numPrefetchBatches));
+  if (needsIndexSplit) {
+    // Add a fake split for the index source. The test index source doesn't
+    // actually use splits, but this is used to verify the split passing
+    // mechanism works correctly.
+    queryBuilder.split(
+        indexScanNodeId_,
+        Split(
+            std::make_shared<TestIndexConnectorSplit>(
+                kTestIndexConnectorName)));
+  }
+  return queryBuilder.assertResults(duckDbVerifySql);
 }
 
 void IndexLookupJoinTestBase::verifyResultWithMatchColumn(
@@ -449,21 +468,36 @@ void IndexLookupJoinTestBase::verifyResultWithMatchColumn(
     const PlanNodeId& probeScanNodeIdWithoutMatchColumn,
     const PlanNodePtr& planWithMatchColumn,
     const PlanNodeId& probeScanNodeIdWithMatchColumn,
-    const std::vector<std::shared_ptr<TempFilePath>>& probeFiles) {
-  VectorPtr expectedResult = AssertQueryBuilder(duckDbQueryRunner_)
-                                 .plan(planWithoutMatchColumn)
-                                 .splits(
-                                     probeScanNodeIdWithoutMatchColumn,
-                                     makeHiveConnectorSplits(probeFiles))
-                                 .copyResults(pool());
+    const std::vector<std::shared_ptr<TempFilePath>>& probeFiles,
+    bool needsIndexSplit) {
+  AssertQueryBuilder expectedResultBuilder(duckDbQueryRunner_);
+  expectedResultBuilder.plan(planWithoutMatchColumn)
+      .splits(
+          probeScanNodeIdWithoutMatchColumn,
+          makeHiveConnectorSplits(probeFiles));
+  if (needsIndexSplit) {
+    expectedResultBuilder.split(
+        indexScanNodeId_,
+        Split(
+            std::make_shared<TestIndexConnectorSplit>(
+                kTestIndexConnectorName)));
+  }
+  VectorPtr expectedResult = expectedResultBuilder.copyResults(pool());
   BaseVector::flattenVector(expectedResult);
 
-  VectorPtr resultWithMatchColumn = AssertQueryBuilder(duckDbQueryRunner_)
-                                        .plan(planWithMatchColumn)
-                                        .splits(
-                                            probeScanNodeIdWithMatchColumn,
-                                            makeHiveConnectorSplits(probeFiles))
-                                        .copyResults(pool());
+  AssertQueryBuilder resultWithMatchColumnBuilder(duckDbQueryRunner_);
+  resultWithMatchColumnBuilder.plan(planWithMatchColumn)
+      .splits(
+          probeScanNodeIdWithMatchColumn, makeHiveConnectorSplits(probeFiles));
+  if (needsIndexSplit) {
+    resultWithMatchColumnBuilder.split(
+        indexScanNodeId_,
+        Split(
+            std::make_shared<TestIndexConnectorSplit>(
+                kTestIndexConnectorName)));
+  }
+  VectorPtr resultWithMatchColumn =
+      resultWithMatchColumnBuilder.copyResults(pool());
   BaseVector::flattenVector(resultWithMatchColumn);
   auto rowResultWithMatchMatchColumn =
       std::dynamic_pointer_cast<RowVector>(resultWithMatchColumn);
@@ -512,4 +546,4 @@ IndexLookupJoinTestBase::createProbeFiles(
   writeToFiles(toFilePaths(probeFiles), probeVectors);
   return probeFiles;
 }
-} // namespace fecebook::velox::exec::test
+} // namespace facebook::velox::exec::test

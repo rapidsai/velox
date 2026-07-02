@@ -21,16 +21,18 @@
 #include "gtest/gtest.h"
 #include "velox/common/base/Exceptions.h"
 #include "velox/common/base/tests/GTestUtils.h"
+#include "velox/common/testutil/TempFilePath.h"
+#include "velox/common/testutil/TestValue.h"
 #include "velox/connectors/hive/storage_adapters/hdfs/HdfsReadFile.h"
 #include "velox/connectors/hive/storage_adapters/hdfs/RegisterHdfsFileSystem.h"
 #include "velox/connectors/hive/storage_adapters/hdfs/tests/HdfsMiniCluster.h"
 #include "velox/core/QueryConfig.h"
-#include "velox/exec/tests/utils/TempFilePath.h"
 #include "velox/external/hdfs/ArrowHdfsInternal.h"
 
 #include <unistd.h>
 
 using namespace facebook::velox;
+using namespace facebook::velox::common::testutil;
 
 using filesystems::arrow::io::internal::LibHdfsShim;
 
@@ -72,6 +74,11 @@ class HdfsFileSystemTest : public testing::Test {
   }
 
   static void TearDownTestSuite() {
+    for (const auto& [_, filesystem] :
+         facebook::velox::filesystems::registeredFilesystems) {
+      filesystem->close();
+    }
+
     miniCluster->stop();
   }
 
@@ -88,8 +95,8 @@ class HdfsFileSystemTest : public testing::Test {
   static std::string fullDestinationPath_;
 
  private:
-  static std::shared_ptr<::exec::test::TempFilePath> createFile() {
-    auto tempFile = exec::test::TempFilePath::create();
+  static std::shared_ptr<TempFilePath> createFile() {
+    auto tempFile = TempFilePath::create();
     tempFile->append("aaaaa");
     tempFile->append("bbbbb");
     tempFile->append(std::string(kOneMB, 'c'));
@@ -519,4 +526,35 @@ TEST_F(HdfsFileSystemTest, readFailures) {
       std::string(miniCluster->host()),
       std::string(miniCluster->nameNodePort()));
   verifyFailures(driver, hdfs);
+}
+
+DEBUG_ONLY_TEST_F(HdfsFileSystemTest, writeFilePreventsDoubleClose) {
+  common::testutil::TestValue::enable();
+
+  int closeCallCount = 0;
+
+  SCOPED_TESTVALUE_SET(
+      "facebook::velox::connectors::hive::HdfsWriteFile::close",
+      std::function<void(int*)>([&closeCallCount](int* success) {
+        ++closeCallCount;
+        if (closeCallCount == 1) {
+          *success = -1;
+        }
+      }));
+
+  auto writeFile = openFileForWrite("/test_double_close.txt");
+
+  writeFile->append("test data");
+  writeFile->flush();
+
+  VELOX_ASSERT_THROW(writeFile->close(), "Failed to close hdfs file:");
+
+  EXPECT_EQ(closeCallCount, 1);
+
+  // Destructor should not call close() again because hdfsFile_ is nullptr
+  // The closeCallCount should remain 1.
+  writeFile.reset();
+  EXPECT_EQ(closeCallCount, 1);
+
+  common::testutil::TestValue::disable();
 }

@@ -16,8 +16,8 @@
 
 #include "velox/connectors/hive/iceberg/PositionalDeleteFileReader.h"
 
-#include "velox/connectors/hive/HiveConnectorUtil.h"
-#include "velox/connectors/hive/TableHandle.h"
+#include "velox/connectors/hive/BufferedInputBuilder.h"
+#include "velox/connectors/hive/FileConnectorUtil.h"
 #include "velox/connectors/hive/iceberg/IcebergDeleteFile.h"
 #include "velox/connectors/hive/iceberg/IcebergMetadataColumns.h"
 #include "velox/dwio/common/ReaderFactory.h"
@@ -30,9 +30,9 @@ PositionalDeleteFileReader::PositionalDeleteFileReader(
     FileHandleFactory* fileHandleFactory,
     const ConnectorQueryCtx* connectorQueryCtx,
     folly::Executor* executor,
-    const std::shared_ptr<const HiveConfig>& hiveConfig,
-    const std::shared_ptr<io::IoStatistics>& ioStats,
-    const std::shared_ptr<filesystems::File::IoStats>& fsStats,
+    const std::shared_ptr<const FileConfig>& fileConfig,
+    const std::shared_ptr<io::IoStatistics>& ioStatistics,
+    const std::shared_ptr<IoStats>& ioStats,
     dwio::common::RuntimeStatistics& runtimeStats,
     uint64_t splitOffset,
     const std::string& connectorId)
@@ -41,9 +41,9 @@ PositionalDeleteFileReader::PositionalDeleteFileReader(
       fileHandleFactory_(fileHandleFactory),
       executor_(executor),
       connectorQueryCtx_(connectorQueryCtx),
-      hiveConfig_(hiveConfig),
+      fileConfig_(fileConfig),
+      ioStatistics_(ioStatistics),
       ioStats_(ioStats),
-      fsStats_(fsStats),
       pool_(connectorQueryCtx->memoryPool()),
       filePathColumn_(IcebergMetadataColumn::icebergDeleteFilePathColumn()),
       posColumn_(IcebergMetadataColumn::icebergDeletePosColumn()),
@@ -56,15 +56,13 @@ PositionalDeleteFileReader::PositionalDeleteFileReader(
   VELOX_CHECK(deleteFile_.content == FileContent::kPositionalDeletes);
   VELOX_CHECK(deleteFile_.recordCount);
 
-  // TODO: check if the lowerbounds and upperbounds in deleteFile overlap with
-  //  this batch. If not, no need to proceed.
-
   // Create the ScanSpec for this delete file
   auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
   scanSpec->addField(posColumn_->name, 0);
   auto* pathSpec = scanSpec->getOrCreateChild(filePathColumn_->name);
-  pathSpec->setFilter(std::make_unique<common::BytesValues>(
-      std::vector<std::string>({baseFilePath_}), false));
+  pathSpec->setFilter(
+      std::make_unique<common::BytesValues>(
+          std::vector<std::string>({baseFilePath_}), false));
 
   // Create the file schema (in RowType) and split that will be used by readers
   std::vector<std::string> deleteColumnNames(
@@ -84,8 +82,11 @@ PositionalDeleteFileReader::PositionalDeleteFileReader(
   // Create the Reader and RowReader
 
   dwio::common::ReaderOptions deleteReaderOpts(pool_);
+  // TODO: Use separate IoStatistics for data and metadata.
+  deleteReaderOpts.setDataIoStats(ioStatistics_);
+  deleteReaderOpts.setMetadataIoStats(ioStatistics_);
   configureReaderOptions(
-      hiveConfig_,
+      fileConfig_,
       connectorQueryCtx,
       deleteFileSchema,
       deleteSplit_,
@@ -96,12 +97,12 @@ PositionalDeleteFileReader::PositionalDeleteFileReader(
       .filename = deleteFile_.filePath,
       .tokenProvider = connectorQueryCtx_->fsTokenProvider()};
   auto deleteFileHandleCachePtr = fileHandleFactory_->generate(fileHandleKey);
-  auto deleteFileInput = createBufferedInput(
+  auto deleteFileInput = BufferedInputBuilder::getInstance()->create(
       *deleteFileHandleCachePtr,
       deleteReaderOpts,
       connectorQueryCtx,
+      ioStatistics_,
       ioStats_,
-      fsStats_,
       executor_);
 
   auto deleteReader =
@@ -118,7 +119,7 @@ PositionalDeleteFileReader::PositionalDeleteFileReader(
           deleteSplit_->filePath,
           deleteSplit_->partitionKeys,
           {},
-          hiveConfig_->readTimestampPartitionValueAsLocalTime(
+          fileConfig_->readTimestampPartitionValueAsLocalTime(
               connectorQueryCtx_->sessionProperties()))) {
     // We only count the number of base splits skipped as skippedSplits runtime
     // statistics in Velox.  Skipped delta split is only counted as skipped
@@ -135,6 +136,7 @@ PositionalDeleteFileReader::PositionalDeleteFileReader(
       nullptr,
       deleteFileSchema,
       deleteSplit_,
+      nullptr,
       nullptr,
       nullptr,
       deleteRowReaderOpts);
@@ -251,15 +253,17 @@ void PositionalDeleteFileReader::updateDeleteBitmap(
     deletePositionsOffset_++;
   }
 
-  deleteBitmapBuffer->setSize(std::max(
-      static_cast<uint64_t>(deleteBitmapBuffer->size()),
-      deletePositionsOffset_ == 0 ||
-              (deletePositionsOffset_ < deletePositionsVector->size() &&
-               deletePositions[deletePositionsOffset_] >= rowNumberUpperBound)
-          ? 0
-          : bits::nbytes(
-                deletePositions[deletePositionsOffset_ - 1] + 1 -
-                rowNumberLowerBound)));
+  deleteBitmapBuffer->setSize(
+      std::max(
+          static_cast<uint64_t>(deleteBitmapBuffer->size()),
+          deletePositionsOffset_ == 0 ||
+                  (deletePositionsOffset_ < deletePositionsVector->size() &&
+                   deletePositions[deletePositionsOffset_] >=
+                       rowNumberUpperBound)
+              ? 0
+              : bits::nbytes(
+                    deletePositions[deletePositionsOffset_ - 1] + 1 -
+                    rowNumberLowerBound)));
 }
 
 bool PositionalDeleteFileReader::readFinishedForBatch(

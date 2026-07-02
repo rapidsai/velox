@@ -20,6 +20,19 @@ if(VELOX_ENABLE_ARROW)
     set(THRIFT_SOURCE "BUNDLED")
   endif()
 
+  # Avoid issues in finding the boost headers and libraries
+  # by setting the BOOST_ROOT to the install prefix.
+  # The same logic is used in the setup script-common.sh to install boost.
+  if(NOT DEFINED ENV{BOOST_ROOT} OR "$ENV{BOOST_ROOT}" STREQUAL "")
+    if(DEFINED ENV{INSTALL_PREFIX} AND NOT "$ENV{INSTALL_PREFIX}" STREQUAL "")
+      set(BOOST_ROOT "$ENV{INSTALL_PREFIX}")
+    else()
+      set(BOOST_ROOT "/usr/local")
+    endif()
+  else()
+    set(BOOST_ROOT "$ENV{BOOST_ROOT}")
+  endif()
+  message(STATUS "Using BOOST_ROOT: ${BOOST_ROOT}")
   set(ARROW_PREFIX "${CMAKE_CURRENT_BINARY_DIR}/arrow_ep")
   set(
     ARROW_CMAKE_ARGS
@@ -35,16 +48,18 @@ if(VELOX_ENABLE_ARROW)
     -DARROW_RUNTIME_SIMD_LEVEL=NONE
     -DARROW_WITH_UTF8PROC=OFF
     -DARROW_TESTING=ON
+    -DCMAKE_INSTALL_LIBDIR=lib
     -DCMAKE_INSTALL_PREFIX=${ARROW_PREFIX}/install
     -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
     -DARROW_BUILD_STATIC=ON
     -DThrift_SOURCE=${THRIFT_SOURCE}
     -DCMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}
+    -DBOOST_ROOT=${BOOST_ROOT}
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5
     # Remove with Arrow upgrade to Arrow 20.
     -DARROW_CXXFLAGS=-Wno-documentation
   )
-  set(ARROW_LIBDIR ${ARROW_PREFIX}/install/${CMAKE_INSTALL_LIBDIR})
+  set(ARROW_LIBDIR ${ARROW_PREFIX}/install/lib)
 
   add_library(thrift STATIC IMPORTED GLOBAL)
   if(NOT Thrift_FOUND)
@@ -58,10 +73,10 @@ if(VELOX_ENABLE_ARROW)
   set_property(TARGET thrift PROPERTY INTERFACE_INCLUDE_DIRECTORIES ${THRIFT_INCLUDE_DIR})
   set_property(TARGET thrift PROPERTY IMPORTED_LOCATION ${THRIFT_LIB})
 
-  set(VELOX_ARROW_BUILD_VERSION 15.0.0)
+  set(VELOX_ARROW_BUILD_VERSION 18.0.0)
   set(
     VELOX_ARROW_BUILD_SHA256_CHECKSUM
-    ab74c60c46938505c8cd7599b1d2826c68450645d5860d0ff40f67e371a5d0b5
+    9c473f2c9914c59ab571761c9497cf0e5cfd3ea335f7782ccc6121f5cb99ae9b
   )
   set(
     VELOX_ARROW_SOURCE_URL
@@ -79,8 +94,8 @@ if(VELOX_ENABLE_ARROW)
     CMAKE_ARGS ${ARROW_CMAKE_ARGS}
     BUILD_BYPRODUCTS ${ARROW_LIBDIR}/libarrow.a ${ARROW_LIBDIR}/libarrow_testing.a ${THRIFT_LIB}
     PATCH_COMMAND
-      git apply ${CMAKE_CURRENT_LIST_DIR}/thrift-download.patch && git apply
-      ${CMAKE_CURRENT_LIST_DIR}/cmake-compatibility.patch
+      git apply ${CMAKE_CURRENT_LIST_DIR}/cmake-compatibility.patch && git apply
+      ${CMAKE_CURRENT_LIST_DIR}/thrift-download.patch
   )
 
   add_library(arrow STATIC IMPORTED GLOBAL)

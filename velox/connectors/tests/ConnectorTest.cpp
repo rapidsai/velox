@@ -15,15 +15,18 @@
  */
 
 #include "velox/connectors/Connector.h"
-#include "velox/common/base/tests/GTestUtils.h"
-#include "velox/common/config/Config.h"
 
+#include <memory>
+#include <utility>
+
+#include <fmt/format.h>
 #include <gtest/gtest.h>
 
+#include "velox/common/memory/Memory.h"
+#include "velox/connectors/ConnectorRegistry.h"
+#include "velox/core/QueryCtx.h"
+
 namespace facebook::velox::connector {
-
-class ConnectorTest : public testing::Test {};
-
 namespace {
 
 class TestConnector : public connector::Connector {
@@ -47,54 +50,135 @@ class TestConnector : public connector::Connector {
   }
 };
 
-class TestConnectorFactory : public connector::ConnectorFactory {
- public:
-  static constexpr const char* kConnectorFactoryName = "test-factory";
+TEST(ConnectorTest, registryOperations) {
+  const int32_t numConnectors = 10;
+  for (int32_t i = 0; i < numConnectors; i++) {
+    auto connector =
+        std::make_shared<TestConnector>(fmt::format("connector-{}", i));
+    auto connectorId = connector->connectorId();
+    ConnectorRegistry::global().insert(
+        std::move(connectorId), std::move(connector));
+  }
 
-  TestConnectorFactory() : ConnectorFactory(kConnectorFactoryName) {}
+  for (int32_t i = 0; i < numConnectors; i++) {
+    EXPECT_NE(
+        ConnectorRegistry::tryGet(fmt::format("connector-{}", i)), nullptr);
+  }
+  EXPECT_EQ(ConnectorRegistry::tryGet("nonexistent"), nullptr);
 
-  std::shared_ptr<Connector> newConnector(
-      const std::string& id,
-      std::shared_ptr<const config::ConfigBase> /*config*/,
-      folly::Executor* /*ioExecutor*/ = nullptr,
-      folly::Executor* /*cpuExecutor*/ = nullptr) override {
-    return std::make_shared<TestConnector>(id);
+  auto allTestConnectors = ConnectorRegistry::findAll<TestConnector>();
+  EXPECT_EQ(allTestConnectors.size(), numConnectors);
+
+  ConnectorRegistry::unregisterAll();
+  EXPECT_EQ(ConnectorRegistry::findAll<TestConnector>().size(), 0);
+}
+
+class ConnectorRegistryTest : public testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    memory::MemoryManager::testingSetInstance({});
   }
 };
 
-} // namespace
+TEST_F(ConnectorRegistryTest, queryScopedOverride) {
+  auto globalConnector = std::make_shared<TestConnector>("global");
+  ConnectorRegistry::global().insert("catalog", globalConnector);
 
-TEST_F(ConnectorTest, getAllConnectors) {
-  registerConnectorFactory(std::make_shared<TestConnectorFactory>());
-  VELOX_ASSERT_THROW(
-      registerConnectorFactory(std::make_shared<TestConnectorFactory>()),
-      "ConnectorFactory with name 'test-factory' is already registered");
-  EXPECT_TRUE(hasConnectorFactory(TestConnectorFactory::kConnectorFactoryName));
-  const int32_t numConnectors = 10;
-  for (int32_t i = 0; i < numConnectors; i++) {
-    registerConnector(
-        getConnectorFactory(TestConnectorFactory::kConnectorFactoryName)
-            ->newConnector(
-                fmt::format("connector-{}", i),
-                std::make_shared<config::ConfigBase>(
-                    std::unordered_map<std::string, std::string>())));
-  }
-  const auto& connectors = getAllConnectors();
-  EXPECT_EQ(connectors.size(), numConnectors);
-  for (int32_t i = 0; i < numConnectors; i++) {
-    EXPECT_EQ(connectors.count(fmt::format("connector-{}", i)), 1);
-  }
-  for (int32_t i = 0; i < numConnectors; i++) {
-    unregisterConnector(fmt::format("connector-{}", i));
-  }
-  EXPECT_EQ(getAllConnectors().size(), 0);
-  EXPECT_TRUE(
-      unregisterConnectorFactory(TestConnectorFactory::kConnectorFactoryName));
-  EXPECT_FALSE(
-      unregisterConnectorFactory(TestConnectorFactory::kConnectorFactoryName));
+  auto queryCtx = core::QueryCtx::create();
+  auto queryRegistry = ConnectorRegistry::create(&ConnectorRegistry::global());
+  auto queryConnector = std::make_shared<TestConnector>("query-override");
+  queryRegistry->insert("catalog", queryConnector);
+  queryCtx->setRegistry(ConnectorRegistry::kRegistryKey, queryRegistry);
+
+  // Query-scoped lookup returns the override.
+  EXPECT_EQ(ConnectorRegistry::tryGet(*queryCtx, "catalog"), queryConnector);
+  // Global lookup returns the global connector.
+  EXPECT_EQ(ConnectorRegistry::tryGet("catalog"), globalConnector);
+
+  ConnectorRegistry::unregisterAll();
 }
 
-TEST_F(ConnectorTest, connectorSplit) {
+TEST_F(ConnectorRegistryTest, queryScopedFallbackToGlobal) {
+  auto globalConnector = std::make_shared<TestConnector>("global");
+  ConnectorRegistry::global().insert("catalog", globalConnector);
+
+  auto queryCtx = core::QueryCtx::create();
+  auto queryRegistry = ConnectorRegistry::create(&ConnectorRegistry::global());
+  queryCtx->setRegistry(ConnectorRegistry::kRegistryKey, queryRegistry);
+
+  // Empty per-query registry falls back to global.
+  EXPECT_EQ(ConnectorRegistry::tryGet(*queryCtx, "catalog"), globalConnector);
+
+  ConnectorRegistry::unregisterAll();
+}
+
+TEST_F(ConnectorRegistryTest, noQueryRegistryFallsBackToGlobal) {
+  auto globalConnector = std::make_shared<TestConnector>("global");
+  ConnectorRegistry::global().insert("catalog", globalConnector);
+
+  // QueryCtx with no per-query registry set.
+  auto queryCtx = core::QueryCtx::create();
+  EXPECT_EQ(ConnectorRegistry::tryGet(*queryCtx, "catalog"), globalConnector);
+
+  ConnectorRegistry::unregisterAll();
+}
+
+TEST_F(ConnectorRegistryTest, queryScopedUnregisterAll) {
+  auto globalConnector = std::make_shared<TestConnector>("global");
+  ConnectorRegistry::global().insert("catalog", globalConnector);
+
+  auto queryCtx = core::QueryCtx::create();
+  auto queryRegistry = ConnectorRegistry::create(&ConnectorRegistry::global());
+  queryRegistry->insert("catalog", std::make_shared<TestConnector>("query"));
+  queryCtx->setRegistry(ConnectorRegistry::kRegistryKey, queryRegistry);
+
+  ConnectorRegistry::unregisterAll(*queryCtx);
+
+  // Query-scoped registry cleared; falls back to global.
+  EXPECT_EQ(ConnectorRegistry::tryGet(*queryCtx, "catalog"), globalConnector);
+  // Global is untouched.
+  EXPECT_EQ(ConnectorRegistry::tryGet("catalog"), globalConnector);
+
+  ConnectorRegistry::unregisterAll();
+}
+
+// Verify that unregisterAll on a queryCtx without a per-query registry does
+// not clear the global registry.
+TEST_F(ConnectorRegistryTest, unregisterAllNoQueryRegistry) {
+  auto globalConnector = std::make_shared<TestConnector>("global");
+  ConnectorRegistry::global().insert("catalog", globalConnector);
+
+  auto queryCtx = core::QueryCtx::create();
+  ConnectorRegistry::unregisterAll(*queryCtx);
+
+  // Global registry is untouched.
+  EXPECT_EQ(ConnectorRegistry::tryGet("catalog"), globalConnector);
+
+  ConnectorRegistry::unregisterAll();
+}
+
+TEST_F(ConnectorRegistryTest, queryScopedFindAll) {
+  ConnectorRegistry::global().insert(
+      "global-cat", std::make_shared<TestConnector>("global-cat"));
+
+  auto queryCtx = core::QueryCtx::create();
+  auto queryRegistry = ConnectorRegistry::create(&ConnectorRegistry::global());
+  queryRegistry->insert(
+      "query-cat", std::make_shared<TestConnector>("query-cat"));
+  queryCtx->setRegistry(ConnectorRegistry::kRegistryKey, queryRegistry);
+
+  // findAll with queryCtx sees both query-scoped and global connectors.
+  auto all = ConnectorRegistry::findAll<TestConnector>(*queryCtx);
+  EXPECT_EQ(all.size(), 2);
+
+  // findAll without queryCtx sees only global.
+  auto globalOnly = ConnectorRegistry::findAll<TestConnector>();
+  EXPECT_EQ(globalOnly.size(), 1);
+
+  ConnectorRegistry::unregisterAll();
+}
+
+TEST(ConnectorTest, connectorSplit) {
   {
     const ConnectorSplit split("test", 100, true);
     ASSERT_EQ(split.connectorId, "test");
@@ -114,4 +198,5 @@ TEST_F(ConnectorTest, connectorSplit) {
         "[split: connector id test, weight 50, cacheable false]");
   }
 }
+} // namespace
 } // namespace facebook::velox::connector

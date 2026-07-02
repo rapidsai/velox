@@ -15,8 +15,12 @@
  */
 #pragma once
 
+#include <optional>
+#include "velox/core/QueryConfig.h"
 #include "velox/exec/Operator.h"
+#include "velox/exec/OperatorType.h"
 #include "velox/exec/Spiller.h"
+#include "velox/vector/VectorStream.h"
 
 namespace facebook::velox::exec {
 
@@ -147,13 +151,13 @@ std::string makeOperatorSpillPath(
 
 /// Set a named runtime metric in operator 'stats'.
 void setOperatorRuntimeStats(
-    const std::string& name,
+    std::string_view name,
     const RuntimeCounter& value,
     std::unordered_map<std::string, RuntimeMetric>& stats);
 
 /// Add a named runtime metric to operator 'stats'.
 void addOperatorRuntimeStats(
-    const std::string& name,
+    std::string_view name,
     const RuntimeCounter& value,
     std::unordered_map<std::string, RuntimeMetric>& stats);
 
@@ -229,7 +233,12 @@ class BlockedOperator : public Operator {
       int32_t id,
       core::PlanNodePtr node,
       BlockedOperatorCb&& blockedCb)
-      : Operator(ctx, node->outputType(), id, node->id(), "BlockedOperator"),
+      : Operator(
+            ctx,
+            node->outputType(),
+            id,
+            node->id(),
+            OperatorType::kBlockedOperator),
         blockedCb_(std::move(blockedCb)) {}
 
   BlockingReason isBlocked(ContinueFuture* future) override {
@@ -307,4 +316,13 @@ class BlockedOperatorFactory : public Operator::PlanNodeTranslator {
  private:
   BlockedOperatorCb blockedCb_{nullptr};
 };
+
+/// Creates VectorSerde::Options for the given VectorSerde kind with compression
+/// settings. Optionally configures minimum compression ratio.
+std::unique_ptr<VectorSerde::Options> getVectorSerdeOptions(
+    common::CompressionKind compressionKind,
+    const std::string& kind,
+    std::optional<float> minCompressionRatio = std::nullopt,
+    int32_t minCompressionPageSizeBytes = 0);
+
 } // namespace facebook::velox::exec

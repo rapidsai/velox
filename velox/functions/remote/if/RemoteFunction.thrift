@@ -14,8 +14,12 @@
  * limitations under the License.
  */
 
+package "facebook.com/velox/functions"
+
 namespace cpp2 facebook.velox.functions.remote
 namespace java.swift com.facebook.spark.remotefunctionserver.api
+namespace py3 facebook.velox.functions.remote
+namespace rust velox_functions_remote
 
 cpp_include "folly/io/IOBuf.h"
 

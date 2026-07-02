@@ -15,9 +15,9 @@
  */
 #include "velox/expression/SwitchExpr.h"
 #include "velox/expression/BooleanMix.h"
-#include "velox/expression/ConstantExpr.h"
+#include "velox/expression/ExprConstants.h"
 #include "velox/expression/FieldReference.h"
-#include "velox/expression/ScopedVarSetter.h"
+#include "velox/type/TypeCoercer.h"
 
 namespace facebook::velox::exec {
 
@@ -25,6 +25,17 @@ namespace {
 bool hasElseClause(const std::vector<ExprPtr>& inputs) {
   return inputs.size() % 2 == 1;
 }
+
+TypePtr resolveTypeInt(
+    const std::vector<TypePtr>& argTypes,
+    bool allowedCoercions,
+    std::vector<TypePtr>& coercions,
+    const TypeCoercer& coercer);
+
+TypePtr resolveTypeInt(const std::vector<TypePtr>& argTypes) {
+  std::vector<TypePtr> coercions;
+  return resolveTypeInt(argTypes, false, coercions, TypeCoercer::defaults());
+};
 } // namespace
 
 SwitchExpr::SwitchExpr(
@@ -35,7 +46,7 @@ SwitchExpr::SwitchExpr(
           SpecialFormKind::kSwitch,
           std::move(type),
           inputs,
-          "switch",
+          expression::kSwitch,
           hasElseClause(inputs) && inputsSupportFlatNoNullsFastPath,
           false /* trackCpuUsage */),
       numCases_{inputs_.size() / 2},
@@ -49,7 +60,7 @@ SwitchExpr::SwitchExpr(
       [](const ExprPtr& expr) { return expr->type(); });
 
   // Apply type checking.
-  auto typeExpected = resolveType(inputTypes);
+  auto typeExpected = resolveTypeInt(inputTypes);
   VELOX_CHECK(
       *typeExpected == *this->type(),
       "Switch expression type different than then clause. Expected {}, but got {}.",
@@ -182,8 +193,8 @@ void SwitchExpr::computePropagatesNulls() {
   // - All "then" clauses and optional "else" clause use the same inputs.
   // - All "condition" clauses use a subset of "then"/"else" inputs.
 
-  for (auto i = 0; i < numCases_; i += 2) {
-    if (!inputs_[i + 1]->propagatesNulls()) {
+  for (auto i = 0; i < numCases_; ++i) {
+    if (!inputs_[i * 2 + 1]->propagatesNulls()) {
       propagatesNulls_ = false;
       return;
     }
@@ -219,58 +230,93 @@ void SwitchExpr::computePropagatesNulls() {
   propagatesNulls_ = true;
 }
 
-// static
-TypePtr SwitchExpr::resolveType(const std::vector<TypePtr>& argTypes) {
+namespace {
+TypePtr resolveTypeInt(
+    const std::vector<TypePtr>& argTypes,
+    bool allowedCoercions,
+    std::vector<TypePtr>& coercions,
+    const TypeCoercer& coercer) {
   VELOX_CHECK_GT(
       argTypes.size(),
       1,
       "Switch statements expect at least 2 arguments, received {}",
       argTypes.size());
-  // Type structure is [cond1Type, then1Type, cond2Type, then2Type, ...
-  // elseType*]
 
-  // Make sure all 'condition' expressions hae type BOOLEAN and all 'then' and
-  // an optional 'else' clause have the same type.
-  int numCases = argTypes.size() / 2;
+  const size_t numArgs = argTypes.size();
+  const size_t numCases = numArgs / 2;
 
-  auto& expressionType = argTypes[1];
+  TypePtr resultType = argTypes[1];
+
+  if (allowedCoercions) {
+    coercions.clear();
+    coercions.resize(numArgs);
+  }
+
+  auto setCoercionsUpTo = [&](int index, const TypePtr& type) {
+    for (auto i = 1; i <= index; i += 2) {
+      coercions[i] = type;
+    }
+  };
 
   for (auto i = 0; i < numCases; i++) {
-    auto& conditionType = argTypes[i * 2];
-    auto& thenType = argTypes[i * 2 + 1];
+    const auto& conditionType = argTypes[i * 2];
+    const auto& thenType = argTypes[i * 2 + 1];
 
     VELOX_CHECK_EQ(
         conditionType->kind(),
         TypeKind::BOOLEAN,
         "Condition of  SWITCH statement is not bool");
 
-    VELOX_CHECK(
-        *thenType == *expressionType,
-        "All then clauses of a SWITCH statement must have the same type. "
-        "Expected {}, but got {}.",
-        expressionType->toString(),
-        thenType->toString());
+    if (*thenType != *resultType) {
+      if (allowedCoercions && coercer.coercible(thenType, resultType)) {
+        coercions[i * 2 + 1] = resultType;
+      } else if (allowedCoercions && coercer.coercible(resultType, thenType)) {
+        resultType = thenType;
+        setCoercionsUpTo(i * 2 - 1, resultType);
+      } else {
+        VELOX_FAIL(
+            "All then clauses of a SWITCH statement must have the same type. "
+            "Expected {}, but got {}.",
+            resultType->toString(),
+            thenType->toString());
+      }
+    }
   }
 
-  bool hasElse = argTypes.size() % 2 == 1;
-
+  const bool hasElse = argTypes.size() % 2 == 1;
   if (hasElse) {
-    auto& elseClauseType = argTypes.back();
+    const auto& elseType = argTypes.back();
 
-    VELOX_CHECK(
-        *elseClauseType == *expressionType,
-        "Else clause of a SWITCH statement must have the same type as 'then' clauses. "
-        "Expected {}, but got {}.",
-        expressionType->toString(),
-        elseClauseType->toString());
+    if (*elseType != *resultType) {
+      if (allowedCoercions && coercer.coercible(elseType, resultType)) {
+        coercions.back() = resultType;
+      } else if (allowedCoercions && coercer.coercible(resultType, elseType)) {
+        resultType = elseType;
+        setCoercionsUpTo(numArgs - 2, resultType);
+      } else {
+        VELOX_FAIL(
+            "Else clause of a SWITCH statement must have the same type as 'then' clauses. "
+            "Expected {}, but got {}.",
+            resultType->toString(),
+            elseType->toString());
+      }
+    }
   }
 
-  return expressionType;
+  return resultType;
 }
+} // namespace
 
 TypePtr SwitchCallToSpecialForm::resolveType(
     const std::vector<TypePtr>& argTypes) {
-  return SwitchExpr::resolveType(argTypes);
+  return resolveTypeInt(argTypes);
+}
+
+TypePtr SwitchCallToSpecialForm::resolveTypeWithCoercions(
+    const std::vector<TypePtr>& argTypes,
+    std::vector<TypePtr>& coercions,
+    const TypeCoercer& coercer) {
+  return resolveTypeInt(argTypes, true, coercions, coercer);
 }
 
 ExprPtr SwitchCallToSpecialForm::constructSpecialForm(
@@ -286,10 +332,21 @@ ExprPtr SwitchCallToSpecialForm::constructSpecialForm(
 
 TypePtr IfCallToSpecialForm::resolveType(const std::vector<TypePtr>& argTypes) {
   VELOX_CHECK(
-      argTypes.size() == 3,
-      "An IF statement must have 3 clauses, the if clause, the then clause, and the else clause. Expected 3, but got {}.",
-      argTypes.size());
+      argTypes.size() == 2 || argTypes.size() == 3,
+      "An IF statement must have 2 or 3 clauses: 'if', 'then', and optional 'else'.");
 
-  return SwitchCallToSpecialForm::resolveType(argTypes);
+  return resolveTypeInt(argTypes);
+}
+
+TypePtr IfCallToSpecialForm::resolveTypeWithCoercions(
+    const std::vector<TypePtr>& argTypes,
+    std::vector<TypePtr>& coercions,
+    const TypeCoercer& coercer) {
+  VELOX_CHECK_EQ(
+      argTypes.size(),
+      3,
+      "An IF statement must have 3 clauses: 'if', 'then', and 'else'.");
+
+  return resolveTypeInt(argTypes, true, coercions, coercer);
 }
 } // namespace facebook::velox::exec

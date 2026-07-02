@@ -24,23 +24,23 @@
  * THE TPC SOFTWARE IS AVAILABLE WITHOUT CHARGE FROM TPC.
  */
 
-#include "w_store.h"
+#include "velox/tpcds/gen/dsdgen/include/w_store.h"
 
-#include "append_info.h"
-#include "build_support.h"
-#include "config.h"
-#include "constants.h"
-#include "date.h"
-#include "decimal.h"
-#include "genrand.h"
-#include "misc.h"
-#include "nulls.h"
-#include "parallel.h"
-#include "porting.h"
-#include "scaling.h"
-#include "scd.h"
-#include "tables.h"
-#include "tdefs.h"
+#include "velox/tpcds/gen/dsdgen/include/append_info.h"
+#include "velox/tpcds/gen/dsdgen/include/build_support.h"
+#include "velox/tpcds/gen/dsdgen/include/config.h"
+#include "velox/tpcds/gen/dsdgen/include/constants.h"
+#include "velox/tpcds/gen/dsdgen/include/date.h"
+#include "velox/tpcds/gen/dsdgen/include/decimal.h"
+#include "velox/tpcds/gen/dsdgen/include/genrand.h"
+#include "velox/tpcds/gen/dsdgen/include/misc.h"
+#include "velox/tpcds/gen/dsdgen/include/nulls.h"
+#include "velox/tpcds/gen/dsdgen/include/parallel.h"
+#include "velox/tpcds/gen/dsdgen/include/porting.h"
+#include "velox/tpcds/gen/dsdgen/include/scaling.h"
+#include "velox/tpcds/gen/dsdgen/include/scd.h"
+#include "velox/tpcds/gen/dsdgen/include/tables.h"
+#include "velox/tpcds/gen/dsdgen/include/tdefs.h"
 
 #include <stdio.h>
 #include <string>
@@ -55,7 +55,7 @@ int mk_w_store(void* info_arr, ds_key_t index, DSDGenContext& dsdGenContext) {
   /* begin locals declarations */
   static decimal_t dRevMin, dRevMax;
   char *sName1 = nullptr, *sName2 = nullptr, *szTemp = nullptr;
-  int32_t nHierarchyTotal, nStoreType, nPercentage, nDaysOpen, nMin, nMax;
+  int32_t nStoreType, nPercentage, nDaysOpen, nMin, nMax;
   static date_t tDate;
   static decimal_t min_rev_growth, max_rev_growth, dMinTaxPercentage,
       dMaxTaxPercentage;
@@ -65,8 +65,6 @@ int mk_w_store(void* info_arr, ds_key_t index, DSDGenContext& dsdGenContext) {
   r = &dsdGenContext.g_w_store;
 
   if (!dsdGenContext.mk_w_store_init) {
-    nHierarchyTotal = static_cast<int>(get_rowcount(DIVISIONS, dsdGenContext));
-    nHierarchyTotal *= static_cast<int>(get_rowcount(COMPANY, dsdGenContext));
     strtodt(&tDate, DATE_MINIMUM);
     strtodec(&min_rev_growth, STORE_MIN_REV_GROWTH);
     strtodec(&max_rev_growth, STORE_MAX_REV_GROWTH);

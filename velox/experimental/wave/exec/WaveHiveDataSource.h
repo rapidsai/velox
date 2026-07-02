@@ -33,7 +33,7 @@ class WaveHiveDataSource : public WaveDataSource {
       folly::Executor* executor,
       const connector::ConnectorQueryCtx* connectorQueryCtx,
       const std::shared_ptr<connector::hive::HiveConfig>& hiveConfig,
-      const std::shared_ptr<io::IoStatistics>& ioStats,
+      const std::shared_ptr<io::IoStatistics>& ioStatistics,
       const exec::ExprSet* remainingFilter,
       std::shared_ptr<common::MetadataFilter> metadataFilter);
 
@@ -59,7 +59,7 @@ class WaveHiveDataSource : public WaveDataSource {
 
   uint64_t getCompletedRows() override;
 
-  std::unordered_map<std::string, RuntimeCounter> runtimeStats() override;
+  std::unordered_map<std::string, RuntimeMetric> getRuntimeStats() override;
 
   static void registerConnector();
 

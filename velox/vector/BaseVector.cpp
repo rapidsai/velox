@@ -23,6 +23,7 @@
 #include "velox/vector/ComplexVector.h"
 #include "velox/vector/DecodedVector.h"
 #include "velox/vector/DictionaryVector.h"
+#include "velox/vector/FlatMapVector.h"
 #include "velox/vector/FlatVector.h"
 #include "velox/vector/LazyVector.h"
 #include "velox/vector/SequenceVector.h"
@@ -32,7 +33,6 @@
 #include "velox/vector/VectorTypeUtils.h"
 
 namespace facebook::velox {
-
 namespace {
 
 Variant nullVariant(const TypePtr& type) {
@@ -56,7 +56,8 @@ template <>
 Variant variantAtTyped<TypeKind::VARBINARY>(
     const BaseVector* vector,
     vector_size_t row) {
-  return Variant::binary(vector->as<SimpleVector<StringView>>()->valueAt(row));
+  return Variant::binary(
+      std::string(vector->as<SimpleVector<StringView>>()->valueAt(row)));
 }
 
 Variant variantAtImpl(const BaseVector* vector, vector_size_t row);
@@ -142,6 +143,15 @@ Variant BaseVector::variantAt(vector_size_t index) const {
   return variantAtImpl(this, index);
 }
 
+std::vector<Variant> BaseVector::toVariants() const {
+  std::vector<Variant> result;
+  result.reserve(size());
+  for (auto i = 0; i < size(); ++i) {
+    result.push_back(variantAt(i));
+  }
+  return result;
+}
+
 BaseVector::BaseVector(
     velox::memory::MemoryPool* pool,
     std::shared_ptr<const Type> type,
@@ -180,7 +190,6 @@ BaseVector::BaseVector(
       // second reference to an immutable 'nulls_'.
       nulls_->setSize(bytes);
     }
-    inMemoryBytes_ += nulls_->size();
   }
 }
 
@@ -412,8 +421,9 @@ VectorPtr BaseVector::createInternal(
   auto kind = type->kind();
   switch (kind) {
     case TypeKind::ROW: {
-      std::vector<VectorPtr> children;
       auto& rowType = type->as<TypeKind::ROW>();
+      std::vector<VectorPtr> children;
+      children.reserve(rowType.size());
       // Children are reserved the parent size and accessible for those rows.
       for (int32_t i = 0; i < rowType.size(); ++i) {
         children.push_back(create(rowType.childAt(i), size, pool));
@@ -465,6 +475,78 @@ VectorPtr BaseVector::createInternal(
     default:
       return VELOX_DYNAMIC_SCALAR_TYPE_DISPATCH_ALL(
           createEmpty, kind, size, pool, type);
+  }
+}
+
+// static
+VectorPtr BaseVector::createEmptyLikeInternal(
+    const BaseVector* source,
+    vector_size_t size,
+    memory::MemoryPool* pool) {
+  VELOX_CHECK_NOT_NULL(source);
+  auto* wrapped = source->wrappedVector();
+  const auto& type = source->type();
+
+  switch (type->kind()) {
+    case TypeKind::ROW: {
+      auto& rowType = type->as<TypeKind::ROW>();
+      auto* sourceRow = wrapped->as<RowVector>();
+      std::vector<VectorPtr> children;
+      children.reserve(rowType.size());
+      for (size_t i = 0; i < rowType.size(); ++i) {
+        children.push_back(
+            createEmptyLikeInternal(sourceRow->childAt(i).get(), size, pool));
+      }
+      return std::make_shared<RowVector>(
+          pool, type, nullptr, size, std::move(children));
+    }
+    case TypeKind::ARRAY: {
+      auto offsets = allocateOffsets(size, pool);
+      auto sizes = allocateSizes(size, pool);
+      auto* sourceArray = wrapped->as<ArrayVector>();
+      auto elements =
+          createEmptyLikeInternal(sourceArray->elements().get(), 0, pool);
+      return std::make_shared<ArrayVector>(
+          pool,
+          type,
+          nullptr,
+          size,
+          std::move(offsets),
+          std::move(sizes),
+          std::move(elements));
+    }
+    case TypeKind::MAP: {
+      // If source is FLAT_MAP, directly create FlatMapVector.
+      if (wrapped->encoding() == VectorEncoding::Simple::FLAT_MAP) {
+        return std::make_shared<FlatMapVector>(
+            pool,
+            type,
+            nullptr, // nulls
+            size,
+            nullptr, // distinctKeys
+            std::vector<VectorPtr>{}, // mapValues
+            std::vector<BufferPtr>{}); // inMaps
+      }
+
+      // Otherwise create standard MapVector.
+      auto offsets = allocateOffsets(size, pool);
+      auto sizes = allocateSizes(size, pool);
+      auto* sourceMap = wrapped->as<MapVector>();
+      auto keys = createEmptyLikeInternal(sourceMap->mapKeys().get(), 0, pool);
+      auto values =
+          createEmptyLikeInternal(sourceMap->mapValues().get(), 0, pool);
+      return std::make_shared<MapVector>(
+          pool,
+          type,
+          nullptr,
+          size,
+          std::move(offsets),
+          std::move(sizes),
+          std::move(keys),
+          std::move(values));
+    }
+    default:
+      return BaseVector::create(type, size, pool);
   }
 }
 
@@ -791,6 +873,221 @@ VectorPtr newConstant<TypeKind::OPAQUE>(
       pool, size, value.isNull(), type, std::shared_ptr<void>(capsule.obj));
 }
 
+namespace {
+
+VectorPtr callMakeVector(
+    TypePtr type,
+    const std::vector<Variant>& data,
+    memory::MemoryPool* pool);
+
+template <TypeKind KIND, typename = void>
+struct VariantToVector {
+  static VectorPtr makeVector(
+      TypePtr type,
+      const std::vector<Variant>& /*data*/,
+      memory::MemoryPool* /*pool*/) {
+    VELOX_NYI("Type not supported: {}", type->toString());
+  }
+};
+
+template <TypeKind KIND>
+struct VariantToVector<
+    KIND,
+    std::enable_if_t<
+        TypeTraits<KIND>::isFixedWidth || KIND == TypeKind::VARCHAR ||
+            KIND == TypeKind::VARBINARY || KIND == TypeKind::OPAQUE,
+        void>> {
+  static constexpr bool kIsOpaque = (KIND == TypeKind::OPAQUE);
+  static VectorPtr makeVector(
+      TypePtr type,
+      const std::vector<Variant>& data,
+      memory::MemoryPool* pool) {
+    using T = typename TypeTraits<KIND>::NativeType;
+
+    const vector_size_t dataSize = data.size();
+    BufferPtr valuesBuffer;
+    if constexpr (std::is_same_v<T, StringView>) {
+      // Make sure to initialize StringView values so they can be safely
+      // accessed.
+      valuesBuffer = AlignedBuffer::allocate<T>(dataSize, pool, T());
+    } else {
+      valuesBuffer = AlignedBuffer::allocate<T>(dataSize, pool);
+    }
+    BufferPtr nulls = allocateNulls(dataSize, pool, bits::kNull);
+
+    auto values = std::make_shared<FlatVector<T>>(
+        pool,
+        type,
+        nulls,
+        dataSize,
+        std::move(valuesBuffer),
+        std::vector<BufferPtr>());
+
+    for (size_t i = 0; i < dataSize; i++) {
+      if (!data[i].isNull()) {
+        if constexpr (kIsOpaque) {
+          values->set(i, T(data[i].value<KIND>().obj));
+        } else {
+          values->set(i, T(data[i].value<KIND>()));
+        }
+      }
+    }
+    return values;
+  }
+};
+
+template <>
+struct VariantToVector<TypeKind::ARRAY> {
+  static VectorPtr makeVector(
+      TypePtr type,
+      const std::vector<Variant>& data,
+      memory::MemoryPool* pool) {
+    vector_size_t size = data.size();
+    BufferPtr offsets = allocateOffsets(size, pool);
+    BufferPtr sizes = allocateSizes(size, pool);
+    BufferPtr nulls = allocateNulls(size, pool);
+    auto rawOffsets = offsets->asMutable<vector_size_t>();
+    auto rawSizes = sizes->asMutable<vector_size_t>();
+    auto rawNulls = nulls->asMutable<uint64_t>();
+
+    std::vector<Variant> elements;
+    vector_size_t index = 0;
+    vector_size_t nullCount = 0;
+    for (size_t i = 0; i < data.size(); ++i) {
+      auto isNull = data[i].isNull();
+      *rawOffsets++ = index;
+      *rawSizes++ = !isNull ? data[i].array().size() : 0;
+      if (isNull) {
+        ++nullCount;
+        bits::setNull(rawNulls, i, true);
+        continue;
+      }
+      for (const auto& arrayElement : data[i].array()) {
+        elements.push_back(arrayElement);
+        ++index;
+      }
+    }
+
+    auto elementsVector = callMakeVector(type->childAt(0), elements, pool);
+
+    return std::make_shared<ArrayVector>(
+        pool,
+        type,
+        nulls,
+        size,
+        offsets,
+        sizes,
+        std::move(elementsVector),
+        nullCount);
+  }
+};
+
+template <>
+struct VariantToVector<TypeKind::MAP> {
+  static VectorPtr makeVector(
+      TypePtr type,
+      const std::vector<Variant>& data,
+      memory::MemoryPool* pool) {
+    vector_size_t size = data.size();
+    BufferPtr offsets = allocateOffsets(size, pool);
+    BufferPtr sizes = allocateSizes(size, pool);
+    BufferPtr nulls = allocateNulls(size, pool);
+    auto rawOffsets = offsets->asMutable<vector_size_t>();
+    auto rawSizes = sizes->asMutable<vector_size_t>();
+    auto rawNulls = nulls->asMutable<uint64_t>();
+
+    std::vector<Variant> keys;
+    std::vector<Variant> values;
+    vector_size_t index = 0;
+    vector_size_t nullCount = 0;
+    for (size_t i = 0; i < data.size(); ++i) {
+      auto isNull = data[i].isNull();
+      *rawOffsets++ = index;
+      *rawSizes++ = !isNull ? data[i].map().size() : 0;
+      if (isNull) {
+        ++nullCount;
+        bits::setNull(rawNulls, i, true);
+        continue;
+      }
+      for (const auto& pair : data[i].map()) {
+        keys.push_back(pair.first);
+        values.push_back(pair.second);
+        ++index;
+      }
+    }
+
+    auto keysVector = callMakeVector(type->childAt(0), keys, pool);
+    auto valuesVector = callMakeVector(type->childAt(1), values, pool);
+
+    return std::make_shared<MapVector>(
+        pool,
+        type,
+        nulls,
+        size,
+        offsets,
+        sizes,
+        std::move(keysVector),
+        std::move(valuesVector),
+        nullCount);
+  }
+};
+
+template <>
+struct VariantToVector<TypeKind::ROW> {
+  static VectorPtr makeVector(
+      TypePtr type,
+      const std::vector<Variant>& data,
+      memory::MemoryPool* pool) {
+    vector_size_t size = data.size();
+    BufferPtr nulls = allocateNulls(size, pool);
+    auto rawNulls = nulls->asMutable<uint64_t>();
+
+    auto childCount = type->size();
+    std::vector<std::vector<Variant>> children;
+    children.reserve(childCount);
+    for (size_t i = 0; i < childCount; ++i) {
+      std::vector<Variant> child;
+      child.reserve(size);
+      children.push_back(child);
+    }
+
+    for (size_t i = 0; i < data.size(); ++i) {
+      if (data[i].isNull()) {
+        bits::setNull(rawNulls, i, true);
+        for (auto j{0u}; j < childCount; ++j) {
+          children[j].push_back(Variant::null(type->childAt(j)->kind()));
+        }
+        continue;
+      }
+      const auto& row = data[i].row();
+      VELOX_CHECK_EQ(row.size(), children.size());
+      for (size_t j = 0; j < row.size(); ++j) {
+        children[j].push_back(row[j]);
+      }
+    }
+
+    std::vector<VectorPtr> childVectors;
+    childVectors.reserve(childCount);
+    for (size_t i = 0; i < childCount; ++i) {
+      childVectors.push_back(
+          callMakeVector(type->childAt(i), children[i], pool));
+    }
+
+    return std::make_shared<RowVector>(
+        pool, type, nulls, size, std::move(childVectors));
+  }
+};
+
+VectorPtr callMakeVector(
+    TypePtr type,
+    const std::vector<Variant>& data,
+    memory::MemoryPool* pool) {
+  return VELOX_DYNAMIC_TYPE_DISPATCH_METHOD_ALL(
+      VariantToVector, makeVector, type->kind(), type, data, pool);
+}
+
+} // namespace
+
 // static
 VectorPtr BaseVector::createConstant(
     const TypePtr& type,
@@ -798,8 +1095,25 @@ VectorPtr BaseVector::createConstant(
     vector_size_t size,
     velox::memory::MemoryPool* pool) {
   VELOX_CHECK_EQ(type->kind(), value.kind());
-  return VELOX_DYNAMIC_SCALAR_TYPE_DISPATCH_ALL(
-      newConstant, value.kind(), type, value, size, pool);
+  if (type->isPrimitiveType()) {
+    return VELOX_DYNAMIC_SCALAR_TYPE_DISPATCH_ALL(
+        newConstant, value.kind(), type, value, size, pool);
+  }
+
+  if (value.isNull()) {
+    return BaseVector::createNullConstant(type, size, pool);
+  }
+
+  auto variantVector = callMakeVector(type, {value}, pool);
+  return BaseVector::wrapInConstant(size, 0, std::move(variantVector));
+}
+
+// static
+VectorPtr BaseVector::createFromVariants(
+    const TypePtr& type,
+    const std::vector<Variant>& values,
+    velox::memory::MemoryPool* pool) {
+  return callMakeVector(type, values, pool);
 }
 
 // static
@@ -848,6 +1162,18 @@ void BaseVector::copy(
     });
   }
   copyRanges(source, ranges);
+}
+
+void BaseVector::transferOrCopyTo(velox::memory::MemoryPool* pool) {
+  if (pool == pool_) {
+    return;
+  }
+
+  if (nulls_ && !nulls_->transferTo(pool)) {
+    nulls_ = AlignedBuffer::copy<bool>(nulls_, pool);
+    rawNulls_ = nulls_->as<uint64_t>();
+  }
+  pool_ = pool;
 }
 
 namespace {
@@ -945,7 +1271,7 @@ uint64_t BaseVector::estimateFlatSize() const {
     const auto& leafType = leaf->type();
     return length_ *
         (leafType->isFixedWidth() ? leafType->cppSizeInBytes() : 0) +
-        BaseVector::retainedSize();
+        BaseVector::retainedSizeImpl();
   }
 
   auto avgRowSize = 1.0 * leaf->retainedSize() / leaf->size();
@@ -953,13 +1279,58 @@ uint64_t BaseVector::estimateFlatSize() const {
 }
 
 namespace {
-bool isReusableEncoding(VectorEncoding::Simple encoding) {
+// TODO: enable flatmap encoding type and allow reuse in recursivelyReusable.
+bool reusableEncoding(VectorEncoding::Simple encoding) {
   return encoding == VectorEncoding::Simple::FLAT ||
       encoding == VectorEncoding::Simple::ARRAY ||
       encoding == VectorEncoding::Simple::MAP ||
       encoding == VectorEncoding::Simple::ROW;
 }
 } // namespace
+
+// static
+bool BaseVector::recursivelyReusable(const VectorPtr& vector) {
+  if (!vector) {
+    return true;
+  }
+  if (vector.use_count() != 1) {
+    return false;
+  }
+  const auto encoding = vector->encoding();
+  if (!reusableEncoding(encoding)) {
+    return false;
+  }
+
+  switch (vector->encoding()) {
+    case VectorEncoding::Simple::ROW: {
+      auto* rowVector = vector->asUnchecked<RowVector>();
+      const auto& children = rowVector->children();
+      for (size_t i = 0; i < children.size(); ++i) {
+        const auto& child = children[i];
+        if (child && !recursivelyReusable(child)) {
+          return false;
+        }
+      }
+      return true;
+    }
+    case VectorEncoding::Simple::ARRAY: {
+      auto* arrayVector = vector->asUnchecked<ArrayVector>();
+      const auto& elems = arrayVector->elements();
+      return !elems || recursivelyReusable(elems);
+    }
+    case VectorEncoding::Simple::MAP: {
+      auto* mapVector = vector->asUnchecked<MapVector>();
+      const auto& keys = mapVector->mapKeys();
+      const auto& vals = mapVector->mapValues();
+      return (!keys || recursivelyReusable(keys)) &&
+          (!vals || recursivelyReusable(vals));
+    }
+    case VectorEncoding::Simple::FLAT:
+      return true;
+    default:
+      return false;
+  }
+}
 
 // static
 void BaseVector::flattenVector(VectorPtr& vector) {
@@ -988,9 +1359,8 @@ void BaseVector::flattenVector(VectorPtr& vector) {
       return;
     }
     case VectorEncoding::Simple::LAZY: {
-      auto& loadedVector =
-          vector->asUnchecked<LazyVector>()->loadedVectorShared();
-      BaseVector::flattenVector(loadedVector);
+      vector = vector->asUnchecked<LazyVector>()->loadedVectorShared();
+      BaseVector::flattenVector(vector);
       return;
     }
     default:
@@ -1000,7 +1370,7 @@ void BaseVector::flattenVector(VectorPtr& vector) {
 }
 
 void BaseVector::prepareForReuse(VectorPtr& vector, vector_size_t size) {
-  if (vector.use_count() != 1 || !isReusableEncoding(vector->encoding())) {
+  if (vector.use_count() != 1 || !reusableEncoding(vector->encoding())) {
     vector = BaseVector::create(vector->type(), size, vector->pool());
     return;
   }

@@ -60,8 +60,9 @@ std::vector<core::TypedExprPtr> getExpressions(
     const std::string& functionName) {
   std::vector<core::TypedExprPtr> inputs;
   for (size_t i = 0; i < inputType->size(); ++i) {
-    inputs.push_back(std::make_shared<core::FieldAccessTypedExpr>(
-        inputType->childAt(i), inputType->nameOf(i)));
+    inputs.push_back(
+        std::make_shared<core::FieldAccessTypedExpr>(
+            inputType->childAt(i), inputType->nameOf(i)));
   }
 
   return {std::make_shared<core::CallTypedExpr>(
@@ -104,7 +105,7 @@ void RemoteFunctionServiceHandler::handleErrors(
       numRows,
       std::vector<VectorPtr>{flatVector});
   result->errorPayload() =
-      rowVectorToIOBuf(errorRowVector, *pool_, serde.get());
+      rowVectorToIOBufBatch(errorRowVector, *pool_, serde.get());
 }
 
 void RemoteFunctionServiceHandler::invokeFunction(
@@ -153,7 +154,7 @@ void RemoteFunctionServiceHandler::invokeFunction(
   result->rowCount() = outputRowVector->size();
   result->pageFormat() = serdeFormat;
   result->payload() =
-      rowVectorToIOBuf(outputRowVector, rows.end(), *pool_, serde.get());
+      rowVectorToIOBufBatch(outputRowVector, rows.end(), *pool_, serde.get());
 
   auto evalErrors = evalCtx.errors();
   if (evalErrors != nullptr && evalErrors->hasError()) {

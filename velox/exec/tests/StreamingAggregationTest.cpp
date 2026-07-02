@@ -13,22 +13,33 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include "velox/exec/StreamingAggregation.h"
 #include "velox/common/base/tests/GTestUtils.h"
+#include "velox/common/testutil/TempFilePath.h"
+#include "velox/common/testutil/TestValue.h"
 #include "velox/core/Expressions.h"
+
 #include "velox/exec/PlanNodeStats.h"
 #include "velox/exec/tests/utils/AssertQueryBuilder.h"
 #include "velox/exec/tests/utils/HiveConnectorTestBase.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
 #include "velox/exec/tests/utils/SumNonPODAggregate.h"
-#include "velox/exec/tests/utils/TempFilePath.h"
+
+using namespace facebook::velox::common::testutil;
 
 namespace facebook::velox::exec {
 namespace {
 
 using namespace facebook::velox::exec::test;
 
-class StreamingAggregationTest : public HiveConnectorTestBase,
-                                 public testing::WithParamInterface<int32_t> {
+struct TestParams {
+  int32_t streamingMinOutputBatchSize;
+  uint64_t preferredOutputBatchBytes;
+};
+
+class StreamingAggregationTest
+    : public HiveConnectorTestBase,
+      public testing::WithParamInterface<TestParams> {
  protected:
   void SetUp() override {
     HiveConnectorTestBase::SetUp();
@@ -36,7 +47,11 @@ class StreamingAggregationTest : public HiveConnectorTestBase,
   }
 
   int32_t flushRows() {
-    return GetParam();
+    return GetParam().streamingMinOutputBatchSize;
+  }
+
+  uint64_t preferredOutputBatchBytes() {
+    return GetParam().preferredOutputBatchBytes;
   }
 
   AssertQueryBuilder& config(
@@ -48,7 +63,10 @@ class StreamingAggregationTest : public HiveConnectorTestBase,
             std::to_string(outputBatchSize))
         .config(
             core::QueryConfig::kStreamingAggregationMinOutputBatchRows,
-            std::to_string(flushRows()));
+            std::to_string(flushRows()))
+        .config(
+            core::QueryConfig::kPreferredOutputBatchBytes,
+            std::to_string(preferredOutputBatchBytes()));
   }
 
   void testAggregation(
@@ -156,8 +174,9 @@ class StreamingAggregationTest : public HiveConnectorTestBase,
     core::PlanNodeId aggregationNodeId;
     auto plan = PlanBuilder(planNodeIdGenerator)
                     .startTableScan()
-                    .outputType(std::dynamic_pointer_cast<const RowType>(
-                        inputVectors[0]->type()))
+                    .outputType(
+                        std::dynamic_pointer_cast<const RowType>(
+                            inputVectors[0]->type()))
                     .endTableScan()
                     .streamingAggregation(
                         {"c0"},
@@ -170,20 +189,34 @@ class StreamingAggregationTest : public HiveConnectorTestBase,
                     .capturePlanNodeId(aggregationNodeId)
                     .planNode();
 
-    for (const auto barrierExecution : {false, true}) {
-      SCOPED_TRACE(fmt::format("barrierExecution {}", barrierExecution));
+    struct {
+      bool hasBarrier;
+      bool serialExecution;
+
+      std::string toString() const {
+        return fmt::format(
+            "hasBarrier: {}, serialExecution: {}", hasBarrier, serialExecution);
+      }
+    } testSettings[] = {
+        {false, false},
+        {false, true},
+        {true, false},
+        {true, true},
+    };
+    for (const auto& testData : testSettings) {
+      SCOPED_TRACE(testData.toString());
       auto task =
           AssertQueryBuilder(plan, duckDbQueryRunner_)
               .splits(makeHiveConnectorSplits(tempFiles))
-              .serialExecution(true)
-              .barrierExecution(barrierExecution)
+              .serialExecution(testData.serialExecution)
+              .barrierExecution(testData.hasBarrier)
               .config(
                   core::QueryConfig::kPreferredOutputBatchRows,
                   std::to_string(outputBatchSize))
               .assertResults(
                   "SELECT c0, max(c1 order by c2), max(c1 order by c2 desc), array_agg(c1 order by c2) FROM tmp GROUP BY c0");
       const auto taskStats = task->taskStats();
-      ASSERT_EQ(taskStats.numBarriers, barrierExecution ? numSplits : 0);
+      ASSERT_EQ(taskStats.numBarriers, testData.hasBarrier ? numSplits : 0);
       ASSERT_EQ(taskStats.numFinishedSplits, numSplits);
       ASSERT_EQ(
           velox::exec::toPlanStats(taskStats)
@@ -251,8 +284,9 @@ class StreamingAggregationTest : public HiveConnectorTestBase,
       core::PlanNodeId aggregationNodeId;
       auto plan = PlanBuilder(planNodeIdGenerator)
                       .startTableScan()
-                      .outputType(std::dynamic_pointer_cast<const RowType>(
-                          inputVectors[0]->type()))
+                      .outputType(
+                          std::dynamic_pointer_cast<const RowType>(
+                              inputVectors[0]->type()))
                       .endTableScan()
                       .streamingAggregation(
                           {"c0"},
@@ -265,13 +299,30 @@ class StreamingAggregationTest : public HiveConnectorTestBase,
                           false)
                       .capturePlanNodeId(aggregationNodeId)
                       .planNode();
-      for (const auto barrierExecution : {false, true}) {
-        SCOPED_TRACE(fmt::format("barrierExecution {}", barrierExecution));
+      struct {
+        bool hasBarrier;
+        bool serialExecution;
+
+        std::string toString() const {
+          return fmt::format(
+              "hasBarrier: {}, serialExecution: {}",
+              hasBarrier,
+              serialExecution);
+        }
+      } testSettings[] = {
+          {false, true},
+          {false, false},
+          {true, true},
+          {true, false},
+      };
+      for (const auto& testData : testSettings) {
+        SCOPED_TRACE(testData.toString());
         auto task =
             AssertQueryBuilder(plan, duckDbQueryRunner_)
                 .splits(makeHiveConnectorSplits(tempFiles))
-                .serialExecution(true)
-                .barrierExecution(barrierExecution)
+                .serialExecution(testData.serialExecution)
+                .barrierExecution(testData.hasBarrier)
+                .maxDrivers(testData.serialExecution ? 1 : 3)
                 .config(
                     core::QueryConfig::kPreferredOutputBatchRows,
                     std::to_string(outputBatchSize))
@@ -279,7 +330,7 @@ class StreamingAggregationTest : public HiveConnectorTestBase,
                     "SELECT c0, array_agg(distinct c1), array_agg(c1 order by c2), "
                     "count(distinct c1), array_agg(c2) FROM tmp GROUP BY c0");
         const auto taskStats = task->taskStats();
-        ASSERT_EQ(taskStats.numBarriers, barrierExecution ? numSplits : 0);
+        ASSERT_EQ(taskStats.numBarriers, testData.hasBarrier ? numSplits : 0);
         ASSERT_EQ(taskStats.numFinishedSplits, numSplits);
         ASSERT_EQ(
             velox::exec::toPlanStats(taskStats)
@@ -294,8 +345,9 @@ class StreamingAggregationTest : public HiveConnectorTestBase,
       auto plan =
           PlanBuilder(planNodeIdGenerator)
               .startTableScan()
-              .outputType(std::dynamic_pointer_cast<const RowType>(
-                  inputVectors[0]->type()))
+              .outputType(
+                  std::dynamic_pointer_cast<const RowType>(
+                      inputVectors[0]->type()))
               .endTableScan()
               .streamingAggregation(
                   {"c0"}, {}, {}, core::AggregationNode::Step::kSingle, false)
@@ -500,8 +552,9 @@ class StreamingAggregationTest : public HiveConnectorTestBase,
       auto plan =
           PlanBuilder(planNodeIdGenerator)
               .startTableScan()
-              .outputType(std::dynamic_pointer_cast<const RowType>(
-                  inputVectors[0]->type()))
+              .outputType(
+                  std::dynamic_pointer_cast<const RowType>(
+                      inputVectors[0]->type()))
               .endTableScan()
               .streamingAggregation(
                   keys[0]->type()->asRow().names(),
@@ -524,18 +577,34 @@ class StreamingAggregationTest : public HiveConnectorTestBase,
           keySql.str(),
           keySql.str());
 
-      for (const auto barrierExecution : {false, true}) {
-        SCOPED_TRACE(fmt::format("barrierExecution {}", barrierExecution));
+      struct {
+        bool hasBarrier;
+        bool serialExecution;
+
+        std::string toString() const {
+          return fmt::format(
+              "hasBarrier: {}, serialExecution: {}",
+              hasBarrier,
+              serialExecution);
+        }
+      } testSettings[] = {
+          {false, false},
+          {false, true},
+          {true, false},
+          {true, true},
+      };
+      for (const auto& testData : testSettings) {
+        SCOPED_TRACE(testData.toString());
         auto task = AssertQueryBuilder(plan, duckDbQueryRunner_)
                         .splits(makeHiveConnectorSplits(tempFiles))
-                        .serialExecution(true)
-                        .barrierExecution(barrierExecution)
+                        .serialExecution(testData.serialExecution)
+                        .barrierExecution(testData.hasBarrier)
                         .config(
                             core::QueryConfig::kPreferredOutputBatchRows,
                             std::to_string(outputBatchSize))
                         .assertResults(sql);
         const auto taskStats = task->taskStats();
-        ASSERT_EQ(taskStats.numBarriers, barrierExecution ? numSplits : 0);
+        ASSERT_EQ(taskStats.numBarriers, testData.hasBarrier ? numSplits : 0);
         ASSERT_EQ(taskStats.numFinishedSplits, numSplits);
         EXPECT_EQ(NonPODInt64::constructed, NonPODInt64::destructed);
       }
@@ -545,8 +614,9 @@ class StreamingAggregationTest : public HiveConnectorTestBase,
       core::PlanNodeId aggregationNodeId;
       auto plan = PlanBuilder(planNodeIdGenerator)
                       .startTableScan()
-                      .outputType(std::dynamic_pointer_cast<const RowType>(
-                          inputVectors[0]->type()))
+                      .outputType(
+                          std::dynamic_pointer_cast<const RowType>(
+                              inputVectors[0]->type()))
                       .endTableScan()
                       .streamingAggregation(
                           keys[0]->type()->asRow().names(),
@@ -566,18 +636,34 @@ class StreamingAggregationTest : public HiveConnectorTestBase,
 
       const auto sql = fmt::format("SELECT distinct {} FROM tmp", keySql.str());
 
-      for (const auto barrierExecution : {false, true}) {
-        SCOPED_TRACE(fmt::format("barrierExecution {}", barrierExecution));
+      struct {
+        bool hasBarrier;
+        bool serialExecution;
+
+        std::string toString() const {
+          return fmt::format(
+              "hasBarrier: {}, serialExecution: {}",
+              hasBarrier,
+              serialExecution);
+        }
+      } testSettings[] = {
+          {false, false},
+          {false, true},
+          {true, false},
+          {true, true},
+      };
+      for (const auto& testData : testSettings) {
+        SCOPED_TRACE(testData.toString());
         auto task = AssertQueryBuilder(plan, duckDbQueryRunner_)
                         .splits(makeHiveConnectorSplits(tempFiles))
-                        .serialExecution(true)
-                        .barrierExecution(barrierExecution)
+                        .serialExecution(testData.serialExecution)
+                        .barrierExecution(testData.hasBarrier)
                         .config(
                             core::QueryConfig::kPreferredOutputBatchRows,
                             std::to_string(outputBatchSize))
                         .assertResults(sql);
         const auto taskStats = task->taskStats();
-        ASSERT_EQ(taskStats.numBarriers, barrierExecution ? numSplits : 0);
+        ASSERT_EQ(taskStats.numBarriers, testData.hasBarrier ? numSplits : 0);
         ASSERT_EQ(taskStats.numFinishedSplits, numSplits);
         EXPECT_EQ(NonPODInt64::constructed, NonPODInt64::destructed);
       }
@@ -588,13 +674,32 @@ class StreamingAggregationTest : public HiveConnectorTestBase,
 VELOX_INSTANTIATE_TEST_SUITE_P(
     StreamingAggregationTest,
     StreamingAggregationTest,
-    testing::ValuesIn({0, 1, 64, std::numeric_limits<int32_t>::max()}),
-    [](const testing::TestParamInfo<int32_t>& info) {
+    testing::Values(
+        TestParams{0, 1},
+        TestParams{0, 1024},
+        TestParams{0, std::numeric_limits<uint64_t>::max()},
+        TestParams{1, 1},
+        TestParams{1, 1024},
+        TestParams{1, std::numeric_limits<uint64_t>::max()},
+        TestParams{64, 1},
+        TestParams{64, 1024},
+        TestParams{64, std::numeric_limits<uint64_t>::max()},
+        TestParams{std::numeric_limits<int32_t>::max(), 1},
+        TestParams{std::numeric_limits<int32_t>::max(), 1024},
+        TestParams{
+            std::numeric_limits<int32_t>::max(),
+            std::numeric_limits<uint64_t>::max()}),
+    [](const testing::TestParamInfo<TestParams>& info) {
       return fmt::format(
-          "streamingMinOutputBatchSize_{}",
-          info.param == std::numeric_limits<int32_t>::max()
+          "streamingMinOutputBatchSize_{}_preferredOutputBatchBytes_{}",
+          info.param.streamingMinOutputBatchSize ==
+                  std::numeric_limits<int32_t>::max()
               ? "inf"
-              : std::to_string(info.param));
+              : std::to_string(info.param.streamingMinOutputBatchSize),
+          info.param.preferredOutputBatchBytes ==
+                  std::numeric_limits<uint64_t>::max()
+              ? "inf"
+              : std::to_string(info.param.preferredOutputBatchBytes));
     });
 
 TEST_P(StreamingAggregationTest, smallInputBatches) {
@@ -1036,16 +1141,17 @@ TEST_P(StreamingAggregationTest, clusteredInputWithBarrier) {
 
   auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
   core::PlanNodeId streamingAggregationNodeId;
-  auto plan = PlanBuilder(planNodeIdGenerator)
-                  .startTableScan()
-                  .outputType(std::dynamic_pointer_cast<const RowType>(
-                      inputVectors[0]->type()))
-                  .endTableScan()
-                  .partialStreamingAggregation(
-                      {"c0"}, {"count(c1)", "arbitrary(c1)", "array_agg(c1)"})
-                  .capturePlanNodeId(streamingAggregationNodeId)
-                  .finalAggregation()
-                  .planNode();
+  auto plan =
+      PlanBuilder(planNodeIdGenerator)
+          .startTableScan()
+          .outputType(
+              std::dynamic_pointer_cast<const RowType>(inputVectors[0]->type()))
+          .endTableScan()
+          .partialStreamingAggregation(
+              {"c0"}, {"count(c1)", "arbitrary(c1)", "array_agg(c1)"})
+          .capturePlanNodeId(streamingAggregationNodeId)
+          .finalAggregation()
+          .planNode();
   const auto expected = makeRowVector(
       {makeNullableFlatVector<int32_t>(
            {1, 2, std::nullopt, 3, 4, 9, 10, 11, 12, 17, 18, 19}),
@@ -1135,6 +1241,166 @@ TEST_P(StreamingAggregationTest, constantInput) {
   });
   config(AssertQueryBuilder(plan), 1).assertResults(expected);
   config(AssertQueryBuilder(plan), 10).assertResults(expected);
+}
+
+TEST_P(StreamingAggregationTest, preferredOutputBatchBytes) {
+  // Use grouping keys that span one or more batches.
+  std::vector<VectorPtr> keys = {
+      makeNullableFlatVector<int32_t>({1, 1, std::nullopt, 2, 2}),
+      makeFlatVector<int32_t>({2, 3, 3, 4}),
+      makeFlatVector<int32_t>({5, 6, 6, 6}),
+      makeFlatVector<int32_t>({6, 6, 6, 6}),
+      makeFlatVector<int32_t>({6, 7, 8}),
+  };
+
+  auto data = addPayload(keys, 1);
+
+  auto plan = PlanBuilder()
+                  .values(data)
+                  .partialStreamingAggregation(
+                      {"c0"},
+                      {"count(1)",
+                       "min(c1)",
+                       "max(c1)",
+                       "sum(c1)",
+                       "sumnonpod(1)",
+                       "sum(cast(NULL as INT))"})
+                  .finalAggregation()
+                  .planNode();
+
+  auto results =
+      config(AssertQueryBuilder(plan), 1024).copyResultBatches(pool_.get());
+
+  // If streamingMinOutputBatchSize is set to 1, we expect an output batch for:
+  // {1, NULL}, {2}, {3, 4}, {5}, {6}, {7, 8}.
+  // Otherwise, we expect the output batches to be determined by
+  // preferredOutputBatchBytes.
+  size_t expectedOutputBatches;
+  if (GetParam().streamingMinOutputBatchSize == 1) {
+    expectedOutputBatches = 6;
+  } else if (GetParam().preferredOutputBatchBytes == 1) {
+    expectedOutputBatches = 5;
+  } else if (GetParam().preferredOutputBatchBytes == 1024) {
+    expectedOutputBatches = 2;
+  } else {
+    ASSERT_EQ(
+        GetParam().preferredOutputBatchBytes,
+        std::numeric_limits<uint64_t>::max());
+    expectedOutputBatches = 1;
+  }
+
+  ASSERT_EQ(results.size(), expectedOutputBatches);
+}
+
+TEST_F(StreamingAggregationTest, noGroupsSpanBatchesSingleGroup) {
+  // Create input batches where each batch has exactly one unique group.
+  // This tests the corner case where numGroups_ == 1 and noGroupsSpanBatches_
+  // is true.
+  std::vector<VectorPtr> keys = {
+      makeFlatVector<int32_t>({1, 1, 1, 1}),
+      makeFlatVector<int32_t>({2, 2, 2, 2}),
+      makeFlatVector<int32_t>({3, 3, 3, 3}),
+  };
+
+  auto data = addPayload(keys, 1);
+  createDuckDbTable(data);
+
+  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+  core::PlanNodeId aggregationNodeId;
+  auto plan = PlanBuilder(planNodeIdGenerator)
+                  .values(data)
+                  .streamingAggregation(
+                      {"c0"},
+                      {"count(1)", "sum(c1)"},
+                      {},
+                      core::AggregationNode::Step::kSingle,
+                      /*ignoreNullKeys=*/false,
+                      /*noGroupsSpanBatches=*/true)
+                  .capturePlanNodeId(aggregationNodeId)
+                  .planNode();
+
+  auto task =
+      AssertQueryBuilder(plan, duckDbQueryRunner_)
+          .config(
+              core::QueryConfig::kStreamingAggregationMinOutputBatchRows,
+              std::to_string(1))
+          .assertResults("SELECT c0, count(1), sum(c1) FROM tmp GROUP BY c0");
+
+  // Verify the number of output batches matches the number of input batches
+  // because each batch contains a single group that should be output
+  // immediately.
+  const auto taskStats = task->taskStats();
+  ASSERT_EQ(
+      velox::exec::toPlanStats(taskStats).at(aggregationNodeId).outputVectors,
+      keys.size());
+}
+
+// Tests that when noGroupsSpanBatches is set, the number of output batches
+// matches the number of input batches when minOutputBatchRows is set to 1.
+// When minOutputBatchRows is set to an extremely large value, we expect a
+// single output batch.
+TEST_F(StreamingAggregationTest, noGroupsSpanBatches) {
+  // Create input batches where no group spans across batches.
+  // Each batch has unique grouping keys that don't appear in other batches.
+  std::vector<VectorPtr> keys = {
+      makeFlatVector<int32_t>({1, 1, 2, 2}),
+      makeFlatVector<int32_t>({3, 3, 4, 4}),
+      makeFlatVector<int32_t>({5, 5, 6, 6}),
+      makeFlatVector<int32_t>({7, 7, 8, 8}),
+      makeFlatVector<int32_t>({9, 9, 10, 10}),
+  };
+
+  auto data = addPayload(keys, 1);
+  createDuckDbTable(data);
+
+  struct {
+    int32_t minOutputBatchRows;
+    size_t expectedOutputBatches;
+
+    std::string debugString() const {
+      return fmt::format(
+          "minOutputBatchRows={}, expectedOutputBatches={}",
+          minOutputBatchRows,
+          expectedOutputBatches);
+    }
+  } testSettings[] = {
+      // Regardless of the value of minOutputBatchRows, each input batch
+      // produces an output batch.
+      // We do not respect minOutputBatchRows when noGroupsSpanBatches is set.
+      {1, keys.size()},
+      {std::numeric_limits<int32_t>::max(), keys.size()},
+  };
+
+  for (const auto& testData : testSettings) {
+    SCOPED_TRACE(testData.debugString());
+
+    auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+    core::PlanNodeId aggregationNodeId;
+    auto plan = PlanBuilder(planNodeIdGenerator)
+                    .values(data)
+                    .streamingAggregation(
+                        {"c0"},
+                        {"count(1)", "sum(c1)"},
+                        {},
+                        core::AggregationNode::Step::kSingle,
+                        /*ignoreNullKeys=*/false,
+                        /*noGroupsSpanBatches=*/true)
+                    .capturePlanNodeId(aggregationNodeId)
+                    .planNode();
+
+    auto task =
+        AssertQueryBuilder(plan, duckDbQueryRunner_)
+            .config(
+                core::QueryConfig::kStreamingAggregationMinOutputBatchRows,
+                std::to_string(testData.minOutputBatchRows))
+            .assertResults("SELECT c0, count(1), sum(c1) FROM tmp GROUP BY c0");
+
+    // Verify the number of output batches.
+    const auto taskStats = task->taskStats();
+    ASSERT_EQ(
+        velox::exec::toPlanStats(taskStats).at(aggregationNodeId).outputVectors,
+        testData.expectedOutputBatches);
+  }
 }
 
 namespace {
@@ -1286,5 +1552,41 @@ TEST_P(StreamingAggregationTest, needsInputWhenSplitOutput) {
       velox::exec::toPlanStats(taskStats).at(aggregationNodeId).outputVectors,
       9);
 }
+// Verify that during createOutput, the aggregation state is destroyed.
+DEBUG_ONLY_TEST_P(StreamingAggregationTest, singleAggregationCleansState) {
+  auto size = 1'000;
+
+  VectorPtr keys =
+      makeFlatVector<int32_t>(size, [](auto row) { return row / 10; });
+
+  auto data = addPayload({keys, keys, keys, keys}, 1);
+
+  bool checkedAtLeastOnce = false;
+  SCOPED_TESTVALUE_SET(
+      "facebook::velox::exec::StreamingAggregation::createOutput",
+      std::function<void(StreamingAggregation*)>([&](StreamingAggregation*) {
+        checkedAtLeastOnce = true;
+        EXPECT_GT(NonPODInt64::destructed, 0);
+      }));
+
+  auto plan = PlanBuilder()
+                  .values(data)
+                  .streamingAggregation(
+                      {"c0"},
+                      {"sumnonpod(1)"},
+                      {},
+                      core::AggregationNode::Step::kSingle,
+                      false,
+                      true /* noGroupsSpanBatches */)
+                  .planNode();
+
+  config(AssertQueryBuilder(plan), 100).copyResults(pool());
+
+  EXPECT_TRUE(checkedAtLeastOnce)
+      << "TestValue callback was never invoked; createOutput may not have "
+         "been called";
+  EXPECT_EQ(NonPODInt64::constructed, NonPODInt64::destructed);
+}
+
 } // namespace
 } // namespace facebook::velox::exec

@@ -17,13 +17,14 @@
 #include <gtest/gtest.h>
 #include <array>
 #include "velox/common/base/tests/GTestUtils.h"
+#include "velox/common/geospatial/GeometryConstants.h"
 #include "velox/common/testutil/OptionalEmpty.h"
-#include "velox/dwio/common/tests/utils/DataFiles.h"
+#include "velox/functions/prestosql/tests/resources/GeometryTestUtils.h"
 #include "velox/functions/prestosql/tests/utils/FunctionBaseTest.h"
-#include "velox/functions/prestosql/types/BingTileType.h"
 
 using facebook::velox::functions::test::FunctionBaseTest;
 using namespace facebook::velox;
+using namespace facebook::velox::common::geospatial;
 
 class GeometryFunctionsTest : public FunctionBaseTest {
  public:
@@ -108,6 +109,33 @@ class GeometryFunctionsTest : public FunctionBaseTest {
       std::optional<std::string> input) {
     auto vec = makeNullableFlatVector<std::string>({input});
     return makeRowVector({vec});
+  }
+
+  bool aboutEquals(double a, double b) {
+    double diff = std::abs(a - b);
+    double scale = std::max(std::abs(a), std::abs(b));
+    return diff <= std::max(1e-5, 1e-5 * scale);
+  }
+
+  // Generic helper for testing geometry functions that return a result of type
+  // T. Builds the expression as funcName(ST_GeometryFromText(c0)), or
+  // ST_AsText(funcName(ST_GeometryFromText(c0))) when wrapWithAsText is true.
+  template <typename T>
+  void assertResult(
+      const std::string& funcName,
+      const std::optional<std::string>& wkt,
+      const std::optional<T>& expected,
+      bool wrapWithAsText = false) {
+    std::string expr = wrapWithAsText
+        ? "ST_AsText(" + funcName + "(ST_GeometryFromText(c0)))"
+        : funcName + "(ST_GeometryFromText(c0))";
+    std::optional<T> result = evaluateOnce<T>(expr, wkt);
+    if (expected.has_value()) {
+      ASSERT_TRUE(result.has_value());
+      ASSERT_EQ(result.value(), expected.value());
+    } else {
+      ASSERT_FALSE(result.has_value());
+    }
   }
 };
 
@@ -212,6 +240,11 @@ TEST_F(GeometryFunctionsTest, wktAndWkb) {
         "to_hex(ST_AsBinary(ST_GeomFromBinary(from_hex(c0))))", wkt);
   };
 
+  const auto wktRoundTripSpherical = [&](const std::optional<std::string>& a) {
+    return evaluateOnce<std::string>(
+        "ST_AsText(to_spherical_geography(ST_GeometryFromText(c0)))", a);
+  };
+
   const std::vector<std::string> wkts = {
       "POINT (1 2)",
       "LINESTRING (0 0, 10 10)",
@@ -244,6 +277,7 @@ TEST_F(GeometryFunctionsTest, wktAndWkb) {
   for (size_t i = 0; i < wkts.size(); i++) {
     assert(i < wkbs.size() && i < bigEndianWkbs.size());
     EXPECT_EQ(wkts[i], wktRoundTrip(wkts[i]));
+    EXPECT_EQ(wkts[i], wktRoundTripSpherical(wkts[i]));
     EXPECT_EQ(wkbs[i], wktToWkb(wkts[i]));
     EXPECT_EQ(wkts[i], wkbToWkT(wkbs[i]));
     EXPECT_EQ(wkbs[i], wkbRoundTrip(wkbs[i]));
@@ -273,10 +307,14 @@ TEST_F(GeometryFunctionsTest, wktAndWkb) {
   for (size_t i = 0; i < emptyGeometryWkts.size(); i++) {
     assert(i < emptyGeometryWkbs.size());
     EXPECT_EQ(wktRoundTrip(emptyGeometryWkts[i]), emptyGeometryWkts[i]);
+    EXPECT_EQ(
+        wktRoundTripSpherical(emptyGeometryWkts[i]), emptyGeometryWkts[i]);
     EXPECT_EQ(emptyGeometryWkbs[i], wktToWkb(emptyGeometryWkts[i]));
     EXPECT_EQ(emptyGeometryWkts[i], wkbToWkT(emptyGeometryWkbs[i]));
     EXPECT_EQ(emptyGeometryWkbs[i], wkbRoundTrip(emptyGeometryWkbs[i]));
   }
+  wktRoundTrip(
+      "POLYGON ((73.3644 -53.0331, 73.3652 -53.0327, 73.3661 -53.0327, 73.3677 -53.0323, 73.3686 -53.0324, 73.3691 -53.0326, 73.3698 -53.0333, 73.3699 -53.0342, 73.3692 -53.0346, 73.3695 -53.0348, 73.3698 -53.0344, 73.3707 -53.0345, 73.3713 -53.034, 73.3718 -53.0339, 73.3722 -53.0329, 73.3713 -53.0323, 73.3711 -53.0319, 73.3701 -53.0311, 73.3685 -53.0305, 73.3666 -53.0302, 73.366 -53.0299, 73.3655 -53.03, 73.3653 -53.0304, 73.3646 -53.031, 73.3636 -53.0308, 73.363 -53.0311, 73.3629 -53.0313, 73.3627 -53.0316, 73.3619 -53.0315, 73.3611 -53.0318, 73.3611 -53.0322, 73.3606 -53.0327, 73.3601 -53.0326, 73.3603 -53.0316, 73.361 -53.0312, 73.3617 -53.0311, 73.362 -53.0308, 73.3625 -53.0307, 73.3646 -53.03, 73.3656 -53.0293, 73.3669 -53.0293, 73.3684 -53.0301, 73.3701 -53.0304, 73.3705 -53.0298, 73.3711 -53.0293, 73.3712 -53.029, 73.3717 -53.0287, 73.3717 -53.0284, 73.3722 -53.0278, 73.3722 -53.0271, 73.3721 -53.0268, 73.3718 -53.0267, 73.3719 -53.0263, 73.373 -53.0266, 73.3735 -53.0273, 73.3761 -53.0272, 73.3765 -53.0274, 73.377 -53.0272, 73.3781 -53.0272, 73.3792 -53.0267, 73.3798 -53.0266, 73.3801 -53.0264, 73.3806 -53.0263, 73.3808 -53.0257, 73.3811 -53.0256, 73.3815 -53.0257, 73.3815 -53.0275, 73.3818 -53.0277, 73.3817 -53.028, 73.382 -53.0282, 73.382 -53.0284, 73.3815 -53.0287, 73.3825 -53.0288, 73.3831 -53.0284, 73.3839 -53.0286, 73.3847 -53.0284, 73.3854 -53.0285, 73.3872 -53.028, 73.3879 -53.0276, 73.3887 -53.0275, 73.3892 -53.0272, 73.3897 -53.0272, 73.3908 -53.0265, 73.3912 -53.0265, 73.3915 -53.0263, 73.3919 -53.0265, 73.3918 -53.027, 73.3911 -53.0275, 73.3905 -53.0276, 73.3905 -53.0278, 73.3901 -53.0279, 73.3902 -53.0282, 73.3898 -53.0285, 73.3885 -53.0287, 73.3874 -53.0291, 73.3874 -53.0293, 73.3872 -53.0294, 73.3862 -53.0292, 73.3839 -53.0293, 73.3836 -53.0291, 73.3832 -53.0294, 73.3836 -53.0298, 73.3843 -53.0297, 73.3847 -53.0299, 73.3849 -53.0296, 73.3853 -53.0296, 73.3858 -53.0299, 73.3862 -53.0299, 73.3861 -53.0295, 73.3866 -53.0293, 73.3868 -53.0294, 73.3869 -53.0296, 73.3866 -53.0299, 73.3863 -53.0299, 73.3865 -53.03, 73.3874 -53.0298, 73.388 -53.0298, 73.3882 -53.0293, 73.3891 -53.0292, 73.3898 -53.0292, 73.39 -53.0291, 73.39 -53.0288, 73.3903 -53.0286, 73.3908 -53.0285, 73.391 -53.0281, 73.3914 -53.028, 73.3923 -53.0284, 73.3923 -53.0292, 73.3926 -53.0294, 73.3926 -53.0296, 73.3922 -53.0297, 73.3916 -53.0303, 73.3916 -53.0306, 73.392 -53.0309, 73.3936 -53.0309, 73.3941 -53.0307, 73.3946 -53.031, 73.3947 -53.0308, 73.3951 -53.0307, 73.3954 -53.0309, 73.3952 -53.0312, 73.3955 -53.0313, 73.3965 -53.0316, 73.3977 -53.0317, 73.3979 -53.0313, 73.3977 -53.0309, 73.3972 -53.0307, 73.3968 -53.0301, 73.3962 -53.0297, 73.396 -53.029, 73.3951 -53.029, 73.3947 -53.0286, 73.3933 -53.0282, 73.393 -53.028, 73.3929 -53.0276, 73.3922 -53.0271, 73.3923 -53.0265, 73.3921 -53.0261, 73.3923 -53.0259, 73.3923 -53.0253, 73.3928 -53.0249, 73.3931 -53.024, 73.393 -53.0235, 73.3933 -53.023, 73.3931 -53.0228, 73.3931 -53.0222, 73.3937 -53.0221, 73.3928 -53.0218, 73.3925 -53.021, 73.3917 -53.0203, 73.3909 -53.0198, 73.3906 -53.0197, 73.3897 -53.0201, 73.3894 -53.0202, 73.3892 -53.02, 73.3893 -53.0195, 73.3901 -53.0193, 73.3905 -53.019, 73.3913 -53.019, 73.3916 -53.0185, 73.3927 -53.0184, 73.3936 -53.0177, 73.3943 -53.0175, 73.3944 -53.017, 73.3952 -53.0161, 73.3956 -53.016, 73.396 -53.0155, 73.3967 -53.0151, 73.3971 -53.015, 73.3974 -53.0147, 73.3985 -53.0143, 73.3995 -53.0142, 73.4 -53.0143, 73.4002 -53.0147, 73.4006 -53.0147, 73.4008 -53.0145, 73.4007 -53.014, 73.4011 -53.0138, 73.402 -53.0136, 73.4031 -53.0137, 73.404 -53.0132, 73.4054 -53.0133, 73.4063 -53.0138, 73.4071 -53.0135, 73.4078 -53.0137, 73.4083 -53.0136, 73.4084 -53.0131, 73.4087 -53.0129, 73.4093 -53.0129, 73.4106 -53.0132, 73.4116 -53.0128, 73.4118 -53.0122, 73.4109 -53.0121, 73.4104 -53.0117, 73.4104 -53.0114, 73.4109 -53.0108, 73.4118 -53.0106, 73.4118 -53.0103, 73.4114 -53.01, 73.4116 -53.009, 73.412 -53.0087, 73.4129 -53.0089, 73.4131 -53.0086, 73.4134 -53.0083, 73.414 -53.0083, 73.4145 -53.0085, 73.4145 -53.0082, 73.4147 -53.008, 73.4154 -53.008, 73.4158 -53.0085, 73.4157 -53.009, 73.4154 -53.0092, 73.415 -53.0091, 73.4147 -53.0089, 73.4147 -53.009, 73.4155 -53.0095, 73.4156 -53.0112, 73.4158 -53.0114, 73.4159 -53.0122, 73.4167 -53.013, 73.4165 -53.0144, 73.4162 -53.0148, 73.4136 -53.0163, 73.4135 -53.0169, 73.413 -53.0169, 73.4126 -53.0168, 73.4117 -53.0173, 73.41 -53.0184, 73.4085 -53.0198, 73.4085 -53.0204, 73.4083 -53.0207, 73.4085 -53.0209, 73.4085 -53.0212, 73.4092 -53.0222, 73.4102 -53.0231, 73.4105 -53.0235, 73.4104 -53.0237, 73.4097 -53.024, 73.4091 -53.0247, 73.4095 -53.0247, 73.4095 -53.025, 73.4102 -53.025, 73.4101 -53.0253, 73.4097 -53.0254, 73.4098 -53.0259, 73.4103 -53.0263, 73.4106 -53.0263, 73.4102 -53.0256, 73.4103 -53.0251, 73.4109 -53.0251, 73.4112 -53.0247, 73.4123 -53.0248, 73.4131 -53.0254, 73.4137 -53.0255, 73.4142 -53.0258, 73.4149 -53.0258, 73.4152 -53.0263, 73.4162 -53.0262, 73.4164 -53.0265, 73.4169 -53.0264, 73.4173 -53.0267, 73.4186 -53.0268, 73.419 -53.0271, 73.42 -53.0274, 73.4208 -53.0274, 73.4222 -53.0279, 73.4224 -53.0283, 73.4222 -53.0284, 73.4207 -53.0286, 73.4202 -53.029, 73.4203 -53.0294, 73.4211 -53.0296, 73.4212 -53.0301, 73.4201 -53.0311, 73.4184 -53.0318, 73.4178 -53.0318, 73.4175 -53.0316, 73.4167 -53.0318, 73.4161 -53.0325, 73.4149 -53.0325, 73.4144 -53.033, 73.414 -53.0331, 73.4138 -53.0334, 73.414 -53.0336, 73.4148 -53.0334, 73.4151 -53.0336, 73.4146 -53.0353, 73.4153 -53.0362, 73.4152 -53.0377, 73.4155 -53.0379, 73.4155 -53.0382, 73.4153 -53.0401, 73.4134 -53.0412, 73.4109 -53.042, 73.4096 -53.044, 73.4101 -53.0462, 73.4117 -53.0477, 73.4122 -53.0485, 73.4119 -53.0493, 73.4101 -53.0511, 73.4101 -53.0517, 73.4107 -53.0523, 73.4103 -53.0535, 73.4132 -53.0569, 73.4154 -53.0579, 73.4161 -53.0579, 73.4163 -53.0583, 73.4171 -53.0587, 73.423 -53.0615, 73.4235 -53.0618, 73.4237 -53.0621, 73.4246 -53.062, 73.4258 -53.0624, 73.426 -53.0628, 73.4266 -53.0627, 73.427 -53.063, 73.427 -53.0632, 73.4267 -53.0635, 73.4276 -53.0631, 73.4281 -53.0631, 73.4287 -53.0637, 73.4294 -53.0637, 73.4297 -53.0638, 73.4299 -53.0642, 73.4291 -53.0646, 73.429 -53.0651, 73.4286 -53.0652, 73.4285 -53.0657, 73.428 -53.0661, 73.4274 -53.0659, 73.4274 -53.0654, 73.427 -53.0651, 73.4273 -53.0648, 73.4281 -53.0647, 73.4276 -53.0644, 73.4271 -53.0643, 73.427 -53.064, 73.4265 -53.0639, 73.4265 -53.0641, 73.4267 -53.0643, 73.4267 -53.0645, 73.4251 -53.0653, 73.4242 -53.0652, 73.4237 -53.0646, 73.4225 -53.0648, 73.4221 -53.0647, 73.4219 -53.0644, 73.4215 -53.0644, 73.4212 -53.0642, 73.4205 -53.0643, 73.4198 -53.0639, 73.4198 -53.0637, 73.4192 -53.0638, 73.4188 -53.0635, 73.4189 -53.0632, 73.4194 -53.0632, 73.4194 -53.0624, 73.4191 -53.0621, 73.4185 -53.0621, 73.4177 -53.0625, 73.4174 -53.0628, 73.4166 -53.0627, 73.4159 -53.0624, 73.4158 -53.0621, 73.4151 -53.0621, 73.4142 -53.0617, 73.4138 -53.0614, 73.4111 -53.0603, 73.4105 -53.0595, 73.4098 -53.0592, 73.4094 -53.0593, 73.4087 -53.0593, 73.4071 -53.0577, 73.4054 -53.0575, 73.4049 -53.057, 73.4039 -53.0567, 73.4024 -53.0554, 73.4011 -53.0552, 73.4005 -53.0549, 73.3994 -53.0553, 73.3976 -53.0553, 73.3972 -53.055, 73.3963 -53.0549, 73.3962 -53.055, 73.3964 -53.0552, 73.3964 -53.0556, 73.3955 -53.0562, 73.3946 -53.0562, 73.394 -53.0557, 73.3937 -53.0557, 73.3937 -53.0561, 73.3942 -53.0564, 73.3942 -53.0569, 73.3938 -53.0572, 73.3906 -53.0582, 73.3894 -53.0584, 73.3891 -53.0586, 73.3883 -53.0586, 73.3882 -53.0589, 73.3877 -53.0593, 73.3859 -53.0606, 73.3851 -53.0608, 73.3848 -53.0606, 73.3848 -53.0602, 73.385 -53.06, 73.385 -53.0596, 73.3848 -53.0594, 73.384 -53.0591, 73.3836 -53.0595, 73.3834 -53.0615, 73.384 -53.0616, 73.3842 -53.0618, 73.3842 -53.0624, 73.384 -53.0626, 73.3841 -53.0628, 73.3841 -53.0646, 73.384 -53.0648, 73.384 -53.0657, 73.3867 -53.0656, 73.3873 -53.0657, 73.3879 -53.0652, 73.389 -53.0655, 73.3891 -53.0661, 73.3886 -53.0665, 73.3884 -53.0668, 73.3885 -53.0674, 73.3888 -53.0676, 73.3888 -53.0679, 73.3884 -53.0683, 73.3893 -53.0687, 73.3893 -53.0695, 73.3888 -53.0697, 73.3888 -53.0702, 73.389 -53.0703, 73.3896 -53.0703, 73.3901 -53.07, 73.3906 -53.0701, 73.3908 -53.0702, 73.3908 -53.0708, 73.3915 -53.0708, 73.3919 -53.0712, 73.392 -53.0716, 73.3916 -53.0719, 73.3923 -53.0724, 73.3927 -53.0729, 73.3925 -53.0734, 73.3919 -53.0734, 73.3913 -53.0739, 73.3907 -53.074, 73.3904 -53.0744, 73.3893 -53.0748, 73.3885 -53.0748, 73.3883 -53.0753, 73.3872 -53.076, 73.3867 -53.076, 73.3861 -53.0768, 73.3855 -53.0771, 73.3855 -53.0773, 73.3863 -53.0779, 73.3863 -53.079, 73.386 -53.0795, 73.3853 -53.0796, 73.385 -53.0792, 73.3834 -53.0781, 73.3818 -53.0775, 73.3808 -53.0769, 73.3794 -53.0764, 73.3788 -53.0764, 73.3776 -53.0768, 73.3775 -53.0771, 73.3773 -53.0773, 73.3768 -53.0773, 73.3763 -53.0776, 73.3758 -53.0775, 73.3757 -53.0771, 73.3764 -53.0769, 73.3756 -53.0769, 73.3755 -53.0766, 73.3757 -53.0764, 73.3762 -53.0763, 73.3765 -53.0761, 73.3759 -53.0759, 73.3758 -53.0755, 73.375 -53.0751, 73.375 -53.0747, 73.3749 -53.0746, 73.3741 -53.0744, 73.3735 -53.0747, 73.3729 -53.0745, 73.3727 -53.0741, 73.3727 -53.0733, 73.3731 -53.073, 73.3736 -53.0729, 73.3733 -53.0726, 73.3721 -53.0726, 73.3718 -53.0724, 73.3708 -53.0723, 73.3689 -53.0732, 73.367 -53.0737, 73.3654 -53.0738, 73.3645 -53.0738, 73.3638 -53.0743, 73.3638 -53.0748, 73.3625 -53.075, 73.3622 -53.0755, 73.3617 -53.0755, 73.3615 -53.0753, 73.3615 -53.0748, 73.3616 -53.0745, 73.3624 -53.0739, 73.3631 -53.0738, 73.3632 -53.0733, 73.3635 -53.073, 73.3654 -53.0726, 73.368 -53.0724, 73.3689 -53.0718, 73.3723 -53.0711, 73.374 -53.07, 73.3754 -53.0682, 73.3773 -53.0674, 73.3787 -53.0661, 73.3798 -53.0648, 73.3806 -53.0633, 73.3812 -53.0626, 73.3814 -53.062, 73.3819 -53.0614, 73.3817 -53.0609, 73.3818 -53.0604, 73.3816 -53.0597, 73.3818 -53.0592, 73.3824 -53.0587, 73.3824 -53.0581, 73.3827 -53.0579, 73.382 -53.057, 73.3821 -53.0565, 73.3815 -53.0561, 73.3816 -53.0556, 73.3812 -53.0552, 73.3812 -53.0549, 73.3816 -53.0548, 73.3815 -53.0538, 73.3818 -53.0535, 73.3813 -53.0533, 73.3813 -53.0529, 73.3818 -53.0525, 73.3815 -53.0522, 73.3812 -53.0516, 73.3807 -53.052, 73.38 -53.0518, 73.3799 -53.0511, 73.3796 -53.0509, 73.3795 -53.0505, 73.3796 -53.0498, 73.3806 -53.0499, 73.3802 -53.0497, 73.3804 -53.049, 73.3802 -53.0487, 73.3803 -53.0483, 73.3799 -53.0478, 73.3795 -53.0476, 73.3795 -53.0465, 73.3801 -53.0462, 73.3794 -53.046, 73.3786 -53.0453, 73.3779 -53.0454, 73.3777 -53.0453, 73.3778 -53.0451, 73.3774 -53.0451, 73.3773 -53.0454, 73.3769 -53.0454, 73.3768 -53.0451, 73.3772 -53.045, 73.3772 -53.0447, 73.3775 -53.0443, 73.3763 -53.0437, 73.3759 -53.0429, 73.3746 -53.0425, 73.3732 -53.0424, 73.3725 -53.0421, 73.3722 -53.0421, 73.3721 -53.0424, 73.3709 -53.0425, 73.3707 -53.0429, 73.3714 -53.0435, 73.3714 -53.0437, 73.3707 -53.0441, 73.3694 -53.0446, 73.3686 -53.0445, 73.3681 -53.0442, 73.3674 -53.0441, 73.3665 -53.0437, 73.3657 -53.0431, 73.3651 -53.0418, 73.3651 -53.0415, 73.3656 -53.041, 73.3661 -53.0402, 73.3676 -53.0396, 73.3678 -53.0393, 73.3696 -53.0393, 73.3701 -53.0392, 73.3702 -53.0389, 73.3708 -53.0388, 73.371 -53.0384, 73.371 -53.0378, 73.3706 -53.0376, 73.3705 -53.0371, 73.3709 -53.0364, 73.3699 -53.0356, 73.3697 -53.0351, 73.3693 -53.0353, 73.3688 -53.0353, 73.3682 -53.0349, 73.3677 -53.0349, 73.3674 -53.0345, 73.3669 -53.0345, 73.3667 -53.0342, 73.3648 -53.0339, 73.3654 -53.0344, 73.3654 -53.0347, 73.3644 -53.0349, 73.3639 -53.0351, 73.3625 -53.0351, 73.3616 -53.0348, 73.3614 -53.0343, 73.361 -53.0342, 73.3607 -53.0336, 73.3607 -53.0332, 73.3613 -53.0326, 73.3622 -53.0322, 73.3625 -53.0319, 73.363 -53.0319, 73.3633 -53.0321, 73.3632 -53.0327, 73.3634 -53.0329, 73.3634 -53.0334, 73.3643 -53.0333, 73.3644 -53.0331), (73.3938 -53.0223, 73.3938 -53.0222, 73.3937 -53.0221, 73.3938 -53.0222, 73.3938 -53.0223), (73.4095 -53.0252, 73.4094 -53.0253, 73.4095 -53.0253, 73.4095 -53.0253, 73.4095 -53.0252), (73.4162 -53.0267, 73.4163 -53.0267, 73.4163 -53.0266, 73.4162 -53.0267, 73.4162 -53.0267), (73.4259 -53.0629, 73.4259 -53.0631, 73.4263 -53.0632, 73.426 -53.063, 73.4259 -53.0629), (73.3805 -53.0503, 73.3801 -53.0504, 73.3806 -53.0505, 73.3806 -53.0508, 73.3807 -53.0508, 73.3809 -53.0505, 73.3805 -53.0503), (73.3809 -53.0512, 73.3811 -53.0513, 73.3812 -53.0514, 73.3812 -53.0512, 73.3809 -53.0512), (73.3783 -53.045, 73.378 -53.0449, 73.3778 -53.045, 73.378 -53.045, 73.3783 -53.045), (73.3899 -53.0275, 73.39 -53.0274, 73.3899 -53.0274, 73.3899 -53.0275, 73.3899 -53.0275), (73.3962 -53.0287, 73.3965 -53.0286, 73.3965 -53.0284, 73.397 -53.0279, 73.3969 -53.0273, 73.3965 -53.0269, 73.3971 -53.0267, 73.3968 -53.0266, 73.3967 -53.0263, 73.3972 -53.0263, 73.3974 -53.0266, 73.3989 -53.0263, 73.3988 -53.0262, 73.3983 -53.0262, 73.3982 -53.026, 73.3993 -53.0255, 73.3989 -53.025, 73.3987 -53.0249, 73.3986 -53.0253, 73.3978 -53.0255, 73.3976 -53.0254, 73.3976 -53.0252, 73.398 -53.0251, 73.3981 -53.0248, 73.3985 -53.0248, 73.397 -53.0246, 73.3962 -53.0249, 73.3959 -53.0252, 73.396 -53.0265, 73.3957 -53.0267, 73.3953 -53.0267, 73.3938 -53.026, 73.3935 -53.0261, 73.3936 -53.0263, 73.3941 -53.0264, 73.394 -53.0266, 73.3936 -53.0266, 73.3938 -53.0268, 73.3939 -53.0274, 73.395 -53.028, 73.395 -53.0284, 73.3962 -53.0287), (73.3825 -53.0548, 73.3828 -53.0554, 73.3828 -53.0559, 73.3834 -53.0562, 73.3837 -53.0566, 73.384 -53.0567, 73.3845 -53.0565, 73.385 -53.056, 73.3864 -53.055, 73.3871 -53.055, 73.3877 -53.0547, 73.3883 -53.0546, 73.3877 -53.054, 73.3877 -53.0537, 73.3879 -53.0535, 73.3896 -53.0531, 73.3899 -53.0529, 73.3905 -53.0529, 73.3917 -53.0532, 73.3921 -53.0536, 73.3928 -53.0538, 73.3929 -53.0537, 73.393 -53.0534, 73.3936 -53.053, 73.3948 -53.0528, 73.396 -53.053, 73.3968 -53.0526, 73.3981 -53.0526, 73.3985 -53.0525, 73.3982 -53.0522, 73.3985 -53.0513, 73.399 -53.0511, 73.3997 -53.0504, 73.4012 -53.0503, 73.4019 -53.0505, 73.403 -53.0514, 73.403 -53.0525, 73.4029 -53.0527, 73.403 -53.0531, 73.4038 -53.0536, 73.4042 -53.0545, 73.4052 -53.0549, 73.4056 -53.0546, 73.4054 -53.0526, 73.4056 -53.0518, 73.4061 -53.0512, 73.406 -53.0508, 73.4057 -53.0505, 73.4058 -53.05, 73.4054 -53.0497, 73.4054 -53.0493, 73.4048 -53.0487, 73.4048 -53.0483, 73.405 -53.0479, 73.4054 -53.0478, 73.4055 -53.0473, 73.4058 -53.0469, 73.4058 -53.0466, 73.4045 -53.0457, 73.4045 -53.0454, 73.4047 -53.0451, 73.4047 -53.045, 73.4039 -53.045, 73.4036 -53.0453, 73.403 -53.0455, 73.402 -53.0454, 73.4015 -53.0445, 73.4015 -53.0437, 73.4016 -53.0434, 73.4022 -53.0433, 73.4018 -53.043, 73.4015 -53.0429, 73.4011 -53.0432, 73.401 -53.0435, 73.4004 -53.0441, 73.4006 -53.0444, 73.4006 -53.0448, 73.4004 -53.0451, 73.3999 -53.0452, 73.3996 -53.0455, 73.3986 -53.0457, 73.3983 -53.0461, 73.396 -53.0459, 73.3954 -53.0461, 73.3952 -53.0466, 73.3937 -53.047, 73.3932 -53.0478, 73.3924 -53.0481, 73.3926 -53.0484, 73.3926 -53.0487, 73.3923 -53.0491, 73.3918 -53.0493, 73.3915 -53.0496, 73.3907 -53.0499, 73.3902 -53.0502, 73.3892 -53.0504, 73.3884 -53.051, 73.3876 -53.051, 73.3864 -53.0516, 73.3855 -53.0516, 73.3848 -53.052, 73.3845 -53.0524, 73.3843 -53.053, 73.3831 -53.0538, 73.3829 -53.0545, 73.3825 -53.0548))");
 }
 
 // Constructors and accessors
@@ -449,6 +487,7 @@ TEST_F(GeometryFunctionsTest, testStContains) {
       false);
   assertRelation(
       "ST_Contains", "LINESTRING (20 20, 30 30)", "POLYGON EMPTY", false);
+  assertRelation("ST_Contains", "POLYGON EMPTY", "POINT EMPTY", false);
 
   VELOX_ASSERT_USER_THROW(
       assertRelation(
@@ -514,6 +553,13 @@ TEST_F(GeometryFunctionsTest, testStCrosses) {
       "POLYGON ((0 0, 0 4, 4 4, 4 0, 0 0))",
       "LINESTRING (0 0, 0 4, 4 4, 4 0)",
       false);
+  assertRelation("ST_Crosses", "POLYGON EMPTY", "POINT (0 0)", false);
+  assertRelation(
+      "ST_Crosses",
+      "POLYGON ((0 0, 0 4, 4 4, 4 0, 0 0))",
+      "POINT EMPTY",
+      false);
+  assertRelation("ST_Crosses", "POLYGON EMPTY", "POINT EMPTY", false);
 
   VELOX_ASSERT_USER_THROW(
       assertRelation(
@@ -550,6 +596,13 @@ TEST_F(GeometryFunctionsTest, testStDisjoint) {
       "POLYGON ((1 1, 1 3, 3 3, 3 1, 1 1))",
       "POLYGON ((4 4, 4 5, 5 5, 5 4, 4 4))",
       true);
+  assertRelation("ST_Disjoint", "POLYGON EMPTY", "POINT (0 0)", true);
+  assertRelation(
+      "ST_Disjoint",
+      "POLYGON ((0 0, 0 4, 4 4, 4 0, 0 0))",
+      "POINT EMPTY",
+      true);
+  assertRelation("ST_Disjoint", "POLYGON EMPTY", "POINT EMPTY", true);
 
   VELOX_ASSERT_USER_THROW(
       assertRelation(
@@ -590,6 +643,13 @@ TEST_F(GeometryFunctionsTest, testStEquals) {
       "MULTIPOLYGON (((1 1, 1 3, 3 3, 3 1, 1 1)), ((0 0, 0 2, 2 2, 2 0, 0 0)))",
       "POLYGON ((0 1, 3 1, 3 3, 0 3, 0 1))",
       false);
+  assertRelation("ST_Equals", "POLYGON EMPTY", "POINT (0 0)", false);
+  assertRelation(
+      "ST_Equals", "POLYGON ((0 0, 0 4, 4 4, 4 0, 0 0))", "POINT EMPTY", false);
+  // According to DE-9IM spec two empty geoms are not equal, but this is the
+  // current GEOS behavior
+  assertRelation("ST_Equals", "POLYGON EMPTY", "POINT EMPTY", true);
+
   // Invalid geometries.  This test might have to change when upgrading GEOS.
   assertRelation(
       "ST_Equals",
@@ -640,6 +700,13 @@ TEST_F(GeometryFunctionsTest, testStIntersects) {
       "POLYGON ((16.5 54, 16.5 54.1, 16.51 54.1, 16.8 54, 16.5 54))",
       "LINESTRING (16.6667 54.25, 16.8667 54.25)",
       false);
+  assertRelation("ST_Intersects", "POLYGON EMPTY", "POINT (0 0)", false);
+  assertRelation(
+      "ST_Intersects",
+      "POLYGON ((0 0, 0 4, 4 4, 4 0, 0 0))",
+      "POINT EMPTY",
+      false);
+  assertRelation("ST_Intersects", "POLYGON EMPTY", "POINT EMPTY", false);
 
   VELOX_ASSERT_USER_THROW(
       assertRelation(
@@ -694,6 +761,13 @@ TEST_F(GeometryFunctionsTest, testStOverlaps) {
       "POLYGON ((1 1, 1 3, 3 3, 3 1, 1 1))",
       "POLYGON ((4 4, 4 5, 5 5, 5 4, 4 4))",
       false);
+  assertRelation("ST_Overlaps", "POLYGON EMPTY", "POINT (0 0)", false);
+  assertRelation(
+      "ST_Overlaps",
+      "POLYGON ((0 0, 0 4, 4 4, 4 0, 0 0))",
+      "POINT EMPTY",
+      false);
+  assertRelation("ST_Overlaps", "POLYGON EMPTY", "POINT EMPTY", false);
 
   VELOX_ASSERT_USER_THROW(
       assertRelation(
@@ -765,6 +839,13 @@ TEST_F(GeometryFunctionsTest, testStTouches) {
       "POLYGON ((1 1, 1 3, 3 3, 3 1, 1 1))",
       "POLYGON ((3 3, 3 5, 5 5, 5 3, 3 3))",
       true);
+  assertRelation("ST_Touches", "POLYGON EMPTY", "POINT (0 0)", false);
+  assertRelation(
+      "ST_Touches",
+      "POLYGON ((0 0, 0 4, 4 4, 4 0, 0 0))",
+      "POINT EMPTY",
+      false);
+  assertRelation("ST_Touches", "POLYGON EMPTY", "POINT EMPTY", false);
 
   VELOX_ASSERT_USER_THROW(
       assertRelation(
@@ -840,6 +921,10 @@ TEST_F(GeometryFunctionsTest, testStWithin) {
       "POLYGON ((1 1, 1 5, 5 5, 5 1, 1 1))",
       "POLYGON ((0 0, 0 4, 4 4, 4 0, 0 0))",
       false);
+  assertRelation("ST_Within", "POLYGON EMPTY", "POINT (0 0)", false);
+  assertRelation(
+      "ST_Within", "POLYGON ((0 0, 0 4, 4 4, 4 0, 0 0))", "POINT EMPTY", false);
+  assertRelation("ST_Within", "POLYGON EMPTY", "POINT EMPTY", false);
 
   VELOX_ASSERT_USER_THROW(
       assertRelation(
@@ -881,6 +966,22 @@ TEST_F(GeometryFunctionsTest, testStDifference) {
       "MULTIPOLYGON (((1 1, 1 3, 3 3, 3 1, 1 1)), ((0 0, 0 1, 1 1, 1 0, 0 0)))",
       "POLYGON ((0 1, 3 1, 3 3, 0 3, 0 1))",
       "POLYGON ((0 1, 1 1, 1 0, 0 0, 0 1))");
+
+  assertOverlay(
+      "ST_Difference",
+      "POLYGON ((0 1, 1 1, 1 0, 0 0, 0 1))",
+      "POINT EMPTY",
+      "POLYGON ((0 1, 1 1, 1 0, 0 0, 0 1))");
+  assertOverlay(
+      "ST_Difference",
+      "POLYGON EMPTY",
+      "POINT (0 0)",
+      "GEOMETRYCOLLECTION EMPTY");
+  assertOverlay(
+      "ST_Difference",
+      "POLYGON EMPTY",
+      "POINT EMPTY",
+      "GEOMETRYCOLLECTION EMPTY");
 
   ASSERT_THROW(
       assertOverlay(
@@ -930,6 +1031,21 @@ TEST_F(GeometryFunctionsTest, testStIntersection) {
       "POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))",
       "LINESTRING (0 0, 1 -1, 1 2)",
       "GEOMETRYCOLLECTION (LINESTRING (1 1, 1 0), POINT (0 0))");
+  assertOverlay(
+      "ST_Intersection",
+      "POLYGON ((0 1, 1 1, 1 0, 0 0, 0 1))",
+      "POINT EMPTY",
+      "GEOMETRYCOLLECTION EMPTY");
+  assertOverlay(
+      "ST_Intersection",
+      "POLYGON EMPTY",
+      "POINT (0 0)",
+      "GEOMETRYCOLLECTION EMPTY");
+  assertOverlay(
+      "ST_Intersection",
+      "POLYGON EMPTY",
+      "POINT EMPTY",
+      "GEOMETRYCOLLECTION EMPTY");
 
   ASSERT_THROW(
       assertOverlay(
@@ -1231,43 +1347,40 @@ TEST_F(GeometryFunctionsTest, testStIsSimpleValid) {
       "GEOMETRYCOLLECTION (POINT (1 2), POLYGON ((0 0, 0 1, 2 1, 1 1, 1 0, 0 0)))",
       false,
       false);
+  assertStIsValidSimpleFunc(
+      "MULTIPOLYGON (((18.6317421 49.9605785, 18.6318832 49.9607979, 18.6324683 49.9607312, 18.6332842 49.9605658, 18.6332003 49.9603557, 18.6339711 49.9602283, 18.6341994 49.9601905, 18.6343455 49.96016, 18.6344167 49.9601452, 18.6346696 49.9600919, 18.6349643 49.9600567, 18.6352271 49.9601455, 18.6354493 49.9600501, 18.6358024 49.9601071, 18.6358911 49.9600263, 18.6336542 49.9592453, 18.6334794 49.9591838, 18.6337483 49.9581339, 18.6335303 49.9580562, 18.6331284 49.9579122, 18.6324931 49.9576885, 18.6322503 49.9575998, 18.6321381 49.9581593, 18.6321172 49.9582692, 18.6324683 49.9583852, 18.6325255 49.9584004, 18.6327588 49.958489, 18.6324792 49.9588351, 18.6323941 49.9588049, 18.6323261 49.9587807, 18.6320354 49.9586789, 18.6319443 49.9592903, 18.6326731 49.9595648, 18.6331388 49.9594836, 18.6335981 49.959673, 18.6333065 49.9597934, 18.6328096 49.9600844, 18.6330209 49.9601348, 18.633424 49.9602597, 18.6332263 49.960317, 18.6315633 49.9597642, 18.6309331 49.9600741, 18.6317421 49.9605785)), ((18.6298591 49.9606201, 18.6298592 49.96062, 18.6298589 49.9606193, 18.6298591 49.9606201)))",
+      true,
+      true);
+  assertStIsValidSimpleFunc(
+      "MULTIPOLYGON (((18.6317421 49.9605785, 18.6318832 49.9607979, 18.6324683 49.9607312, 18.6332842 49.9605658, 18.6332003 49.9603557, 18.6339711 49.9602283, 18.6341994 49.9601905, 18.6343455 49.96016, 18.6344167 49.9601452, 18.6346696 49.9600919, 18.6349643 49.9600567, 18.6352271 49.9601455, 18.6354493 49.9600501, 18.6358024 49.9601071, 18.6358911 49.9600263, 18.6336542 49.9592453, 18.6334794 49.9591838, 18.6337483 49.9581339, 18.6335303 49.9580562, 18.6331284 49.9579122, 18.6324931 49.9576885, 18.6322503 49.9575998, 18.6321381 49.9581593, 18.6321172 49.9582692, 18.6324683 49.9583852, 18.6325255 49.9584004, 18.6327588 49.958489, 18.6324792 49.9588351, 18.6323941 49.9588049, 18.6323261 49.9587807, 18.6320354 49.9586789, 18.6319443 49.9592903, 18.6326731 49.9595648, 18.6331388 49.9594836, 18.6335981 49.959673, 18.6333065 49.9597934, 18.6328096 49.9600844, 18.6330209 49.9601348, 18.633424 49.9602597, 18.6332263 49.960317, 18.6315633 49.9597642, 18.6309331 49.9600741, 18.6317421 49.9605785)), ((18.6298591 49.9606201, 18.6298592 49.96062, 18.6298592 49.96062, 18.6298591 49.9606201)))",
+      false,
+      false);
 }
 
 TEST_F(GeometryFunctionsTest, testStArea) {
-  const auto testStAreaFunc = [&](std::optional<std::string> wkt,
-                                  std::optional<double> expectedArea) {
-    std::optional<double> result =
-        evaluateOnce<double>("ST_Area(ST_GeometryFromText(c0))", wkt);
-
-    if (wkt.has_value()) {
-      ASSERT_TRUE(result.has_value());
-      ASSERT_TRUE(expectedArea.has_value());
-      ASSERT_EQ(result.value(), expectedArea.value());
-    } else {
-      ASSERT_FALSE(result.has_value());
-    }
-  };
-
-  testStAreaFunc("POLYGON ((2 2, 2 6, 6 6, 6 2, 2 2))", 16.0);
-  testStAreaFunc("POLYGON EMPTY", 0.0);
-  testStAreaFunc("LINESTRING (1 4, 2 5)", 0.0);
-  testStAreaFunc("LINESTRING EMPTY", 0.0);
-  testStAreaFunc("POINT (1 4)", 0.0);
-  testStAreaFunc("POINT EMPTY", 0.0);
-  testStAreaFunc("GEOMETRYCOLLECTION EMPTY", 0.0);
+  assertResult<double>("ST_Area", "POLYGON ((2 2, 2 6, 6 6, 6 2, 2 2))", 16.0);
+  assertResult<double>("ST_Area", "POLYGON EMPTY", 0.0);
+  assertResult<double>("ST_Area", "LINESTRING (1 4, 2 5)", 0.0);
+  assertResult<double>("ST_Area", "LINESTRING EMPTY", 0.0);
+  assertResult<double>("ST_Area", "POINT (1 4)", 0.0);
+  assertResult<double>("ST_Area", "POINT EMPTY", 0.0);
+  assertResult<double>("ST_Area", "GEOMETRYCOLLECTION EMPTY", 0.0);
 
   // Test basic geometry collection. Area is the area of the polygon.
-  testStAreaFunc(
+  assertResult<double>(
+      "ST_Area",
       "GEOMETRYCOLLECTION (POINT (8 8), LINESTRING (5 5, 6 6), POLYGON ((1 1, 3 1, 3 4, 1 4, 1 1)))",
       6.0);
 
   // Test overlapping geometries. Area is the sum of the individual elements
-  testStAreaFunc(
+  assertResult<double>(
+      "ST_Area",
       "GEOMETRYCOLLECTION (POLYGON ((0 0, 2 0, 2 2, 0 2, 0 0)), POLYGON ((1 1, 3 1, 3 3, 1 3, 1 1)))",
       8.0);
 
   // Test nested geometry collection
-  testStAreaFunc(
+  assertResult<double>(
+      "ST_Area",
       "GEOMETRYCOLLECTION (POLYGON ((0 0, 2 0, 2 2, 0 2, 0 0)), POLYGON ((1 1, 3 1, 3 3, 1 3, 1 1)), GEOMETRYCOLLECTION (POINT (8 8), LINESTRING (5 5, 6 6), POLYGON ((1 1, 3 1, 3 4, 1 4, 1 1))))",
       14.0);
 }
@@ -1435,39 +1548,42 @@ TEST_F(GeometryFunctionsTest, testStBoundary) {
 }
 
 TEST_F(GeometryFunctionsTest, testStCentroid) {
-  const auto testStCentroidFunc =
-      [&](const std::optional<std::string>& wkt,
-          const std::optional<std::string>& expected) {
-        std::optional<std::string> result = evaluateOnce<std::string>(
-            "ST_AsText(ST_Centroid(ST_GeometryFromText(c0)))", wkt);
-
-        if (wkt.has_value()) {
-          ASSERT_TRUE(result.has_value());
-          ASSERT_TRUE(expected.has_value());
-          ASSERT_EQ(result.value(), expected.value());
-        } else {
-          ASSERT_FALSE(result.has_value());
-        }
-      };
-
-  testStCentroidFunc("LINESTRING EMPTY", "POINT EMPTY");
-  testStCentroidFunc("POINT (3 5)", "POINT (3 5)");
-  testStCentroidFunc("MULTIPOINT (1 2, 2 4, 3 6, 4 8)", "POINT (2.5 5)");
-  testStCentroidFunc("LINESTRING (1 1, 2 2, 3 3)", "POINT (2 2)");
-  testStCentroidFunc("MULTILINESTRING ((1 1, 5 1), (2 4, 4 4))", "POINT (3 2)");
-  testStCentroidFunc("POLYGON ((1 1, 1 4, 4 4, 4 1, 1 1))", "POINT (2.5 2.5)");
-  testStCentroidFunc("POLYGON ((1 1, 5 1, 3 4, 1 1))", "POINT (3 2)");
-  testStCentroidFunc(
+  assertResult<std::string>(
+      "ST_Centroid", "LINESTRING EMPTY", std::nullopt, true);
+  assertResult<std::string>("ST_Centroid", "POINT (3 5)", "POINT (3 5)", true);
+  assertResult<std::string>(
+      "ST_Centroid", "MULTIPOINT (1 2, 2 4, 3 6, 4 8)", "POINT (2.5 5)", true);
+  assertResult<std::string>(
+      "ST_Centroid", "LINESTRING (1 1, 2 2, 3 3)", "POINT (2 2)", true);
+  assertResult<std::string>(
+      "ST_Centroid",
+      "MULTILINESTRING ((1 1, 5 1), (2 4, 4 4))",
+      "POINT (3 2)",
+      true);
+  assertResult<std::string>(
+      "ST_Centroid",
+      "POLYGON ((1 1, 1 4, 4 4, 4 1, 1 1))",
+      "POINT (2.5 2.5)",
+      true);
+  assertResult<std::string>(
+      "ST_Centroid", "POLYGON ((1 1, 5 1, 3 4, 1 1))", "POINT (3 2)", true);
+  assertResult<std::string>(
+      "ST_Centroid",
       "MULTIPOLYGON (((1 1, 1 3, 3 3, 3 1, 1 1)), ((2 4, 2 6, 6 6, 6 4, 2 4)))",
-      "POINT (3.3333333333333335 4)");
-  testStCentroidFunc(
+      "POINT (3.3333333333333335 4)",
+      true);
+  assertResult<std::string>(
+      "ST_Centroid",
       "POLYGON ((0 0, 0 5, 5 5, 5 0, 0 0), (1 1, 1 2, 2 2, 2 1, 1 1))",
-      "POINT (2.5416666666666665 2.5416666666666665)");
+      "POINT (2.5416666666666665 2.5416666666666665)",
+      true);
 
   VELOX_ASSERT_USER_THROW(
-      testStCentroidFunc(
+      assertResult<std::string>(
+          "ST_Centroid",
           "GEOMETRYCOLLECTION (POLYGON ((0 0, 2 0, 2 2, 0 2, 0 0)), POLYGON ((1 1, 3 1, 3 3, 1 3, 1 1)), GEOMETRYCOLLECTION (POINT (8 8), LINESTRING (5 5, 6 6), POLYGON ((1 1, 3 1, 3 4, 1 4, 1 1))))",
-          std::nullopt),
+          std::nullopt,
+          true),
       "ST_Centroid only applies to Point or MultiPoint or LineString or MultiLineString or Polygon or MultiPolygon. Input type is: GeometryCollection");
 }
 
@@ -1540,39 +1656,37 @@ TEST_F(GeometryFunctionsTest, testSTMax) {
 }
 
 TEST_F(GeometryFunctionsTest, testStGeometryType) {
-  const auto testStGeometryTypeFunc =
-      [&](const std::optional<std::string>& wkt,
-          const std::optional<std::string>& expected) {
-        std::optional<std::string> result = evaluateOnce<std::string>(
-            "ST_GeometryType(ST_GeometryFromText(c0))", wkt);
-
-        if (wkt.has_value()) {
-          ASSERT_TRUE(result.has_value());
-          ASSERT_TRUE(expected.has_value());
-          ASSERT_EQ(result.value(), expected.value());
-        } else {
-          ASSERT_FALSE(result.has_value());
-        }
-      };
-
-  testStGeometryTypeFunc("POINT EMPTY", "ST_Point");
-  testStGeometryTypeFunc("POINT (3 5)", "ST_Point");
-  testStGeometryTypeFunc("LINESTRING EMPTY", "ST_LineString");
-  testStGeometryTypeFunc("LINESTRING (1 1, 2 2, 3 3)", "ST_LineString");
-  testStGeometryTypeFunc("LINEARRING EMPTY", "ST_LineString");
-  testStGeometryTypeFunc("POLYGON EMPTY", "ST_Polygon");
-  testStGeometryTypeFunc("POLYGON ((1 1, 4 1, 1 4, 1 1))", "ST_Polygon");
-  testStGeometryTypeFunc("MULTIPOINT EMPTY", "ST_MultiPoint");
-  testStGeometryTypeFunc("MULTIPOINT (1 2, 2 4, 3 6, 4 8)", "ST_MultiPoint");
-  testStGeometryTypeFunc("MULTILINESTRING EMPTY", "ST_MultiLineString");
-  testStGeometryTypeFunc(
-      "MULTILINESTRING ((1 1, 5 1), (2 4, 4 4))", "ST_MultiLineString");
-  testStGeometryTypeFunc("MULTIPOLYGON EMPTY", "ST_MultiPolygon");
-  testStGeometryTypeFunc(
+  assertResult<std::string>("ST_GeometryType", "POINT EMPTY", "ST_Point");
+  assertResult<std::string>("ST_GeometryType", "POINT (3 5)", "ST_Point");
+  assertResult<std::string>(
+      "ST_GeometryType", "LINESTRING EMPTY", "ST_LineString");
+  assertResult<std::string>(
+      "ST_GeometryType", "LINESTRING (1 1, 2 2, 3 3)", "ST_LineString");
+  assertResult<std::string>(
+      "ST_GeometryType", "LINEARRING EMPTY", "ST_LineString");
+  assertResult<std::string>("ST_GeometryType", "POLYGON EMPTY", "ST_Polygon");
+  assertResult<std::string>(
+      "ST_GeometryType", "POLYGON ((1 1, 4 1, 1 4, 1 1))", "ST_Polygon");
+  assertResult<std::string>(
+      "ST_GeometryType", "MULTIPOINT EMPTY", "ST_MultiPoint");
+  assertResult<std::string>(
+      "ST_GeometryType", "MULTIPOINT (1 2, 2 4, 3 6, 4 8)", "ST_MultiPoint");
+  assertResult<std::string>(
+      "ST_GeometryType", "MULTILINESTRING EMPTY", "ST_MultiLineString");
+  assertResult<std::string>(
+      "ST_GeometryType",
+      "MULTILINESTRING ((1 1, 5 1), (2 4, 4 4))",
+      "ST_MultiLineString");
+  assertResult<std::string>(
+      "ST_GeometryType", "MULTIPOLYGON EMPTY", "ST_MultiPolygon");
+  assertResult<std::string>(
+      "ST_GeometryType",
       "MULTIPOLYGON (((1 1, 1 3, 3 3, 3 1, 1 1)), ((2 4, 2 6, 6 6, 6 4, 2 4)))",
       "ST_MultiPolygon");
-  testStGeometryTypeFunc("GEOMETRYCOLLECTION EMPTY", "ST_GeomCollection");
-  testStGeometryTypeFunc(
+  assertResult<std::string>(
+      "ST_GeometryType", "GEOMETRYCOLLECTION EMPTY", "ST_GeomCollection");
+  assertResult<std::string>(
+      "ST_GeometryType",
       "GEOMETRYCOLLECTION (POLYGON ((0 0, 2 0, 2 2, 0 2, 0 0)), POLYGON ((1 1, 3 1, 3 3, 1 3, 1 1)), GEOMETRYCOLLECTION (POINT (8 8), LINESTRING (5 5, 6 6), POLYGON ((1 1, 3 1, 3 4, 1 4, 1 1))))",
       "ST_GeomCollection");
 }
@@ -1705,92 +1819,47 @@ TEST_F(GeometryFunctionsTest, testStPolygon) {
 }
 
 TEST_F(GeometryFunctionsTest, testStIsClosed) {
-  const auto testStIsClosedFunc = [&](const std::optional<std::string>& wkt,
-                                      const std::optional<bool>& expected) {
-    std::optional<bool> result =
-        evaluateOnce<bool>("ST_IsClosed(ST_GeometryFromText(c0))", wkt);
-
-    if (wkt.has_value()) {
-      ASSERT_TRUE(result.has_value());
-      ASSERT_EQ(result.value(), expected.value());
-    } else {
-      ASSERT_FALSE(result.has_value());
-    }
-  };
-
-  testStIsClosedFunc("LINESTRING (1 1, 2 2, 1 3, 1 1)", true);
-  testStIsClosedFunc("LINESTRING (1 1, 2 2, 1 3)", false);
-  testStIsClosedFunc(
-      "MULTILINESTRING ((1 1, 2 2, 1 3, 1 1), (4 4, 5 5))", false);
-  testStIsClosedFunc(
+  assertResult<bool>("ST_IsClosed", "LINESTRING (1 1, 2 2, 1 3, 1 1)", true);
+  assertResult<bool>("ST_IsClosed", "LINESTRING (1 1, 2 2, 1 3)", false);
+  assertResult<bool>(
+      "ST_IsClosed",
+      "MULTILINESTRING ((1 1, 2 2, 1 3, 1 1), (4 4, 5 5))",
+      false);
+  assertResult<bool>(
+      "ST_IsClosed",
       "MULTILINESTRING ((1 1, 2 2, 1 3, 1 1), (4 4, 5 4, 5 5, 4 5, 4 4))",
       true);
 
   VELOX_ASSERT_USER_THROW(
-      testStIsClosedFunc("POLYGON ((1 1, 1 4, 4 4, 4 1, 1 1))", std::nullopt),
+      assertResult<bool>(
+          "ST_IsClosed", "POLYGON ((1 1, 1 4, 4 4, 4 1, 1 1))", std::nullopt),
       "ST_IsClosed only applies to LineString or MultiLineString. Input type is: Polygon");
 }
 
 TEST_F(GeometryFunctionsTest, testStIsEmpty) {
-  const auto testStIsClosedFunc = [&](const std::optional<std::string>& wkt,
-                                      const std::optional<bool>& expected) {
-    std::optional<bool> result =
-        evaluateOnce<bool>("ST_IsEmpty(ST_GeometryFromText(c0))", wkt);
-
-    if (wkt.has_value()) {
-      ASSERT_TRUE(result.has_value());
-      ASSERT_EQ(result.value(), expected.value());
-    } else {
-      ASSERT_FALSE(result.has_value());
-    }
-  };
-
-  testStIsClosedFunc("POINT (1.5 2.5)", false);
-  testStIsClosedFunc("POLYGON EMPTY", true);
+  assertResult<bool>("ST_IsEmpty", "POINT (1.5 2.5)", false);
+  assertResult<bool>("ST_IsEmpty", "POLYGON EMPTY", true);
 }
 
 TEST_F(GeometryFunctionsTest, testStIsRing) {
-  const auto testStIsRingFunc = [&](const std::optional<std::string>& wkt,
-                                    const std::optional<bool>& expected) {
-    std::optional<bool> result =
-        evaluateOnce<bool>("ST_IsRing(ST_GeometryFromText(c0))", wkt);
-
-    if (wkt.has_value()) {
-      ASSERT_TRUE(result.has_value());
-      ASSERT_EQ(result.value(), expected.value());
-    } else {
-      ASSERT_FALSE(result.has_value());
-    }
-  };
-
-  testStIsRingFunc("LINESTRING (8 4, 4 8)", false);
-  testStIsRingFunc("LINESTRING (0 0, 1 1, 0 2, 0 0)", true);
+  assertResult<bool>("ST_IsRing", "LINESTRING (8 4, 4 8)", false);
+  assertResult<bool>("ST_IsRing", "LINESTRING (0 0, 1 1, 0 2, 0 0)", true);
 
   VELOX_ASSERT_USER_THROW(
-      testStIsRingFunc("POLYGON ((2 0, 2 1, 3 1, 2 0))", true),
+      assertResult<bool>("ST_IsRing", "POLYGON ((2 0, 2 1, 3 1, 2 0))", true),
       "ST_IsRing only applies to LineString. Input type is: Polygon");
 }
 
 TEST_F(GeometryFunctionsTest, testStLength) {
-  const auto testStLengthFunc = [&](const std::optional<std::string>& wkt,
-                                    const std::optional<double>& expected) {
-    std::optional<double> result =
-        evaluateOnce<double>("ST_Length(ST_GeometryFromText(c0))", wkt);
-
-    if (wkt.has_value()) {
-      ASSERT_TRUE(result.has_value());
-      ASSERT_EQ(result.value(), expected.value());
-    } else {
-      ASSERT_FALSE(result.has_value());
-    }
-  };
-
-  testStLengthFunc("LINESTRING EMPTY", 0.0);
-  testStLengthFunc("LINESTRING (0 0, 2 2)", 2.8284271247461903);
-  testStLengthFunc("MULTILINESTRING ((1 1, 5 1), (2 4, 4 4))", 6.0);
+  assertResult<double>("ST_Length", "LINESTRING EMPTY", 0.0);
+  assertResult<double>(
+      "ST_Length", "LINESTRING (0 0, 2 2)", 2.8284271247461903);
+  assertResult<double>(
+      "ST_Length", "MULTILINESTRING ((1 1, 5 1), (2 4, 4 4))", 6.0);
 
   VELOX_ASSERT_USER_THROW(
-      testStLengthFunc("POLYGON ((1 1, 1 4, 4 4, 4 1, 1 1))", std::nullopt),
+      assertResult<double>(
+          "ST_Length", "POLYGON ((1 1, 1 4, 4 4, 4 1, 1 1))", std::nullopt),
       "ST_Length only applies to LineString or MultiLineString. Input type is: Polygon");
 }
 
@@ -1822,52 +1891,34 @@ TEST_F(GeometryFunctionsTest, testStPointN) {
 }
 
 TEST_F(GeometryFunctionsTest, testStStartPoint) {
-  const auto testStStartPointFunc =
-      [&](const std::optional<std::string>& wkt,
-          const std::optional<std::string>& expected) {
-        std::optional<std::string> result = evaluateOnce<std::string>(
-            "ST_AsText(ST_StartPoint(ST_GeometryFromText(c0)))", wkt);
-
-        if (expected.has_value()) {
-          ASSERT_TRUE(result.has_value());
-          ASSERT_EQ(result.value(), expected.value());
-        } else {
-          ASSERT_FALSE(result.has_value());
-        }
-      };
-
-  testStStartPointFunc("LINESTRING (8 4, 4 8, 5 6)", "POINT (8 4)");
-  testStStartPointFunc("LINESTRING (8 2, 4 12, 0 0)", "POINT (8 2)");
-  testStStartPointFunc("LINESTRING (0 0, 4 12, 2 2)", "POINT (0 0)");
-  testStStartPointFunc("LINESTRING EMPTY", std::nullopt);
+  assertResult<std::string>(
+      "ST_StartPoint", "LINESTRING (8 4, 4 8, 5 6)", "POINT (8 4)", true);
+  assertResult<std::string>(
+      "ST_StartPoint", "LINESTRING (8 2, 4 12, 0 0)", "POINT (8 2)", true);
+  assertResult<std::string>(
+      "ST_StartPoint", "LINESTRING (0 0, 4 12, 2 2)", "POINT (0 0)", true);
+  assertResult<std::string>(
+      "ST_StartPoint", "LINESTRING EMPTY", std::nullopt, true);
 
   VELOX_ASSERT_USER_THROW(
-      testStStartPointFunc("POINT (1 2)", std::nullopt),
+      assertResult<std::string>(
+          "ST_StartPoint", "POINT (1 2)", std::nullopt, true),
       "ST_StartPoint only applies to LineString. Input type is: Point");
 }
 
 TEST_F(GeometryFunctionsTest, testStEndPoint) {
-  const auto testStEndPointFunc =
-      [&](const std::optional<std::string>& wkt,
-          const std::optional<std::string>& expected) {
-        std::optional<std::string> result = evaluateOnce<std::string>(
-            "ST_AsText(ST_EndPoint(ST_GeometryFromText(c0)))", wkt);
-
-        if (expected.has_value()) {
-          ASSERT_TRUE(result.has_value());
-          ASSERT_EQ(result.value(), expected.value());
-        } else {
-          ASSERT_FALSE(result.has_value());
-        }
-      };
-
-  testStEndPointFunc("LINESTRING (8 4, 4 8, 5 6)", "POINT (5 6)");
-  testStEndPointFunc("LINESTRING (8 2, 4 12, 0 0)", "POINT (0 0)");
-  testStEndPointFunc("LINESTRING (0 0, 4 12, 2 2)", "POINT (2 2)");
-  testStEndPointFunc("LINESTRING EMPTY", std::nullopt);
+  assertResult<std::string>(
+      "ST_EndPoint", "LINESTRING (8 4, 4 8, 5 6)", "POINT (5 6)", true);
+  assertResult<std::string>(
+      "ST_EndPoint", "LINESTRING (8 2, 4 12, 0 0)", "POINT (0 0)", true);
+  assertResult<std::string>(
+      "ST_EndPoint", "LINESTRING (0 0, 4 12, 2 2)", "POINT (2 2)", true);
+  assertResult<std::string>(
+      "ST_EndPoint", "LINESTRING EMPTY", std::nullopt, true);
 
   VELOX_ASSERT_USER_THROW(
-      testStEndPointFunc("POINT (1 2)", std::nullopt),
+      assertResult<std::string>(
+          "ST_EndPoint", "POINT (1 2)", std::nullopt, true),
       "ST_EndPoint only applies to LineString. Input type is: Point");
 }
 
@@ -2006,207 +2057,227 @@ TEST_F(GeometryFunctionsTest, testStInteriorRingN) {
 }
 
 TEST_F(GeometryFunctionsTest, testStNumInteriorRing) {
-  const auto testStNumInteriorRingFunc =
-      [&](const std::optional<std::string>& wkt,
-          const std::optional<int32_t>& expected) {
-        std::optional<int32_t> result = evaluateOnce<int32_t>(
-            "ST_NumInteriorRing(ST_GeometryFromText(c0))", wkt);
-
-        if (expected.has_value()) {
-          ASSERT_TRUE(result.has_value());
-          ASSERT_EQ(result.value(), expected.value());
-        } else {
-          ASSERT_FALSE(result.has_value());
-        }
-      };
-
-  testStNumInteriorRingFunc("POLYGON ((0 0, 0 5, 5 5, 5 0, 0 0))", 0);
-  testStNumInteriorRingFunc(
-      "POLYGON ((0 0, 8 0, 0 8, 0 0), (1 1, 1 5, 5 1, 1 1))", 1);
-  testStNumInteriorRingFunc("POLYGON EMPTY", std::nullopt);
+  assertResult<int64_t>(
+      "ST_NumInteriorRing", "POLYGON ((0 0, 0 5, 5 5, 5 0, 0 0))", 0);
+  assertResult<int64_t>(
+      "ST_NumInteriorRing",
+      "POLYGON ((0 0, 8 0, 0 8, 0 0), (1 1, 1 5, 5 1, 1 1))",
+      1);
+  assertResult<int64_t>("ST_NumInteriorRing", "POLYGON EMPTY", std::nullopt);
 
   VELOX_ASSERT_USER_THROW(
-      testStNumInteriorRingFunc("LINESTRING (8 4, 5 7)", std::nullopt),
+      assertResult<int64_t>(
+          "ST_NumInteriorRing", "LINESTRING (8 4, 5 7)", std::nullopt),
       "ST_NumInteriorRing only applies to Polygon. Input type is: LineString");
 }
 
 TEST_F(GeometryFunctionsTest, testStNumGeometries) {
-  const auto testStNumGeometriesFunc =
-      [&](const std::optional<std::string>& wkt,
-          const std::optional<int32_t>& expected) {
-        std::optional<int32_t> result = evaluateOnce<int32_t>(
-            "ST_NumGeometries(ST_GeometryFromText(c0))", wkt);
-
-        if (expected.has_value()) {
-          ASSERT_TRUE(result.has_value());
-          ASSERT_EQ(result.value(), expected.value());
-        } else {
-          ASSERT_FALSE(result.has_value());
-        }
-      };
-
   // GeometryCollections with only empty geometries always return 0
-  testStNumGeometriesFunc("GEOMETRYCOLLECTION (POINT EMPTY, POINT EMPTY)", 0);
-  testStNumGeometriesFunc("GEOMETRYCOLLECTION (POINT EMPTY)", 0);
+  assertResult<int32_t>(
+      "ST_NumGeometries", "GEOMETRYCOLLECTION (POINT EMPTY, POINT EMPTY)", 0);
+  assertResult<int32_t>(
+      "ST_NumGeometries", "GEOMETRYCOLLECTION (POINT EMPTY)", 0);
   // GeometryCollections with at least 1 non-empty geometry return the number of
   // geometries
-  testStNumGeometriesFunc("GEOMETRYCOLLECTION(POINT EMPTY, POINT (1 2))", 2);
+  assertResult<int32_t>(
+      "ST_NumGeometries", "GEOMETRYCOLLECTION(POINT EMPTY, POINT (1 2))", 2);
 
-  testStNumGeometriesFunc("POINT EMPTY", 0);
-  testStNumGeometriesFunc("GEOMETRYCOLLECTION EMPTY", 0);
-  testStNumGeometriesFunc("MULTIPOLYGON EMPTY", 0);
-  testStNumGeometriesFunc("POINT (1 2)", 1);
-  testStNumGeometriesFunc(
-      "LINESTRING(77.29 29.07,77.42 29.26,77.27 29.31,77.29 29.07)", 1);
-  testStNumGeometriesFunc("POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))", 1);
-  testStNumGeometriesFunc("MULTIPOINT (1 2, 2 4, 3 6, 4 8)", 4);
-  testStNumGeometriesFunc("MULTILINESTRING ((1 1, 5 1), (2 4, 4 4))", 2);
-  testStNumGeometriesFunc(
+  assertResult<int32_t>("ST_NumGeometries", "POINT EMPTY", 0);
+  assertResult<int32_t>("ST_NumGeometries", "GEOMETRYCOLLECTION EMPTY", 0);
+  assertResult<int32_t>("ST_NumGeometries", "MULTIPOLYGON EMPTY", 0);
+  assertResult<int32_t>("ST_NumGeometries", "POINT (1 2)", 1);
+  assertResult<int32_t>(
+      "ST_NumGeometries",
+      "LINESTRING(77.29 29.07,77.42 29.26,77.27 29.31,77.29 29.07)",
+      1);
+  assertResult<int32_t>(
+      "ST_NumGeometries", "POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))", 1);
+  assertResult<int32_t>(
+      "ST_NumGeometries", "MULTIPOINT (1 2, 2 4, 3 6, 4 8)", 4);
+  assertResult<int32_t>(
+      "ST_NumGeometries", "MULTILINESTRING ((1 1, 5 1), (2 4, 4 4))", 2);
+  assertResult<int32_t>(
+      "ST_NumGeometries",
       "MULTIPOLYGON (((1 1, 1 3, 3 3, 3 1, 1 1)), ((2 4, 2 6, 6 6, 6 4, 2 4)))",
       2);
-  testStNumGeometriesFunc(
-      "GEOMETRYCOLLECTION(POINT(2 3), LINESTRING (2 3, 3 4))", 2);
+  assertResult<int32_t>(
+      "ST_NumGeometries",
+      "GEOMETRYCOLLECTION(POINT(2 3), LINESTRING (2 3, 3 4))",
+      2);
 }
 
 TEST_F(GeometryFunctionsTest, testStConvexHull) {
-  const auto testStConvexHullFunc =
-      [&](const std::optional<std::string>& wkt,
-          const std::optional<std::string>& expected) {
-        std::optional<std::string> result = evaluateOnce<std::string>(
-            "ST_AsText(ST_ConvexHull(ST_GeometryFromText(c0)))", wkt);
-
-        if (expected.has_value()) {
-          ASSERT_TRUE(result.has_value());
-          ASSERT_EQ(result.value(), expected.value());
-        } else {
-          ASSERT_FALSE(result.has_value());
-        }
-      };
-
   // test empty geometry
-  testStConvexHullFunc("POINT EMPTY", "POINT EMPTY");
-  testStConvexHullFunc(
-      "GEOMETRYCOLLECTION (POINT (1 1), POINT EMPTY)", "POINT (1 1)");
-  testStConvexHullFunc(
+  assertResult<std::string>(
+      "ST_ConvexHull", "POINT EMPTY", "POINT EMPTY", true);
+  assertResult<std::string>(
+      "ST_ConvexHull",
+      "GEOMETRYCOLLECTION (POINT (1 1), POINT EMPTY)",
+      "POINT (1 1)",
+      true);
+  assertResult<std::string>(
+      "ST_ConvexHull",
       "GEOMETRYCOLLECTION (GEOMETRYCOLLECTION (POINT (1 1), GEOMETRYCOLLECTION (POINT (1 5), POINT (4 5), GEOMETRYCOLLECTION (POINT (3 4), POINT EMPTY))))",
-      "POLYGON ((1 1, 1 5, 4 5, 1 1))");
+      "POLYGON ((1 1, 1 5, 4 5, 1 1))",
+      true);
 
   // test single geometry
-  testStConvexHullFunc("POINT (1 1)", "POINT (1 1)");
-  testStConvexHullFunc(
-      "LINESTRING (1 1, 1 9, 2 2)", "POLYGON ((1 1, 1 9, 2 2, 1 1))");
+  assertResult<std::string>(
+      "ST_ConvexHull", "POINT (1 1)", "POINT (1 1)", true);
+  assertResult<std::string>(
+      "ST_ConvexHull",
+      "LINESTRING (1 1, 1 9, 2 2)",
+      "POLYGON ((1 1, 1 9, 2 2, 1 1))",
+      true);
 
   // convex single geometry
-  testStConvexHullFunc(
-      "LINESTRING (1 1, 1 9, 2 2, 1 1)", "POLYGON ((1 1, 1 9, 2 2, 1 1))");
-  testStConvexHullFunc(
+  assertResult<std::string>(
+      "ST_ConvexHull",
+      "LINESTRING (1 1, 1 9, 2 2, 1 1)",
+      "POLYGON ((1 1, 1 9, 2 2, 1 1))",
+      true);
+  assertResult<std::string>(
+      "ST_ConvexHull",
       "POLYGON ((0 0, 0 3, 2 4, 4 2, 3 0, 0 0))",
-      "POLYGON ((0 0, 0 3, 2 4, 4 2, 3 0, 0 0))");
+      "POLYGON ((0 0, 0 3, 2 4, 4 2, 3 0, 0 0))",
+      true);
 
   // non-convex geometry
-  testStConvexHullFunc(
-      "LINESTRING (1 1, 1 9, 2 2, 1 1, 4 0)", "POLYGON ((4 0, 1 1, 1 9, 4 0))");
-  testStConvexHullFunc(
+  assertResult<std::string>(
+      "ST_ConvexHull",
+      "LINESTRING (1 1, 1 9, 2 2, 1 1, 4 0)",
+      "POLYGON ((4 0, 1 1, 1 9, 4 0))",
+      true);
+  assertResult<std::string>(
+      "ST_ConvexHull",
       "POLYGON ((0 0, 0 3, 4 4, 1 1, 3 0, 0 0))",
-      "POLYGON ((0 0, 0 3, 4 4, 3 0, 0 0))");
+      "POLYGON ((0 0, 0 3, 4 4, 3 0, 0 0))",
+      true);
 
   // all points are on the same line
-  testStConvexHullFunc(
-      "LINESTRING (20 20, 30 30)", "LINESTRING (20 20, 30 30)");
-  testStConvexHullFunc(
+  assertResult<std::string>(
+      "ST_ConvexHull",
+      "LINESTRING (20 20, 30 30)",
+      "LINESTRING (20 20, 30 30)",
+      true);
+  assertResult<std::string>(
+      "ST_ConvexHull",
       "MULTILINESTRING ((0 0, 3 3), (1 1, 2 2), (2 2, 4 4), (5 5, 8 8))",
-      "LINESTRING (0 0, 8 8)");
-  testStConvexHullFunc(
-      "MULTIPOINT (0 1, 1 2, 2 3, 3 4, 4 5, 5 6)", "LINESTRING (0 1, 5 6)");
-  testStConvexHullFunc(
+      "LINESTRING (0 0, 8 8)",
+      true);
+  assertResult<std::string>(
+      "ST_ConvexHull",
+      "MULTIPOINT (0 1, 1 2, 2 3, 3 4, 4 5, 5 6)",
+      "LINESTRING (0 1, 5 6)",
+      true);
+  assertResult<std::string>(
+      "ST_ConvexHull",
       "GEOMETRYCOLLECTION (GEOMETRYCOLLECTION (POINT (2 2), POINT (1 1)), POINT(3 3))",
-      "LINESTRING (1 1, 3 3)");
+      "LINESTRING (1 1, 3 3)",
+      true);
 
   // not all points are on the same line
-  testStConvexHullFunc(
+  assertResult<std::string>(
+      "ST_ConvexHull",
       "MULTILINESTRING ((1 1, 5 1, 6 6), (2 4, 4 0), (2 -4, 4 4), (3 -2, 4 -3))",
-      "POLYGON ((2 -4, 1 1, 2 4, 6 6, 5 1, 4 -3, 2 -4))");
-  testStConvexHullFunc(
+      "POLYGON ((2 -4, 1 1, 2 4, 6 6, 5 1, 4 -3, 2 -4))",
+      true);
+  assertResult<std::string>(
+      "ST_ConvexHull",
       "MULTIPOINT (0 2, 1 0, 3 0, 4 0, 4 2, 2 2, 2 4)",
-      "POLYGON ((1 0, 0 2, 2 4, 4 2, 4 0, 1 0))");
-  testStConvexHullFunc(
+      "POLYGON ((1 0, 0 2, 2 4, 4 2, 4 0, 1 0))",
+      true);
+  assertResult<std::string>(
+      "ST_ConvexHull",
       "MULTIPOLYGON (((0 3, 2 0, 3 6, 0 3), (2 1, 2 3, 5 3, 5 1, 2 1), (1 7, 2 4, 4 2, 5 6, 3 8, 1 7)))",
-      "POLYGON ((2 0, 0 3, 1 7, 3 8, 5 6, 5 1, 2 0))");
-  testStConvexHullFunc(
+      "POLYGON ((2 0, 0 3, 1 7, 3 8, 5 6, 5 1, 2 0))",
+      true);
+  assertResult<std::string>(
+      "ST_ConvexHull",
       "GEOMETRYCOLLECTION (POINT (2 3), LINESTRING (2 8, 7 10), POINT (8 10), POLYGON ((4 4, 4 8, 9 8, 6 6, 6 4, 8 3, 6 1, 4 4)), POINT (4 2), LINESTRING (3 6, 5 5), POLYGON ((7 5, 7 6, 8 6, 8 5, 7 5)))",
-      "POLYGON ((6 1, 2 3, 2 8, 7 10, 8 10, 9 8, 8 3, 6 1))");
-  testStConvexHullFunc(
+      "POLYGON ((6 1, 2 3, 2 8, 7 10, 8 10, 9 8, 8 3, 6 1))",
+      true);
+  assertResult<std::string>(
+      "ST_ConvexHull",
       "GEOMETRYCOLLECTION (GEOMETRYCOLLECTION (POINT (2 3), LINESTRING (2 8, 7 10), GEOMETRYCOLLECTION (POINT (8 10))), POLYGON ((4 4, 4 8, 9 8, 6 6, 6 4, 8 3, 6 1, 4 4)), POINT (4 2), LINESTRING (3 6, 5 5), POLYGON ((7 5, 7 6, 8 6, 8 5, 7 5)))",
-      "POLYGON ((6 1, 2 3, 2 8, 7 10, 8 10, 9 8, 8 3, 6 1))");
+      "POLYGON ((6 1, 2 3, 2 8, 7 10, 8 10, 9 8, 8 3, 6 1))",
+      true);
 
   // single-element multi-geometries and geometry collections
-  testStConvexHullFunc(
-      "MULTILINESTRING ((1 1, 5 1, 6 6))", "POLYGON ((1 1, 6 6, 5 1, 1 1))");
-  testStConvexHullFunc(
+  assertResult<std::string>(
+      "ST_ConvexHull",
+      "MULTILINESTRING ((1 1, 5 1, 6 6))",
+      "POLYGON ((1 1, 6 6, 5 1, 1 1))",
+      true);
+  assertResult<std::string>(
+      "ST_ConvexHull",
       "MULTILINESTRING ((1 1, 5 1, 1 4, 5 4))",
-      "POLYGON ((1 1, 1 4, 5 4, 5 1, 1 1))");
-  testStConvexHullFunc("MULTIPOINT (0 2)", "POINT (0 2)");
-  testStConvexHullFunc(
+      "POLYGON ((1 1, 1 4, 5 4, 5 1, 1 1))",
+      true);
+  assertResult<std::string>(
+      "ST_ConvexHull", "MULTIPOINT (0 2)", "POINT (0 2)", true);
+  assertResult<std::string>(
+      "ST_ConvexHull",
       "MULTIPOLYGON (((0 3, 3 6, 2 0, 0 3)))",
-      "POLYGON ((2 0, 0 3, 3 6, 2 0))");
-  testStConvexHullFunc(
+      "POLYGON ((2 0, 0 3, 3 6, 2 0))",
+      true);
+  assertResult<std::string>(
+      "ST_ConvexHull",
       "MULTIPOLYGON (((0 0, 4 0, 4 4, 0 4, 2 2, 0 0)))",
-      "POLYGON ((0 0, 0 4, 4 4, 4 0, 0 0))");
-  testStConvexHullFunc("GEOMETRYCOLLECTION (POINT (2 3))", "POINT (2 3)");
-  testStConvexHullFunc(
+      "POLYGON ((0 0, 0 4, 4 4, 4 0, 0 0))",
+      true);
+  assertResult<std::string>(
+      "ST_ConvexHull", "GEOMETRYCOLLECTION (POINT (2 3))", "POINT (2 3)", true);
+  assertResult<std::string>(
+      "ST_ConvexHull",
       "GEOMETRYCOLLECTION (LINESTRING (1 1, 5 1, 6 6))",
-      "POLYGON ((1 1, 6 6, 5 1, 1 1))");
-  testStConvexHullFunc(
+      "POLYGON ((1 1, 6 6, 5 1, 1 1))",
+      true);
+  assertResult<std::string>(
+      "ST_ConvexHull",
       "GEOMETRYCOLLECTION (LINESTRING (1 1, 5 1, 1 4, 5 4))",
-      "POLYGON ((1 1, 1 4, 5 4, 5 1, 1 1))");
-  testStConvexHullFunc(
+      "POLYGON ((1 1, 1 4, 5 4, 5 1, 1 1))",
+      true);
+  assertResult<std::string>(
+      "ST_ConvexHull",
       "GEOMETRYCOLLECTION (POLYGON ((0 3, 3 6, 2 0, 0 3)))",
-      "POLYGON ((2 0, 0 3, 3 6, 2 0))");
-  testStConvexHullFunc(
+      "POLYGON ((2 0, 0 3, 3 6, 2 0))",
+      true);
+  assertResult<std::string>(
+      "ST_ConvexHull",
       "GEOMETRYCOLLECTION (POLYGON ((0 0, 4 0, 4 4, 0 4, 2 2, 0 0)))",
-      "POLYGON ((0 0, 0 4, 4 4, 4 0, 0 0))");
+      "POLYGON ((0 0, 0 4, 4 4, 4 0, 0 0))",
+      true);
+
+  // Geometries that should be bounded by a line or point
+  assertResult<std::string>(
+      "ST_ConvexHull", "LINESTRING (20 20, 20 20)", "POINT (20 20)", true);
+  assertResult<std::string>(
+      "ST_ConvexHull",
+      "POLYGON ((20 20, 20 20, 20 20, 20 20))",
+      "POINT (20 20)",
+      true);
+  assertResult<std::string>(
+      "ST_ConvexHull",
+      "POLYGON ((0 0, 0 20, 0 40, 0 60, 0 0))",
+      "LINESTRING (0 0, 0 60)",
+      true);
 }
 
 TEST_F(GeometryFunctionsTest, testStCoordDim) {
-  const auto testStCoordDimFunc = [&](const std::optional<std::string>& wkt,
-                                      const std::optional<int32_t>& expected) {
-    std::optional<int32_t> result =
-        evaluateOnce<int32_t>("ST_CoordDim(ST_GeometryFromText(c0))", wkt);
-
-    if (expected.has_value()) {
-      ASSERT_TRUE(result.has_value());
-      ASSERT_EQ(result.value(), expected.value());
-    } else {
-      ASSERT_FALSE(result.has_value());
-    }
-  };
-
-  testStCoordDimFunc("POLYGON ((1 1, 1 4, 4 4, 4 1, 1 1))", 2);
-  testStCoordDimFunc("POLYGON EMPTY))", 2);
-  testStCoordDimFunc("LINESTRING (1 1, 1 2)", 2);
-  testStCoordDimFunc("POINT (1 4)", 2);
-
-  testStCoordDimFunc("LINESTRING EMPTY", 2);
+  assertResult<int8_t>("ST_CoordDim", "POLYGON ((1 1, 1 4, 4 4, 4 1, 1 1))", 2);
+  assertResult<int8_t>("ST_CoordDim", "POLYGON EMPTY))", 2);
+  assertResult<int8_t>("ST_CoordDim", "LINESTRING (1 1, 1 2)", 2);
+  assertResult<int8_t>("ST_CoordDim", "POINT (1 4)", 2);
+  assertResult<int8_t>("ST_CoordDim", "LINESTRING EMPTY", 2);
 }
 
 TEST_F(GeometryFunctionsTest, testStDimension) {
-  const auto testStDimensionFunc = [&](const std::optional<std::string>& wkt,
-                                       const std::optional<int8_t>& expected) {
-    std::optional<int8_t> result =
-        evaluateOnce<int8_t>("ST_Dimension(ST_GeometryFromText(c0))", wkt);
-
-    if (expected.has_value()) {
-      ASSERT_TRUE(result.has_value());
-      ASSERT_EQ(result.value(), expected.value());
-    } else {
-      ASSERT_FALSE(result.has_value());
-    }
-  };
-
-  testStDimensionFunc("POLYGON EMPTY", 2);
-  testStDimensionFunc("POLYGON ((1 1, 1 4, 4 4, 4 1, 1 1))", 2);
-  testStDimensionFunc("LINESTRING EMPTY", 1);
-  testStDimensionFunc("POINT (1 4))", 0);
+  assertResult<int8_t>("ST_Dimension", "POLYGON EMPTY", 2);
+  assertResult<int8_t>(
+      "ST_Dimension", "POLYGON ((1 1, 1 4, 4 4, 4 1, 1 1))", 2);
+  assertResult<int8_t>("ST_Dimension", "LINESTRING EMPTY", 1);
+  assertResult<int8_t>("ST_Dimension", "POINT (1 4))", 0);
 }
 
 TEST_F(GeometryFunctionsTest, testStBuffer) {
@@ -2263,71 +2334,95 @@ TEST_F(GeometryFunctionsTest, testStBuffer) {
 }
 
 TEST_F(GeometryFunctionsTest, testStExteriorRing) {
-  const auto testStExteriorRingFunc =
-      [&](const std::optional<std::string>& wkt,
-          const std::optional<std::string>& expected) {
-        std::optional<std::string> result = evaluateOnce<std::string>(
-            "ST_AsText(ST_ExteriorRing(ST_GeometryFromText(c0)))", wkt);
-
-        if (expected.has_value()) {
-          ASSERT_TRUE(result.has_value());
-          ASSERT_EQ(result.value(), expected.value());
-        } else {
-          ASSERT_FALSE(result.has_value());
-        }
-      };
-
-  testStExteriorRingFunc("POLYGON EMPTY", std::nullopt);
-  testStExteriorRingFunc(
-      "POLYGON ((1 1, 1 4, 4 1, 1 1))", "LINESTRING (1 1, 1 4, 4 1, 1 1)");
-
-  testStExteriorRingFunc(
+  assertResult<std::string>(
+      "ST_ExteriorRing", "POLYGON EMPTY", std::nullopt, true);
+  assertResult<std::string>(
+      "ST_ExteriorRing",
+      "POLYGON ((1 1, 1 4, 4 1, 1 1))",
+      "LINESTRING (1 1, 1 4, 4 1, 1 1)",
+      true);
+  assertResult<std::string>(
+      "ST_ExteriorRing",
       "POLYGON ((0 0, 0 5, 5 5, 5 0, 0 0), (1 1, 1 2, 2 2, 2 1, 1 1))",
-      "LINESTRING (0 0, 0 5, 5 5, 5 0, 0 0)");
+      "LINESTRING (0 0, 0 5, 5 5, 5 0, 0 0)",
+      true);
 
   VELOX_ASSERT_USER_THROW(
-      testStExteriorRingFunc("LINESTRING (1 1, 2 2, 1 3)", std::nullopt),
+      assertResult<std::string>(
+          "ST_ExteriorRing", "LINESTRING (1 1, 2 2, 1 3)", std::nullopt, true),
       "ST_ExteriorRing only applies to Polygon. Input type is: LineString");
   VELOX_ASSERT_USER_THROW(
-      testStExteriorRingFunc(
+      assertResult<std::string>(
+          "ST_ExteriorRing",
           "MULTIPOLYGON (((1 1, 2 2, 1 3, 1 1)), ((4 4, 5 5, 4 6, 4 4)))",
-          std::nullopt),
+          std::nullopt,
+          true),
       "ST_ExteriorRing only applies to Polygon. Input type is: MultiPolygon");
 }
 
 TEST_F(GeometryFunctionsTest, testStEnvelope) {
-  const auto testStEnvelopeFunc =
-      [&](const std::optional<std::string>& wkt,
-          const std::optional<std::string>& expected) {
-        std::optional<std::string> result = evaluateOnce<std::string>(
-            "ST_AsText(ST_Envelope(ST_GeometryFromText(c0)))", wkt);
-
-        if (expected.has_value()) {
-          ASSERT_TRUE(result.has_value());
-          ASSERT_EQ(result.value(), expected.value());
-        } else {
-          ASSERT_FALSE(result.has_value());
-        }
-      };
-
-  testStEnvelopeFunc(
-      "MULTIPOINT (1 2, 2 4, 3 6, 4 8)", "POLYGON ((1 2, 1 8, 4 8, 4 2, 1 2))");
-  testStEnvelopeFunc("LINESTRING EMPTY", "POLYGON EMPTY");
-  testStEnvelopeFunc(
-      "LINESTRING (1 1, 2 2, 1 3)", "POLYGON ((1 1, 1 3, 2 3, 2 1, 1 1))");
-  testStEnvelopeFunc(
-      "LINESTRING (8 4, 5 7)", "POLYGON ((5 4, 5 7, 8 7, 8 4, 5 4))");
-  testStEnvelopeFunc(
+  assertResult<std::string>(
+      "st_envelope",
+      "MULTIPOINT (1 2, 2 4, 3 6, 4 8)",
+      "POLYGON ((1 2, 1 8, 4 8, 4 2, 1 2))",
+      true);
+  assertResult<std::string>(
+      "st_envelope",
+      "LINESTRING (1 1, 2 2, 1 3)",
+      "POLYGON ((1 1, 1 3, 2 3, 2 1, 1 1))",
+      true);
+  assertResult<std::string>(
+      "st_envelope",
+      "LINESTRING (8 4, 5 7)",
+      "POLYGON ((5 4, 5 7, 8 7, 8 4, 5 4))",
+      true);
+  assertResult<std::string>(
+      "st_envelope",
       "MULTILINESTRING ((1 1, 5 1), (2 4, 4 4))",
-      "POLYGON ((1 1, 1 4, 5 4, 5 1, 1 1))");
-  testStEnvelopeFunc(
-      "POLYGON ((1 1, 4 1, 1 4, 1 1))", "POLYGON ((1 1, 1 4, 4 4, 4 1, 1 1))");
-  testStEnvelopeFunc(
+      "POLYGON ((1 1, 1 4, 5 4, 5 1, 1 1))",
+      true);
+  assertResult<std::string>(
+      "st_envelope",
+      "POLYGON ((1 1, 4 1, 1 4, 1 1))",
+      "POLYGON ((1 1, 1 4, 4 4, 4 1, 1 1))",
+      true);
+  assertResult<std::string>(
+      "st_envelope",
       "MULTIPOLYGON (((1 1, 1 3, 3 3, 3 1, 1 1)), ((0 0, 0 2, 2 2, 2 0, 0 0)))",
-      "POLYGON ((0 0, 0 3, 3 3, 3 0, 0 0))");
-  testStEnvelopeFunc(
+      "POLYGON ((0 0, 0 3, 3 3, 3 0, 0 0))",
+      true);
+  assertResult<std::string>(
+      "st_envelope",
       "GEOMETRYCOLLECTION (POINT (5 1), LINESTRING (3 4, 4 4))",
-      "POLYGON ((3 1, 3 4, 5 4, 5 1, 3 1))");
+      "POLYGON ((3 1, 3 4, 5 4, 5 1, 3 1))",
+      true);
+  assertResult<std::string>(
+      "st_envelope",
+      "MULTIPOLYGON (((119.094024 -27.2871725, 119.094124 -27.2846569, 119.094124 -27.2868119, 119.094024 -27.2871725)))",
+      "POLYGON ((119.094024 -27.2871725, 119.094024 -27.2846569, 119.094124 -27.2846569, 119.094124 -27.2871725, 119.094024 -27.2871725))",
+      true);
+
+  // Zero area envelope is valid
+  assertResult<std::string>(
+      "st_envelope",
+      "LINESTRING (1 1, 1 2)",
+      "POLYGON ((1 1, 1 2, 1 2, 1 1, 1 1))",
+      true);
+
+  assertResult<std::string>(
+      "st_envelope", "POLYGON EMPTY", "POLYGON EMPTY", true);
+  assertResult<std::string>(
+      "st_envelope", "MULTIPOLYGON EMPTY", "POLYGON EMPTY", true);
+  assertResult<std::string>(
+      "st_envelope", "GEOMETRYCOLLECTION EMPTY", "POLYGON EMPTY", true);
+  assertResult<std::string>(
+      "st_envelope", "POINT EMPTY", "POLYGON EMPTY", true);
+  assertResult<std::string>(
+      "st_envelope", "MULTIPOINT EMPTY", "POLYGON EMPTY", true);
+  assertResult<std::string>(
+      "st_envelope", "LINESTRING EMPTY", "POLYGON EMPTY", true);
+  assertResult<std::string>(
+      "st_envelope", "MULTILINESTRING EMPTY", "POLYGON EMPTY", true);
 }
 
 TEST_F(GeometryFunctionsTest, testStPoints) {
@@ -2484,38 +2579,30 @@ TEST_F(GeometryFunctionsTest, testStEnvelopeAsPts) {
 }
 
 TEST_F(GeometryFunctionsTest, testStNumPoints) {
-  const auto testStNumPointsFunc = [&](const std::optional<std::string>& wkt,
-                                       const std::optional<int32_t>& expected) {
-    std::optional<int32_t> result =
-        evaluateOnce<int32_t>("ST_NumPoints(ST_GeometryFromText(c0))", wkt);
+  assertResult<int64_t>("ST_NumPoints", "POINT EMPTY", 0);
+  assertResult<int64_t>("ST_NumPoints", "MULTIPOINT EMPTY", 0);
+  assertResult<int64_t>("ST_NumPoints", "LINESTRING EMPTY", 0);
+  assertResult<int64_t>("ST_NumPoints", "MULTILINESTRING EMPTY", 0);
+  assertResult<int64_t>("ST_NumPoints", "POLYGON EMPTY", 0);
+  assertResult<int64_t>("ST_NumPoints", "MULTIPOLYGON EMPTY", 0);
+  assertResult<int64_t>("ST_NumPoints", "GEOMETRYCOLLECTION EMPTY", 0);
 
-    if (expected.has_value()) {
-      ASSERT_TRUE(result.has_value());
-      ASSERT_EQ(result.value(), expected.value());
-    } else {
-      ASSERT_FALSE(result.has_value());
-    }
-  };
-
-  testStNumPointsFunc("POINT EMPTY", 0);
-  testStNumPointsFunc("MULTIPOINT EMPTY", 0);
-  testStNumPointsFunc("LINESTRING EMPTY", 0);
-  testStNumPointsFunc("MULTILINESTRING EMPTY", 0);
-  testStNumPointsFunc("POLYGON EMPTY", 0);
-  testStNumPointsFunc("MULTIPOLYGON EMPTY", 0);
-  testStNumPointsFunc("GEOMETRYCOLLECTION EMPTY", 0);
-
-  testStNumPointsFunc("POINT (1 2)", 1);
-  testStNumPointsFunc("MULTIPOINT (1 2, 2 4, 3 6, 4 8)", 4);
-  testStNumPointsFunc("LINESTRING (8 4, 5 7)", 2);
-  testStNumPointsFunc("MULTILINESTRING ((1 1, 5 1), (2 4, 4 4))", 4);
-  testStNumPointsFunc("POLYGON ((0 0, 8 0, 0 8, 0 0))", 3);
-  testStNumPointsFunc(
-      "POLYGON ((0 0, 8 0, 0 8, 0 0), (1 1, 1 5, 5 1, 1 1))", 6);
-  testStNumPointsFunc(
+  assertResult<int64_t>("ST_NumPoints", "POINT (1 2)", 1);
+  assertResult<int64_t>("ST_NumPoints", "MULTIPOINT (1 2, 2 4, 3 6, 4 8)", 4);
+  assertResult<int64_t>("ST_NumPoints", "LINESTRING (8 4, 5 7)", 2);
+  assertResult<int64_t>(
+      "ST_NumPoints", "MULTILINESTRING ((1 1, 5 1), (2 4, 4 4))", 4);
+  assertResult<int64_t>("ST_NumPoints", "POLYGON ((0 0, 8 0, 0 8, 0 0))", 3);
+  assertResult<int64_t>(
+      "ST_NumPoints",
+      "POLYGON ((0 0, 8 0, 0 8, 0 0), (1 1, 1 5, 5 1, 1 1))",
+      6);
+  assertResult<int64_t>(
+      "ST_NumPoints",
       "MULTIPOLYGON (((1 1, 1 3, 3 3, 3 1, 1 1)), ((2 4, 2 6, 6 6, 6 4, 2 4)))",
       8);
-  testStNumPointsFunc(
+  assertResult<int64_t>(
+      "ST_NumPoints",
       "GEOMETRYCOLLECTION (POINT (1 1), GEOMETRYCOLLECTION (LINESTRING (0 0, 1 1), GEOMETRYCOLLECTION (POLYGON ((2 2, 2 3, 3 3, 3 2, 2 2)))))",
       7);
 }
@@ -3228,39 +3315,27 @@ TEST_F(GeometryFunctionsTest, testGeometryToBingTiles) {
   // Geometries at boundaries of tiles
   testGeometryToBingTilesFunc("POINT (0 0)", 1, {{"3"}});
   testGeometryToBingTilesFunc(
-      fmt::format("POINT ({} 0)", BingTileType::kMinLongitude), 1, {{"2"}});
+      fmt::format("POINT ({} 0)", kMinLongitude), 1, {{"2"}});
   testGeometryToBingTilesFunc(
-      fmt::format("POINT ({} 0)", BingTileType::kMaxLongitude), 1, {{"3"}});
+      fmt::format("POINT ({} 0)", kMaxLongitude), 1, {{"3"}});
   testGeometryToBingTilesFunc(
-      fmt::format("POINT (0 {})", BingTileType::kMinLatitude), 1, {{"3"}});
+      fmt::format("POINT (0 {})", kMinBingTileLatitude), 1, {{"3"}});
   testGeometryToBingTilesFunc(
-      fmt::format("POINT (0 {})", BingTileType::kMaxLatitude), 1, {{"1"}});
+      fmt::format("POINT (0 {})", kMaxBingTileLatitude), 1, {{"1"}});
   testGeometryToBingTilesFunc(
-      fmt::format(
-          "POINT ({} {})",
-          BingTileType::kMinLongitude,
-          BingTileType::kMinLatitude),
+      fmt::format("POINT ({} {})", kMinLongitude, kMinBingTileLatitude),
       1,
       {{"2"}});
   testGeometryToBingTilesFunc(
-      fmt::format(
-          "POINT ({} {})",
-          BingTileType::kMinLongitude,
-          BingTileType::kMaxLatitude),
+      fmt::format("POINT ({} {})", kMinLongitude, kMaxBingTileLatitude),
       1,
       {{"0"}});
   testGeometryToBingTilesFunc(
-      fmt::format(
-          "POINT ({} {})",
-          BingTileType::kMaxLongitude,
-          BingTileType::kMaxLatitude),
+      fmt::format("POINT ({} {})", kMaxLongitude, kMaxBingTileLatitude),
       1,
       {{"1"}});
   testGeometryToBingTilesFunc(
-      fmt::format(
-          "POINT ({} {})",
-          BingTileType::kMaxLongitude,
-          BingTileType::kMinLatitude),
+      fmt::format("POINT ({} {})", kMaxLongitude, kMinBingTileLatitude),
       1,
       {{"3"}});
   testGeometryToBingTilesFunc("LINESTRING (-1 0, -2 0)", 1, {{"2"}});
@@ -3268,31 +3343,19 @@ TEST_F(GeometryFunctionsTest, testGeometryToBingTiles) {
   testGeometryToBingTilesFunc("LINESTRING (0 -1, 0 -2)", 1, {{"3"}});
   testGeometryToBingTilesFunc("LINESTRING (0 1, 0 2)", 1, {{"1"}});
   testGeometryToBingTilesFunc(
-      fmt::format(
-          "LINESTRING ({} 1, {} 2)",
-          BingTileType::kMinLongitude,
-          BingTileType::kMinLongitude),
+      fmt::format("LINESTRING ({} 1, {} 2)", kMinLongitude, kMinLongitude),
       1,
       {{"0"}});
   testGeometryToBingTilesFunc(
-      fmt::format(
-          "LINESTRING ({} -1, {} -2)",
-          BingTileType::kMinLongitude,
-          BingTileType::kMinLongitude),
+      fmt::format("LINESTRING ({} -1, {} -2)", kMinLongitude, kMinLongitude),
       1,
       {{"2"}});
   testGeometryToBingTilesFunc(
-      fmt::format(
-          "LINESTRING ({} 1, {} 2)",
-          BingTileType::kMaxLongitude,
-          BingTileType::kMaxLongitude),
+      fmt::format("LINESTRING ({} 1, {} 2)", kMaxLongitude, kMaxLongitude),
       1,
       {{"1"}});
   testGeometryToBingTilesFunc(
-      fmt::format(
-          "LINESTRING ({} -1, {} -2)",
-          BingTileType::kMaxLongitude,
-          BingTileType::kMaxLongitude),
+      fmt::format("LINESTRING ({} -1, {} -2)", kMaxLongitude, kMaxLongitude),
       1,
       {{"3"}});
 
@@ -3368,9 +3431,12 @@ TEST_F(GeometryFunctionsTest, testGeometryToBingTiles) {
       "POLYGON ((0 0, 0 10, 10 10, 0 0))", 1, {{"1", "3"}});
 
   // Empty geometries
-  testGeometryToBingTilesFunc("POINT EMPTY", 10, {{}});
-  testGeometryToBingTilesFunc("POLYGON EMPTY", 10, {{}});
-  testGeometryToBingTilesFunc("GEOMETRYCOLLECTION EMPTY", 10, {{}});
+  testGeometryToBingTilesFunc(
+      "POINT EMPTY", 10, common::testutil::optionalEmpty);
+  testGeometryToBingTilesFunc(
+      "POLYGON EMPTY", 10, common::testutil::optionalEmpty);
+  testGeometryToBingTilesFunc(
+      "GEOMETRYCOLLECTION EMPTY", 10, common::testutil::optionalEmpty);
 
   // Geometries at MIN_LONGITUDE/MAX_LATITUDE
   testGeometryToBingTilesFunc(
@@ -3378,14 +3444,11 @@ TEST_F(GeometryFunctionsTest, testGeometryToBingTiles) {
       8,
       {{"22200000"}});
   testGeometryToBingTilesFunc(
-      fmt::format("POINT ({} 0)", BingTileType::kMinLongitude), 5, {{"20000"}});
+      fmt::format("POINT ({} 0)", kMinLongitude), 5, {{"20000"}});
   testGeometryToBingTilesFunc(
-      fmt::format("POINT (0 {})", BingTileType::kMaxLatitude), 5, {{"10000"}});
+      fmt::format("POINT (0 {})", kMaxBingTileLatitude), 5, {{"10000"}});
   testGeometryToBingTilesFunc(
-      fmt::format(
-          "POINT ({} {})",
-          BingTileType::kMinLongitude,
-          BingTileType::kMaxLatitude),
+      fmt::format("POINT ({} {})", kMinLongitude, kMaxBingTileLatitude),
       5,
       {{"00000"}});
 
@@ -3453,4 +3516,1097 @@ TEST_F(GeometryFunctionsTest, testGeometryToBingTiles) {
           "cardinality(geometry_to_bing_tiles(ST_GeometryFromText(c0), c1))",
           std::optional<std::string>("POLYGON ((0 0, 0 20, 20 20, 0 0))"),
           std::optional<int32_t>(14)));
+}
+
+TEST_F(GeometryFunctionsTest, testGeometryToDissolvedBingTiles) {
+  const auto testGeometryToDissolvedBingTilesFunc = [&](const std::optional<
+                                                            std::string>& wkt,
+                                                        const std::optional<
+                                                            int32_t> zoom,
+                                                        const std::optional<
+                                                            std::vector<
+                                                                std::optional<
+                                                                    std::
+                                                                        string>>>&
+                                                            expectedQuadKeys) {
+    std::vector<std::optional<std::string>> wktVec = {wkt};
+    auto inputWkt = makeNullableFlatVector<std::string>(wktVec);
+    std::vector<std::optional<int32_t>> zoomVec = {zoom};
+    auto inputZoom = makeNullableFlatVector<int32_t>(zoomVec);
+    auto inputVec = makeRowVector({inputWkt, inputZoom});
+
+    facebook::velox::VectorPtr output = evaluate(
+        "ARRAY_SORT(TRANSFORM(geometry_to_dissolved_bing_tiles(ST_GeometryFromText(c0), c1), x -> bing_tile_quadkey(x)))",
+        inputVec);
+
+    auto arrayVector =
+        std::dynamic_pointer_cast<facebook::velox::ArrayVector>(output);
+
+    if (expectedQuadKeys.has_value()) {
+      ASSERT_TRUE(arrayVector != nullptr);
+      auto expected = makeNullableArrayVector<std::string>({expectedQuadKeys});
+      facebook::velox::test::assertEqualVectors(expected, output);
+    } else {
+      ASSERT_TRUE(output->isNullAt(0));
+    }
+  };
+
+  // Empty geometries
+  testGeometryToDissolvedBingTilesFunc(
+      "POINT EMPTY", 0, common::testutil::optionalEmpty);
+  testGeometryToDissolvedBingTilesFunc(
+      "POINT EMPTY", 10, common::testutil::optionalEmpty);
+  testGeometryToDissolvedBingTilesFunc(
+      "POINT EMPTY", 23, common::testutil::optionalEmpty);
+  testGeometryToDissolvedBingTilesFunc(
+      "POLYGON EMPTY", 10, common::testutil::optionalEmpty);
+  testGeometryToDissolvedBingTilesFunc(
+      "GEOMETRYCOLLECTION EMPTY", 10, common::testutil::optionalEmpty);
+
+  // Geometries at tile borders
+  testGeometryToDissolvedBingTilesFunc("POINT (0 0)", 0, {{""}});
+  testGeometryToDissolvedBingTilesFunc(
+      fmt::format("POINT ({} 0)", kMinLongitude), 0, {{""}});
+  testGeometryToDissolvedBingTilesFunc(
+      fmt::format("POINT ({} 0)", kMaxLongitude), 0, {{""}});
+  testGeometryToDissolvedBingTilesFunc(
+      fmt::format("POINT (0 {})", kMinBingTileLatitude), 0, {{""}});
+  testGeometryToDissolvedBingTilesFunc(
+      fmt::format("POINT (0 {})", kMaxBingTileLatitude), 0, {{""}});
+  testGeometryToDissolvedBingTilesFunc(
+      fmt::format("POINT ({} {})", kMinLongitude, kMinBingTileLatitude),
+      0,
+      {{""}});
+  testGeometryToDissolvedBingTilesFunc(
+      fmt::format("POINT ({} {})", kMinLongitude, kMaxBingTileLatitude),
+      0,
+      {{""}});
+  testGeometryToDissolvedBingTilesFunc(
+      fmt::format("POINT ({} {})", kMaxLongitude, kMaxBingTileLatitude),
+      0,
+      {{""}});
+  testGeometryToDissolvedBingTilesFunc(
+      fmt::format("POINT ({} {})", kMaxLongitude, kMinBingTileLatitude),
+      0,
+      {{""}});
+  testGeometryToDissolvedBingTilesFunc("POINT (0 0)", 1, {{"3"}});
+  testGeometryToDissolvedBingTilesFunc(
+      fmt::format("POINT ({} 0)", kMinLongitude), 1, {{"2"}});
+  testGeometryToDissolvedBingTilesFunc(
+      fmt::format("POINT ({} 0)", kMaxLongitude), 1, {{"3"}});
+  testGeometryToDissolvedBingTilesFunc(
+      fmt::format("POINT (0 {})", kMinBingTileLatitude), 1, {{"3"}});
+  testGeometryToDissolvedBingTilesFunc(
+      fmt::format("POINT (0 {})", kMaxBingTileLatitude), 1, {{"1"}});
+  testGeometryToDissolvedBingTilesFunc(
+      fmt::format("POINT ({} {})", kMinLongitude, kMinBingTileLatitude),
+      1,
+      {{"2"}});
+  testGeometryToDissolvedBingTilesFunc(
+      fmt::format("POINT ({} {})", kMinLongitude, kMaxBingTileLatitude),
+      1,
+      {{"0"}});
+  testGeometryToDissolvedBingTilesFunc(
+      fmt::format("POINT ({} {})", kMaxLongitude, kMaxBingTileLatitude),
+      1,
+      {{"1"}});
+  testGeometryToDissolvedBingTilesFunc(
+      fmt::format("POINT ({} {})", kMaxLongitude, kMinBingTileLatitude),
+      1,
+      {{"3"}});
+  testGeometryToDissolvedBingTilesFunc("LINESTRING (-1 0, -2 0)", 1, {{"2"}});
+  testGeometryToDissolvedBingTilesFunc("LINESTRING (1 0, 2 0)", 1, {{"3"}});
+  testGeometryToDissolvedBingTilesFunc("LINESTRING (0 -1, 0 -2)", 1, {{"3"}});
+  testGeometryToDissolvedBingTilesFunc("LINESTRING (0 1, 0 2)", 1, {{"1"}});
+
+  testGeometryToDissolvedBingTilesFunc(
+      fmt::format("LINESTRING ({} 1, {} 2)", kMinLongitude, kMinLongitude),
+      1,
+      {{"0"}});
+  testGeometryToDissolvedBingTilesFunc(
+      fmt::format("LINESTRING ({} -1, {} -2)", kMinLongitude, kMinLongitude),
+      1,
+      {{"2"}});
+  testGeometryToDissolvedBingTilesFunc(
+      fmt::format("LINESTRING ({} 1, {} 2)", kMaxLongitude, kMaxLongitude),
+      1,
+      {{"1"}});
+  testGeometryToDissolvedBingTilesFunc(
+      fmt::format("LINESTRING ({} -1, {} -2)", kMaxLongitude, kMaxLongitude),
+      1,
+      {{"3"}});
+
+  // General Geometries
+  testGeometryToDissolvedBingTilesFunc("POINT (60 30.12)", 0, {{""}});
+  testGeometryToDissolvedBingTilesFunc(
+      "POINT (60 30.12)", 10, {{"1230301230"}});
+  testGeometryToDissolvedBingTilesFunc(
+      "POINT (60 30.12)", 15, {{"123030123010121"}});
+  testGeometryToDissolvedBingTilesFunc(
+      "POINT (60 30.12)", 16, {{"1230301230101212"}});
+  testGeometryToDissolvedBingTilesFunc(
+      "POLYGON ((0 0, 0 10, 10 10, 10 0, 0 0))",
+      6,
+      {{"12222", "300000", "300001"}});
+  testGeometryToDissolvedBingTilesFunc(
+      "POLYGON ((0 0, 0 10, 10 10, 0 0))",
+      6,
+      {{"122220", "122221", "122222", "300000"}});
+  testGeometryToDissolvedBingTilesFunc(
+      "POLYGON ((10 10, -10 10, -20 -15, 10 10))", 3, {{"033", "122", "211"}});
+  testGeometryToDissolvedBingTilesFunc(
+      "POLYGON ((10 10, -10 10, -20 -15, 10 10))",
+      6,
+      {{"033321",
+        "033323",
+        "03333",
+        "122220",
+        "122221",
+        "122222",
+        "211101",
+        "211102",
+        "211103",
+        "211110",
+        "211111",
+        "211112",
+        "211120",
+        "211121"}});
+  testGeometryToDissolvedBingTilesFunc(
+      "GEOMETRYCOLLECTION (POINT (60 30.12))", 10, {{"1230301230"}});
+  testGeometryToDissolvedBingTilesFunc(
+      "GEOMETRYCOLLECTION (POINT (60 30.12))", 15, {{"123030123010121"}});
+  testGeometryToDissolvedBingTilesFunc(
+      "GEOMETRYCOLLECTION (POLYGON ((10 10, -10 10, -20 -15, 10 10)))",
+      3,
+      {{"033", "122", "211"}});
+  testGeometryToDissolvedBingTilesFunc(
+      "GEOMETRYCOLLECTION (POINT (60 30.12), POLYGON ((10 10, -10 10, -20 -15, 10 10)))",
+      3,
+      {{"033", "122", "123", "211"}});
+  testGeometryToDissolvedBingTilesFunc(
+      "GEOMETRYCOLLECTION (POINT (0.1 0.1), POINT(0.1 -0.1), POINT(-0.1 -0.1), POINT(-0.1 0.1))",
+      3,
+      {{"033", "122", "211", "300"}});
+
+  ASSERT_EQ(
+      2320,
+      evaluateOnce<int64_t>(
+          "cardinality(geometry_to_dissolved_bing_tiles(ST_GeometryFromText(c0), c1))",
+          std::optional<std::string>("POLYGON ((0 0, 0 20, 20 20, 0 0))"),
+          std::optional<int32_t>(14)));
+
+  // Invalid inputs
+  // Longitude out of range
+  VELOX_ASSERT_USER_THROW(
+      testGeometryToDissolvedBingTilesFunc(
+          "POINT (600 30.12)", 10, std::nullopt),
+      "Longitude span for the geometry must be in [-180.00, 180.00] range");
+  VELOX_ASSERT_USER_THROW(
+      testGeometryToDissolvedBingTilesFunc(
+          "POLYGON ((1000 10, -10 10, -20 -15, 1000 10))", 10, std::nullopt),
+      "Longitude span for the geometry must be in [-180.00, 180.00] range");
+  // Latitude out of range
+  VELOX_ASSERT_USER_THROW(
+      testGeometryToDissolvedBingTilesFunc(
+          "POINT (60 300.12)", 10, std::nullopt),
+      "Latitude span for the geometry must be in [-85.05, 85.05] range");
+  VELOX_ASSERT_USER_THROW(
+      testGeometryToDissolvedBingTilesFunc(
+          "POLYGON ((10 1000, -10 10, -20 -15, 10 1000))", 10, std::nullopt),
+      "Latitude span for the geometry must be in [-85.05, 85.05] range");
+  // Invalid zoom
+  VELOX_ASSERT_USER_THROW(
+      testGeometryToDissolvedBingTilesFunc(
+          "POINT (60 30.12)", -1, std::nullopt),
+      "Zoom level must be between 0 and 23");
+  VELOX_ASSERT_USER_THROW(
+      testGeometryToDissolvedBingTilesFunc(
+          "POINT (60 30.12)", 24, std::nullopt),
+      "Zoom level must be between 0 and 23");
+}
+
+TEST_F(GeometryFunctionsTest, testGeometryUnion) {
+  const auto testGeometryUnionFunc = [&](const std::optional<std::vector<
+                                             std::optional<std::string>>>& wkts,
+                                         const std::optional<std::string>&
+                                             expected) {
+    auto arrayVec = makeNullableArrayVector<std::string>({{wkts}});
+    auto input = makeRowVector(
+        {arrayVec, makeNullableFlatVector<std::string>({expected})});
+    std::optional<bool> result = evaluateOnce<bool>(
+        "ST_Equals(GEOMETRY_UNION(transform(c0, x -> ST_GEOMETRYFROMTEXT(x))), ST_GeometryFromText(c1))",
+        input);
+
+    if (expected.has_value()) {
+      ASSERT_TRUE(result.has_value());
+      ASSERT_TRUE(result.value());
+    } else {
+      ASSERT_FALSE(result.has_value());
+    }
+  };
+
+  testGeometryUnionFunc({{"POINT EMPTY", "POINT (1 1)"}}, "POINT (1 1)");
+  testGeometryUnionFunc({{"POINT (1 1)", "POINT (1 1)"}}, "POINT (1 1)");
+  testGeometryUnionFunc({{"POINT (1 1)"}}, "POINT (1 1)");
+  testGeometryUnionFunc(
+      {{"POINT (1 2)", "POINT (3 4)"}}, "MULTIPOINT (1 2, 3 4)");
+
+  testGeometryUnionFunc({{"LINESTRING (0 0, 1 1)"}}, "LINESTRING (0 0, 1 1)");
+
+  testGeometryUnionFunc({{"POINT EMPTY", "LINESTRING EMPTY"}}, "POLYGON EMPTY");
+
+  testGeometryUnionFunc(
+      {{"POINT EMPTY", "POLYGON EMPTY", "MULTIPOINT EMPTY"}}, "POLYGON EMPTY");
+  testGeometryUnionFunc(
+      {{"GEOMETRYCOLLECTION ( POLYGON ((2 2, 3 1, 1 1, 2 2)), POLYGON ((3 2, 4 1, 2 1, 3 2)) )",
+        "GEOMETRYCOLLECTION ( POLYGON ((4 2, 5 1, 3 1, 4 2)) )"}},
+      "POLYGON ((2.5 1.5, 3 2, 3.5 1.5, 4 2, 5 1, 4 1, 3 1, 2 1, 1 1, 2 2, 2.5 1.5))");
+
+  testGeometryUnionFunc(
+      {{"POLYGON ((1 1, 3 1, 3 3, 1 3, 1 1))", "POINT (5 2)"}},
+      "GEOMETRYCOLLECTION (POINT (5 2), POLYGON ((1 1, 1 3, 3 3, 3 1, 1 1)))");
+
+  // Point test cases
+  testGeometryUnionFunc(
+      {{"POINT (1 2)", "POINT (1 2)", "POINT (1 2)"}}, "POINT (1 2)");
+
+  testGeometryUnionFunc({{"POINT EMPTY", "POINT (1 2)"}}, "POINT (1 2)");
+
+  testGeometryUnionFunc(
+      {{"POINT (1 2)", "POINT (3 4)"}}, "MULTIPOINT (1 2, 3 4)");
+
+  // Linestring test cases
+  testGeometryUnionFunc(
+      {{"LINESTRING (1 1, 2 2)",
+        "LINESTRING (1 1, 2 2)",
+        "LINESTRING (1 1, 2 2)"}},
+      "LINESTRING (1 1, 2 2)");
+
+  testGeometryUnionFunc(
+      {{"LINESTRING EMPTY", "LINESTRING (1 1, 2 2)"}}, "LINESTRING (1 1, 2 2)");
+
+  testGeometryUnionFunc(
+      {{"LINESTRING (1 1, 2 2, 3 3)", "LINESTRING (2 2, 3 3, 4 4)"}},
+      "LINESTRING (1 1, 2 2, 3 3, 4 4)");
+
+  testGeometryUnionFunc(
+      {{"LINESTRING (1 1, 2 2, 3 3)", "LINESTRING (1 2, 2 3, 3 4)"}},
+      "MULTILINESTRING ((1 1, 2 2, 3 3), (1 2, 2 3, 3 4))");
+
+  testGeometryUnionFunc(
+      {{"LINESTRING (1 1, 3 3)",
+        "LINESTRING (3 1, 2 2)",
+        "LINESTRING (2 2, 3 3)",
+        "LINESTRING (2 2, 1 3)"}},
+      "MULTILINESTRING ((1 1, 2 2, 3 3), (3 1, 1 3))");
+
+  // Polygon test cases
+  testGeometryUnionFunc(
+      {{"POLYGON ((2 2, 1 1, 3 1, 2 2))",
+        "POLYGON ((2 2, 1 1, 3 1, 2 2))",
+        "POLYGON ((2 2, 1 1, 3 1, 2 2))"}},
+      "POLYGON ((2 2, 1 1, 3 1, 2 2))");
+
+  testGeometryUnionFunc(
+      {{"POLYGON EMPTY)", "POLYGON ((2 2, 1 1, 3 1, 2 2))"}},
+      "POLYGON ((2 2, 1 1, 3 1, 2 2))");
+
+  testGeometryUnionFunc(
+      {{"POLYGON ((2 2, 3 1, 1 1, 2 2))",
+        "POLYGON ((3 2, 4 1, 2 1, 3 2))",
+        "POLYGON ((4 2, 5 1, 3 1, 4 2))"}},
+      "POLYGON ((1 1, 2 1, 3 1, 4 1, 5 1, 4 2, 3.5 1.5, 3 2, 2.5 1.5, 2 2, 1 1))");
+
+  testGeometryUnionFunc(
+      {{"POLYGON ((2 2, 3 1, 1 1, 2 2))", "POLYGON ((4 2, 5 1, 3 1, 4 2))"}},
+      "MULTIPOLYGON (((1 1, 3 1, 2 2, 1 1)), ((3 1, 5 1, 4 2, 3 1)))");
+
+  testGeometryUnionFunc(
+      {{"POLYGON ((2 2, 3 1, 1 1, 2 2))", "POLYGON ((5 2, 6 1, 4 1, 5 2))"}},
+      "MULTIPOLYGON (((1 1, 3 1, 2 2, 1 1)), ((4 1, 6 1, 5 2, 4 1)))");
+
+  testGeometryUnionFunc(
+      {{"POLYGON ((1 1, 6 1, 6 6, 1 6, 1 1), (3 3, 4 3, 4 4, 3 4, 3 3))",
+        "POLYGON ((3 3, 4 3, 4 4, 3 4, 3 3))"}},
+      "POLYGON ((1 1, 6 1, 6 6, 1 6, 1 1))");
+
+  testGeometryUnionFunc(
+      {{"POLYGON ((1 1, 6 1, 6 6, 1 6, 1 1), (3 3, 4 3, 4 4, 3 4, 3 3))",
+        "POLYGON ((2 2, 5 2, 5 5, 2 5, 2 2))"}},
+      "POLYGON ((1 1, 6 1, 6 6, 1 6, 1 1))");
+
+  testGeometryUnionFunc(
+      {{"POLYGON ((1 1, 6 1, 6 6, 1 6, 1 1), (3 3, 4 3, 4 4, 3 4, 3 3))",
+        "POLYGON ((3.25 3.25, 3.75 3.25, 3.75 3.75, 3.25 3.75, 3.25 3.25))"}},
+      "MULTIPOLYGON (((1 1, 6 1, 6 6, 1 6, 1 1), (3 3, 4 3, 4 4, 3 4, 3 3)), ((3.25 3.25, 3.75 3.25, 3.75 3.75, 3.25 3.75, 3.25 3.25)))");
+
+  testGeometryUnionFunc(
+      {{"POLYGON ((1 1, 6 1, 6 6, 1 6, 1 1), (3 3, 4 3, 4 4, 3 4, 3 3))",
+        "POLYGON ((3 3, 3 3.5, 3.5 3.5, 3.5 3, 3 3))",
+        "POLYGON ((3.5 3.5, 3.5 4, 4 4, 4 3.5, 3.5 3.5))",
+        "POLYGON ((3 3.5, 3 4, 3.5 4, 3.5 3.5, 3 3.5))",
+        "POLYGON ((3.5 3, 3.5 3.5, 4 3.5, 4 3, 3.5 3))"}},
+      "POLYGON ((1 1, 6 1, 6 6, 1 6, 1 1))");
+
+  testGeometryUnionFunc(
+      {{"POLYGON ((1 3, 1 4, 6 4, 6 3, 1 3))",
+        "POLYGON ((3 1, 4 1, 4 6, 3 6, 3 1))"}},
+      "POLYGON ((3 1, 4 1, 4 3, 6 3, 6 4, 4 4, 4 6, 3 6, 3 4, 1 4, 1 3, 3 3, 3 1))");
+
+  testGeometryUnionFunc(
+      {{"POLYGON ((1 3, 1 4, 3 4, 3 3, 1 3))",
+        "POLYGON ((3 3, 3 4, 4 4, 4 3, 3 3))",
+        "POLYGON ((4 3, 4 4, 6 4, 6 3, 4 3))",
+        "POLYGON ((3 1, 4 1, 4 3, 3 3, 3 1))",
+        "POLYGON ((3 4, 3 6, 4 6, 4 4, 3 4))"}},
+      "POLYGON ((3 1, 4 1, 4 3, 6 3, 6 4, 4 4, 4 6, 3 6, 3 4, 1 4, 1 3, 3 3, 3 1))");
+
+  testGeometryUnionFunc(
+      {{"POLYGON ((1 1, 3 1, 3 3, 1 3, 1 1))", "POINT (3 2)"}},
+      "POLYGON ((1 1, 3 1, 3 2, 3 3, 1 3, 1 1))");
+
+  // Multipoint test cases
+  testGeometryUnionFunc(
+      {{"MULTIPOINT ((1 2), (2 4), (3 6), (4 8))",
+        "MULTIPOINT ((1 2), (2 4), (3 6), (4 8))",
+        "MULTIPOINT ((1 2), (2 4), (3 6), (4 8))"}},
+      "MULTIPOINT ((1 2), (2 4), (3 6), (4 8))");
+
+  testGeometryUnionFunc(
+      {{"MULTIPOINT EMPTY", "MULTIPOINT ((1 2), (2 4), (3 6), (4 8))"}},
+      "MULTIPOINT ((1 2), (2 4), (3 6), (4 8))");
+
+  testGeometryUnionFunc(
+      {{"MULTIPOINT ((1 2), (2 4))", "MULTIPOINT ((3 6), (4 8))"}},
+      "MULTIPOINT ((1 2), (2 4), (3 6), (4 8))");
+
+  testGeometryUnionFunc(
+      {{"MULTIPOINT ((1 2), (2 4))",
+        "MULTIPOINT ((2 4), (3 6))",
+        "MULTIPOINT ((3 6), (4 8))"}},
+      "MULTIPOINT ((1 2), (2 4), (3 6), (4 8))");
+
+  // Multilinestring test cases
+  testGeometryUnionFunc(
+      {{"MULTILINESTRING ((1 5, 4 1), (2 5, 5 1))",
+        "MULTILINESTRING ((1 5, 4 1), (2 5, 5 1))",
+        "MULTILINESTRING ((1 5, 4 1), (2 5, 5 1))"}},
+      "MULTILINESTRING ((1 5, 4 1), (2 5, 5 1))");
+
+  testGeometryUnionFunc(
+      {{"MULTILINESTRING EMPTY", "MULTILINESTRING ((1 5, 4 1), (2 5, 5 1))"}},
+      "MULTILINESTRING ((1 5, 4 1), (2 5, 5 1))");
+
+  testGeometryUnionFunc(
+      {{"MULTILINESTRING ((1 5, 4 1), (3 5, 6 1))",
+        "MULTILINESTRING ((2 5, 5 1), (4 5, 7 1))"}},
+      "MULTILINESTRING ((1 5, 4 1), (2 5, 5 1), (3 5, 6 1), (4 5, 7 1))");
+
+  testGeometryUnionFunc(
+      {{"MULTILINESTRING ((1 5, 4 1), (3 5, 6 1))",
+        "MULTILINESTRING ((2 5, 5 1), (4 5, 7 1))",
+        "LINESTRING (1 3, 8 3)"}},
+      "MULTILINESTRING ((1 5, 4 1), (2 5, 5 1), (3 5, 6 1), (4 5, 7 1), (1 3, 8 3))");
+
+  // Multipolygon test cases
+  testGeometryUnionFunc(
+      {{"MULTIPOLYGON(((4 2, 5 1, 3 1, 4 2)), ((14 12, 15 11, 13 11, 14 12)))",
+        "MULTIPOLYGON(((4 2, 5 1, 3 1, 4 2)), ((14 12, 15 11, 13 11, 14 12)))"}},
+      "MULTIPOLYGON (((4 2, 3 1, 5 1, 4 2)), ((14 12, 13 11, 15 11, 14 12)))");
+
+  testGeometryUnionFunc(
+      {{"MULTIPOLYGON EMPTY",
+        "MULTIPOLYGON (((4 2, 5 1, 3 1, 4 2)), ((14 12, 15 11, 13 11, 14 12)))"}},
+      "MULTIPOLYGON (((4 2, 3 1, 5 1, 4 2)), ((14 12, 13 11, 15 11, 14 12)))");
+
+  testGeometryUnionFunc(
+      {{"MULTIPOLYGON ((( 0 0, 0 2, 2 2, 2 0, 0 0 )), (( 0 3, 0 5, 2 5, 2 3, 0 3 )))",
+        "MULTIPOLYGON ((( 3 0, 3 2, 5 2, 5 0, 3 0 )), (( 3 3, 3 5, 5 5, 5 3, 3 3 )))"}},
+      "MULTIPOLYGON (((0 0, 2 0, 2 2, 0 2, 0 0)), ((3 0, 5 0, 5 2, 3 2, 3 0)), ((0 3, 2 3, 2 5, 0 5, 0 3)), ((3 3, 5 3, 5 5, 3 5, 3 3)))");
+
+  testGeometryUnionFunc(
+      {{"MULTIPOLYGON (((2 2, 3 1, 1 1, 2 2)), ((3 2, 4 1, 2 1, 3 2)))",
+        "MULTIPOLYGON(((4 2, 5 1, 3 1, 4 2)))"}},
+      "POLYGON ((1 1, 2 1, 3 1, 4 1, 5 1, 4 2, 3.5 1.5, 3 2, 2.5 1.5, 2 2, 1 1))");
+
+  testGeometryUnionFunc(
+      {{"MULTIPOLYGON (((1 3, 1 4, 3 4, 3 3, 1 3)), ((3 3, 3 4, 4 4, 4 3, 3 3)), ((4 3, 4 4, 6 4, 6 3, 4 3)))",
+        "MULTIPOLYGON (((3 1, 4 1, 4 3, 3 3, 3 1)), ((3 4, 3 6, 4 6, 4 4, 3 4)))"}},
+      "POLYGON ((3 1, 4 1, 4 3, 6 3, 6 4, 4 4, 4 6, 3 6, 3 4, 1 4, 1 3, 3 3, 3 1))");
+
+  // GeometryCollection test cases
+  testGeometryUnionFunc(
+      {{"MULTIPOLYGON (((0 0, 2 0, 2 2, 0 2, 0 0)), ((3 0, 5 0, 5 2, 3 2, 3 0)))",
+        "GEOMETRYCOLLECTION ( POLYGON ((0 0, 2 0, 2 2, 0 2, 0 0)), POLYGON ((3 0, 5 0, 5 2, 3 2, 3 0)))",
+        "GEOMETRYCOLLECTION ( POLYGON ((0 0, 2 0, 2 2, 0 2, 0 0)), POLYGON ((3 0, 5 0, 5 2, 3 2, 3 0)))"}},
+      "MULTIPOLYGON (((0 0, 2 0, 2 2, 0 2, 0 0)), ((3 0, 5 0, 5 2, 3 2, 3 0)))");
+
+  testGeometryUnionFunc(
+      {{"GEOMETRYCOLLECTION EMPTY", "GEOMETRYCOLLECTION EMPTY"}},
+      "GEOMETRYCOLLECTION EMPTY");
+
+  testGeometryUnionFunc(
+      {{"GEOMETRYCOLLECTION EMPTY",
+        "GEOMETRYCOLLECTION ( POLYGON ((0 0, 2 0, 2 2, 0 2, 0 0)), POLYGON ((3 0, 5 0, 5 2, 3 2, 3 0)))"}},
+      "MULTIPOLYGON (((0 0, 2 0, 2 2, 0 2, 0 0)), ((3 0, 5 0, 5 2, 3 2, 3 0)))");
+
+  testGeometryUnionFunc(
+      {{"GEOMETRYCOLLECTION ( POLYGON ((2 2, 3 1, 1 1, 2 2)), POLYGON ((3 2, 4 1, 2 1, 3 2)) )",
+        "GEOMETRYCOLLECTION ( POLYGON ((4 2, 5 1, 3 1, 4 2)) )"}},
+      "POLYGON ((1 1, 2 1, 3 1, 4 1, 5 1, 4 2, 3.5 1.5, 3 2, 2.5 1.5, 2 2, 1 1))");
+
+  testGeometryUnionFunc(
+      {{"GEOMETRYCOLLECTION ( POLYGON (( 0 0, 0 2, 2 2, 2 0, 0 0 )), POLYGON (( 0 3, 0 5, 2 5, 2 3, 0 3 )) )",
+        "GEOMETRYCOLLECTION ( POLYGON (( 3 0, 3 2, 5 2, 5 0, 3 0 )), POLYGON (( 3 3, 3 5, 5 5, 5 3, 3 3 )) )"}},
+      "MULTIPOLYGON (((0 0, 2 0, 2 2, 0 2, 0 0)), ((3 0, 5 0, 5 2, 3 2, 3 0)), ((0 3, 2 3, 2 5, 0 5, 0 3)), ((3 3, 5 3, 5 5, 3 5, 3 3)))");
+
+  testGeometryUnionFunc(
+      {{"POLYGON ((1 1, 3 1, 3 3, 1 3, 1 1))", "LINESTRING (0 2, 5 2)"}},
+      "GEOMETRYCOLLECTION (MULTILINESTRING ((0 2, 1 2), (3 2, 5 2)), POLYGON ((1 1, 3 1, 3 2, 3 3, 1 3, 1 2, 1 1)))");
+
+  testGeometryUnionFunc(
+      {{"POLYGON ((1 1, 3 1, 3 3, 1 3, 1 1))", "LINESTRING (0 5, 5 5)"}},
+      "GEOMETRYCOLLECTION (LINESTRING (0 5, 5 5), POLYGON ((1 1, 3 1, 3 3, 1 3, 1 1)))");
+
+  testGeometryUnionFunc(
+      {{"POLYGON ((1 1, 3 1, 3 3, 1 3, 1 1))", "POINT (5 2)"}},
+      "GEOMETRYCOLLECTION (POINT (5 2), POLYGON ((1 1, 3 1, 3 3, 1 3, 1 1)))");
+
+  testGeometryUnionFunc({{"POINT EMPTY"}}, "POLYGON EMPTY");
+  testGeometryUnionFunc({{"MULTIPOINT EMPTY"}}, "POLYGON EMPTY");
+  testGeometryUnionFunc({{"POLYGON EMPTY"}}, "POLYGON EMPTY");
+  testGeometryUnionFunc({{"MULTIPOLYGON EMPTY"}}, "POLYGON EMPTY");
+  testGeometryUnionFunc({{"LINESTRING EMPTY"}}, "POLYGON EMPTY");
+  testGeometryUnionFunc({{"MULTILINESTRING EMPTY"}}, "POLYGON EMPTY");
+  testGeometryUnionFunc({{"GEOMETRYCOLLECTION EMPTY"}}, "POLYGON EMPTY");
+  testGeometryUnionFunc(
+      {{"GEOMETRYCOLLECTION EMPTY",
+        "MULTILINESTRING EMPTY",
+        "LINESTRING EMPTY",
+        "MULTIPOLYGON EMPTY",
+        "POLYGON EMPTY",
+        "MULTIPOINT EMPTY",
+        "POINT EMPTY"}},
+      "POLYGON EMPTY");
+
+  // Empty array should return null
+  testGeometryUnionFunc(common::testutil::optionalEmpty, std::nullopt);
+
+  // Null elements in input array should be ignored
+  testGeometryUnionFunc({{std::nullopt, "POINT (1 2)"}}, "POINT (1 2)");
+}
+
+TEST_F(GeometryFunctionsTest, testStLineFromText) {
+  const auto testStLineFromTextFunc =
+      [&](const std::optional<std::string>& wkt) {
+        auto res =
+            evaluateOnce<std::string>("ST_AsText(ST_LineFromText(c0))", wkt);
+
+        if (wkt.has_value()) {
+          ASSERT_TRUE(res.has_value());
+          ASSERT_EQ(wkt.value(), res.value());
+        } else {
+          ASSERT_FALSE(res.has_value());
+        }
+      };
+
+  testStLineFromTextFunc("LINESTRING EMPTY");
+  testStLineFromTextFunc("LINESTRING (1 1, 2 2, 1 3)");
+  VELOX_ASSERT_USER_THROW(
+      testStLineFromTextFunc("xyz"),
+      "Failed to parse WKT: ParseException: Unknown type: 'XYZ'");
+  VELOX_ASSERT_USER_THROW(
+      testStLineFromTextFunc("MULTILINESTRING EMPTY"),
+      "ST_LineFromText only applies to LineString. Input type is: MultiLineString");
+  VELOX_ASSERT_USER_THROW(
+      testStLineFromTextFunc("POLYGON ((1 1, 1 4, 4 4, 4 1, 1 1))"),
+      "ST_LineFromText only applies to LineString. Input type is: Polygon");
+  VELOX_ASSERT_USER_THROW(
+      testStLineFromTextFunc("LINESTRING (0 0)"),
+      "Failed to parse WKT: IllegalArgumentException: point array must contain 0 or >1 elements");
+  VELOX_ASSERT_USER_THROW(
+      testStLineFromTextFunc("LINESTRING (0 0, 1)"),
+      "Failed to parse WKT: ParseException: Expected number but encountered ')'");
+  testStLineFromTextFunc(std::nullopt);
+}
+
+TEST_F(GeometryFunctionsTest, testStLineString) {
+  const auto testStLineStringFunc = [&](const std::optional<std::vector<
+                                            std::optional<std::string>>>& wkts,
+                                        const std::optional<std::string>&
+                                            expected) {
+    auto arrayVec = makeNullableArrayVector<std::string>({{wkts}});
+    auto input = makeRowVector({arrayVec});
+    std::optional<std::string> result = evaluateOnce<std::string>(
+        "St_AsText(ST_LineString(transform(c0, x -> ST_GEOMETRYFROMTEXT(x))))",
+        input);
+
+    if (expected.has_value()) {
+      ASSERT_TRUE(result.has_value());
+      ASSERT_EQ(expected.value(), result.value());
+    } else {
+      ASSERT_FALSE(result.has_value());
+    }
+  };
+
+  // Happy cases
+  testStLineStringFunc(
+      {{"POINT (1 2)", "POINT (3 4)"}}, "LINESTRING (1 2, 3 4)");
+  testStLineStringFunc(
+      {{"POINT (1 2)", "POINT (3 4)", "POINT (5 6)"}},
+      "LINESTRING (1 2, 3 4, 5 6)");
+  testStLineStringFunc(
+      {{"POINT (1 2)", "POINT (3 4)", "POINT (5 6)", "POINT (7 8)"}},
+      "LINESTRING (1 2, 3 4, 5 6, 7 8)");
+
+  // < 2 Points returns empty
+  testStLineStringFunc({{"POINT (1 2)"}}, "LINESTRING EMPTY");
+  testStLineStringFunc(common::testutil::optionalEmpty, "LINESTRING EMPTY");
+  // Duplicate consecutive points throws exception
+  VELOX_ASSERT_USER_THROW(
+      testStLineStringFunc({{"POINT (1 2)", "POINT (1 2)"}}, std::nullopt),
+      "Repeated point sequence in ST_LineString: point 1,2 at index 1.");
+  // Only points can be passed
+  VELOX_ASSERT_USER_THROW(
+      testStLineStringFunc(
+          {{"POLYGON ((1 2, 3 4, 5 6, 1 2))", "POINT (1 2)"}}, std::nullopt),
+      "Non-point geometry in ST_LineString input at index 0.");
+  // Empty points are invalid
+  VELOX_ASSERT_USER_THROW(
+      testStLineStringFunc({{"POINT (1 2)", "POINT EMPTY"}}, std::nullopt),
+      "Empty point in ST_LineString input at index 1.");
+  VELOX_ASSERT_USER_THROW(
+      testStLineStringFunc(
+          {{"POINT (1 2)", "POINT EMPTY", "POINT (1 2)"}}, std::nullopt),
+      "Empty point in ST_LineString input at index 1.");
+  VELOX_ASSERT_USER_THROW(
+      testStLineStringFunc(
+          {{"POINT (1 2)", "POINT EMPTY", "POINT (1 2)", "POINT EMPTY"}},
+          std::nullopt),
+      "Empty point in ST_LineString input at index 1.");
+  VELOX_ASSERT_USER_THROW(
+      testStLineStringFunc({{"POINT EMPTY"}}, std::nullopt),
+      "Empty point in ST_LineString input at index 0.");
+
+  // Null elements in array are invalid
+  VELOX_ASSERT_USER_THROW(
+      testStLineStringFunc({{"POINT (1 2)", std::nullopt}}, std::nullopt),
+      "Invalid input to ST_LineString: input array contains null at index 1.");
+  VELOX_ASSERT_USER_THROW(
+      testStLineStringFunc({{std::nullopt, "POINT (1 2)"}}, std::nullopt),
+      "Invalid input to ST_LineString: input array contains null at index 0.");
+  VELOX_ASSERT_USER_THROW(
+      testStLineStringFunc(
+          std::vector<std::optional<std::string>>{std::nullopt}, std::nullopt),
+      "Invalid input to ST_LineString: input array contains null at index 0.");
+  VELOX_ASSERT_USER_THROW(
+      testStLineStringFunc(
+          std::vector<std::optional<std::string>>{std::nullopt, std::nullopt},
+          std::nullopt),
+      "Invalid input to ST_LineString: input array contains null at index 0.");
+}
+
+TEST_F(GeometryFunctionsTest, testStMultiPoint) {
+  const auto testStMultiPointFunc = [&](const std::optional<std::vector<
+                                            std::optional<std::string>>>& wkts,
+                                        const std::optional<std::string>&
+                                            expected) {
+    auto arrayVec = makeNullableArrayVector<std::string>({{wkts}});
+    auto input = makeRowVector({arrayVec});
+    std::optional<std::string> result = evaluateOnce<std::string>(
+        "St_AsText(ST_MultiPoint(transform(c0, x -> ST_GEOMETRYFROMTEXT(x))))",
+        input);
+
+    if (expected.has_value()) {
+      ASSERT_TRUE(result.has_value());
+      ASSERT_EQ(expected.value(), result.value());
+    } else {
+      ASSERT_FALSE(result.has_value());
+    }
+  };
+
+  // Happy cases
+  testStMultiPointFunc(
+      {{"POINT (1 2)", "POINT (3 4)"}}, "MULTIPOINT (1 2, 3 4)");
+  testStMultiPointFunc(
+      {{"POINT (1 2)", "POINT (3 4)", "POINT (5 6)"}},
+      "MULTIPOINT (1 2, 3 4, 5 6)");
+  testStMultiPointFunc(
+      {{"POINT (1 2)", "POINT (3 4)", "POINT (5 6)", "POINT (7 8)"}},
+      "MULTIPOINT (1 2, 3 4, 5 6, 7 8)");
+
+  // Duplicate points work
+  testStMultiPointFunc(
+      {{"POINT (1 2)", "POINT (1 2)"}}, "MULTIPOINT (1 2, 1 2)");
+  testStMultiPointFunc(
+      {{"POINT (1 2)", "POINT (3 4)", "POINT (1 2)"}},
+      "MULTIPOINT (1 2, 3 4, 1 2)");
+
+  // Single point
+  testStMultiPointFunc({{"POINT (1 2)"}}, "MULTIPOINT (1 2)");
+
+  // Empty array
+  testStMultiPointFunc(common::testutil::optionalEmpty, std::nullopt);
+
+  // Only points can be passed
+  VELOX_ASSERT_USER_THROW(
+      testStMultiPointFunc(
+          {{"POINT (7 8)", "LINESTRING (1 2, 3 4)"}}, std::nullopt),
+      "Non-point geometry in ST_MultiPoint input at index 1.");
+
+  VELOX_ASSERT_USER_THROW(
+      testStMultiPointFunc(
+          {{"POINT (7 8)", "MULTIPOINT ((1 2), (3 4))"}}, std::nullopt),
+      "Non-point geometry in ST_MultiPoint input at index 1.");
+
+  // Null elements in array are invalid
+  VELOX_ASSERT_USER_THROW(
+      testStMultiPointFunc({{"POINT (1 2)", std::nullopt}}, std::nullopt),
+      "Invalid input to ST_MultiPoint: input array contains null at index 1.");
+  VELOX_ASSERT_USER_THROW(
+      testStMultiPointFunc({{std::nullopt, "POINT (1 2)"}}, std::nullopt),
+      "Invalid input to ST_MultiPoint: input array contains null at index 0.");
+  VELOX_ASSERT_USER_THROW(
+      testStMultiPointFunc(
+          std::vector<std::optional<std::string>>{std::nullopt}, std::nullopt),
+      "Invalid input to ST_MultiPoint: input array contains null at index 0.");
+  VELOX_ASSERT_USER_THROW(
+      testStMultiPointFunc(
+          std::vector<std::optional<std::string>>{std::nullopt, std::nullopt},
+          std::nullopt),
+      "Invalid input to ST_MultiPoint: input array contains null at index 0.");
+
+  // Empty elements in array are invalid
+  VELOX_ASSERT_USER_THROW(
+      testStMultiPointFunc({{"POINT EMPTY"}}, std::nullopt),
+      "Empty point in ST_MultiPoint input at index 0.");
+  VELOX_ASSERT_USER_THROW(
+      testStMultiPointFunc({{"POINT (1 2)", "POINT EMPTY"}}, std::nullopt),
+      "Empty point in ST_MultiPoint input at index 1.");
+}
+
+TEST_F(GeometryFunctionsTest, testToFromSphericalGeography) {
+  const auto testToFromSphericalGeographyFunc = [&](const std::optional<
+                                                    std::string>& wkt) {
+    std::optional<std::string> result = evaluateOnce<std::string>(
+        "ST_AsText(to_geometry(to_spherical_geography(ST_GeometryFromText(c0))))",
+        wkt);
+
+    if (wkt.has_value()) {
+      ASSERT_TRUE(result.has_value());
+      ASSERT_EQ(wkt.value(), result.value());
+    } else {
+      ASSERT_FALSE(result.has_value());
+    }
+  };
+
+  // Happy cases
+  testToFromSphericalGeographyFunc("POINT EMPTY");
+  testToFromSphericalGeographyFunc("MULTIPOINT EMPTY");
+  testToFromSphericalGeographyFunc("POLYGON EMPTY");
+  testToFromSphericalGeographyFunc("MULTIPOLYGON EMPTY");
+  testToFromSphericalGeographyFunc("LINESTRING EMPTY");
+  testToFromSphericalGeographyFunc("MULTILINESTRING EMPTY");
+  testToFromSphericalGeographyFunc("GEOMETRYCOLLECTION EMPTY");
+
+  testToFromSphericalGeographyFunc("POINT (180 90)");
+  testToFromSphericalGeographyFunc("POINT (-180 -90)");
+  testToFromSphericalGeographyFunc("POINT (1 2)");
+  testToFromSphericalGeographyFunc("MULTIPOINT (1 2, 3 4, 5 6, 7 8)");
+  testToFromSphericalGeographyFunc("POLYGON ((1 3, 1 4, 3 4, 3 3, 1 3))");
+  testToFromSphericalGeographyFunc(
+      "MULTIPOLYGON (((0 0, 0 2, 2 2, 2 0, 0 0)), ((3 0, 3 2, 5 2, 5 0, 3 0)), ((0 3, 0 5, 2 5, 2 3, 0 3)), ((3 3, 3 5, 5 5, 5 3, 3 3)))");
+  testToFromSphericalGeographyFunc(
+      "GEOMETRYCOLLECTION (POINT (1 1), GEOMETRYCOLLECTION (LINESTRING (0 0, 1 1), GEOMETRYCOLLECTION (POLYGON ((2 2, 2 3, 3 3, 3 2, 2 2)))))");
+
+  // Error cases
+  VELOX_ASSERT_USER_THROW(
+      testToFromSphericalGeographyFunc("POINT (200 200)"),
+      "Latitude must be in range [-90, 90] and longitude must be in range [-180, 180]. Got latitude: 200 and longitude: 200");
+  VELOX_ASSERT_USER_THROW(
+      testToFromSphericalGeographyFunc(
+          "GEOMETRYCOLLECTION (POINT (1 1), GEOMETRYCOLLECTION (LINESTRING (0 0, 1 1), GEOMETRYCOLLECTION (POLYGON ((2 2, 2 -300, 3 3, 3 2, 2 2)))))"),
+      "Latitude must be in range [-90, 90] and longitude must be in range [-180, 180]. Got latitude: -300 and longitude: 0");
+}
+
+TEST_F(GeometryFunctionsTest, testStSphericalCentroid) {
+  const auto testStSphericalCentroidFunction = [&](const std::optional<
+                                                       std::string>& wkt,
+                                                   const std::optional<
+                                                       std::string>&
+                                                       expectedWkt) {
+    std::optional<std::string> result = evaluateOnce<std::string>(
+        "st_astext(to_geometry(st_centroid(to_spherical_geography(ST_GeometryFromText(c0)))))",
+        wkt);
+
+    if (expectedWkt.has_value()) {
+      ASSERT_TRUE(result.has_value());
+      ASSERT_EQ(result.value(), expectedWkt.value());
+    } else {
+      ASSERT_FALSE(result.has_value());
+    }
+  };
+
+  // Empty geometries return null. Note that functions that return empty
+  // geometries might choose any type, so we should cover all types.
+  testStSphericalCentroidFunction("POINT EMPTY", std::nullopt);
+  testStSphericalCentroidFunction("MULTIPOINT EMPTY", std::nullopt);
+  testStSphericalCentroidFunction("LINESTRING EMPTY", std::nullopt);
+  testStSphericalCentroidFunction("MULTILINESTRING EMPTY", std::nullopt);
+  testStSphericalCentroidFunction("POLYGON EMPTY", std::nullopt);
+  testStSphericalCentroidFunction("MULTIPOLYGON EMPTY", std::nullopt);
+  testStSphericalCentroidFunction("GEOMETRYCOLLECTION EMPTY", std::nullopt);
+
+  // Single point returns same point
+  testStSphericalCentroidFunction("POINT (3 5)", "POINT (3 5)");
+
+  // Single point in multipoint returns same point
+  testStSphericalCentroidFunction("MULTIPOINT (3 5)", "POINT (3 5)");
+
+  // Two points on opposite sides of equator at same longitude
+  testStSphericalCentroidFunction("MULTIPOINT (0 -45, 0 45)", "POINT (0 0)");
+
+  // Two points on equator at opposite longitudes
+  testStSphericalCentroidFunction("MULTIPOINT (45 0, -45 0)", "POINT (0 0)");
+
+  // Two antipodal points on the equator (0, 0) and (-180, 0)
+  // The result is arbitrary but GEOS calculates it as (-90 45)
+  testStSphericalCentroidFunction("MULTIPOINT (0 0, -180 0)", "POINT (-90 45)");
+
+  // Three points - the Java test expects (12.36780515862267, 0)
+  // We'll check with some tolerance
+  auto result = evaluateOnce<std::string>(
+      "st_astext(to_geometry(st_centroid(to_spherical_geography(ST_GeometryFromText(c0)))))",
+      std::optional<std::string>("MULTIPOINT (0 -45, 0 45, 30 0)"));
+  ASSERT_TRUE(result.has_value());
+
+  // Parse the result to check longitude is approximately 12.3678
+  std::string resultStr = result.value();
+  ASSERT_TRUE(resultStr.find("POINT (12.3678") != std::string::npos);
+
+  // Four symmetric points should give centroid at (0, 0)
+  testStSphericalCentroidFunction(
+      "MULTIPOINT (0 -45, 0 45, 30 0, -30 0)", "POINT (0 0)");
+
+  // Non-point/multipoint geometries should throw
+  VELOX_ASSERT_USER_THROW(
+      testStSphericalCentroidFunction("LINESTRING (0 0, 1 1)", std::nullopt),
+      "ST_Centroid[SphericalGeography] only applies to Point or MultiPoint. Input type is: LineString");
+
+  VELOX_ASSERT_USER_THROW(
+      testStSphericalCentroidFunction(
+          "POLYGON((0 0, 0 1, 1 1, 1 0, 0 0))", std::nullopt),
+      "ST_Centroid[SphericalGeography] only applies to Point or MultiPoint. Input type is: Polygon");
+}
+TEST_F(GeometryFunctionsTest, testStSphericalDistance) {
+  const auto testStSphericalDistanceFunc = [&](const std::optional<std::string>&
+                                                   leftWkt,
+                                               const std::optional<std::string>&
+                                                   rightWkt,
+                                               const std::optional<double>&
+                                                   expected) {
+    std::optional<double> result = evaluateOnce<double>(
+        "st_distance(to_spherical_geography(ST_GeometryFromText(c0)), to_spherical_geography(ST_GeometryFromText(c1)))",
+        leftWkt,
+        rightWkt);
+
+    if (expected.has_value()) {
+      ASSERT_TRUE(aboutEquals(expected.value(), result.value()));
+    } else {
+      ASSERT_FALSE(result.has_value());
+    }
+  };
+
+  // Happy cases
+  testStSphericalDistanceFunc(
+      "POINT (-86.67 36.12)", "POINT (-118.40 33.94)", 2886448.973436703);
+  testStSphericalDistanceFunc(
+      "POINT (-118.40 33.94)", "POINT (-86.67 36.12)", 2886448.973436703);
+  testStSphericalDistanceFunc(
+      "POINT (-71.0589 42.3601)",
+      "POINT (-71.2290 42.4430)",
+      16734.69743457461);
+  testStSphericalDistanceFunc(
+      "POINT (-86.67 36.12)", "POINT (-86.67 36.12)", 0.0);
+
+  // Non-point geometries should throw
+  VELOX_ASSERT_USER_THROW(
+      testStSphericalDistanceFunc(
+          "POLYGON((0 0, 0 1, 1 1, 1 0, 0 0))",
+          "POLYGON((0 0, 0 2, 2 2, 2 0, 0 0))",
+          std::nullopt),
+      "ST_Distance[SphericalGeography] only applies to Point. Input type is: Polygon");
+
+  // Empty points should return null
+  testStSphericalDistanceFunc("POINT EMPTY", "POINT (40 30)", std::nullopt);
+  testStSphericalDistanceFunc("POINT (20 10)", "POINT EMPTY", std::nullopt);
+  testStSphericalDistanceFunc("POINT EMPTY", "POINT EMPTY", std::nullopt);
+}
+
+TEST_F(GeometryFunctionsTest, testStSphericalLength) {
+  const auto testStSphericalLengthFunction =
+      [&](const std::optional<std::string>& wkt,
+          const std::optional<double>& expected) {
+        std::optional<double> result = evaluateOnce<double>(
+            "st_length(to_spherical_geography(ST_GeometryFromText(c0)))", wkt);
+
+        if (expected.has_value()) {
+          ASSERT_TRUE(aboutEquals(expected.value(), result.value()));
+        } else {
+          ASSERT_FALSE(result.has_value());
+        }
+      };
+
+  double length = 4350866.6362;
+
+  // Empty linestring returns null
+  testStSphericalLengthFunction("LINESTRING EMPTY", std::nullopt);
+
+  // ST_Length is equivalent to sums of ST_DISTANCE between points in the
+  // LineString
+  testStSphericalLengthFunction(
+      "LINESTRING (-71.05 42.36, -87.62 41.87, -122.41 37.77)", length);
+
+  // Linestring has same length as its reverse
+  testStSphericalLengthFunction(
+      "LINESTRING (-122.41 37.77, -87.62 41.87, -71.05 42.36)", length);
+
+  // Path north pole -> south pole -> north pole should be roughly the
+  // circumference of the Earth
+  testStSphericalLengthFunction(
+      "LINESTRING (0.0 90.0, 0.0 -90.0, 0.0 90.0)", 4.003e7);
+
+  // Empty multi-linestring returns null
+  testStSphericalLengthFunction("MULTILINESTRING EMPTY", std::nullopt);
+
+  // Multi-linestring with one path is equivalent to a single linestring
+  testStSphericalLengthFunction(
+      "MULTILINESTRING ((-71.05 42.36, -87.62 41.87, -122.41 37.77))", length);
+
+  // Multi-linestring with two disjoint paths has length equal to sum of lengths
+  // of lines
+  testStSphericalLengthFunction(
+      "MULTILINESTRING ((-71.05 42.36, -87.62 41.87, -122.41 37.77), (-73.05 42.36, -89.62 41.87, -124.41 37.77))",
+      2 * length);
+
+  // Multi-linestring with adjacent paths is equivalent to a single linestring
+  testStSphericalLengthFunction(
+      "MULTILINESTRING ((-71.05 42.36, -87.62 41.87), (-87.62 41.87, -122.41 37.77))",
+      length);
+
+  // Non-linestring geometries should throw
+  VELOX_ASSERT_USER_THROW(
+      testStSphericalLengthFunction(
+          "POLYGON((0 0, 0 1, 1 1, 1 0, 0 0))", std::nullopt),
+      "ST_Length[SphericalGeography] only applies to LineString or MultiLineString. Input type is: Polygon");
+
+  // Invalid linestring should throw
+  VELOX_ASSERT_USER_THROW(
+      testStSphericalLengthFunction("LINESTRING (0.0)", std::nullopt),
+      "Failed to parse WKT: ParseException: Expected number but encountered ')'");
+}
+
+TEST_F(GeometryFunctionsTest, testDegeneratePolygons) {
+  const auto testDegeneratePolygonsFunc =
+      [&](const std::optional<std::string>& wkt,
+          const std::optional<std::string>& expected) {
+        auto res = evaluateOnce<std::string>(
+            "ST_AsText(ST_GeometryFromText(c0))", wkt);
+        if (expected.has_value()) {
+          ASSERT_TRUE(res.has_value());
+          ASSERT_EQ(expected.value(), res.value());
+        } else {
+          ASSERT_FALSE(res.has_value());
+        }
+      };
+
+  // Single polygon with CCW orientation - should orient to CW
+  testDegeneratePolygonsFunc(
+      "POLYGON ((1 2, 3 4, 5 7, 1 2))",
+      "POLYGON ((1 2, 5 7, 3 4, 1 2))"); // note: this should be fine
+
+  // Single polygons with zero area
+  testDegeneratePolygonsFunc(
+      "POLYGON ((1 2, 5 6, 3 4, 1 2))", "POLYGON ((1 2, 3 4, 5 6, 1 2))");
+
+  testDegeneratePolygonsFunc(
+      "POLYGON ((1 2, 3 4, 5 6, 1 2))", "POLYGON ((1 2, 5 6, 3 4, 1 2))");
+
+  // Single polygons with interior rings- should canonicalize so any shells have
+  // CW orientation and holes have CCW orientation.
+  testDegeneratePolygonsFunc(
+      "POLYGON ((0 0, 0 10, 10 10, 10 0, 0 0), (3 3, 3 7, 7 7, 7 3, 3 3))",
+      "POLYGON ((0 0, 0 10, 10 10, 10 0, 0 0), (3 3, 7 3, 7 7, 3 7, 3 3))");
+
+  testDegeneratePolygonsFunc(
+      "POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0), (3 3, 7 3, 7 7, 3 7, 3 3))",
+      "POLYGON ((0 0, 0 10, 10 10, 10 0, 0 0), (3 3, 7 3, 7 7, 3 7, 3 3))");
+
+  // Multipolygons where polygons after the first are CCW for shell or CW for
+  // hole. These should be correctly oriented after serde.
+
+  // First polygon has CW shell and CCW hole, second polygon has CCW
+  // shell and CCW hole -> second polygon shell should be reoriented
+  testDegeneratePolygonsFunc(
+      "MULTIPOLYGON (((0 0, 0 10, 10 10, 10 0, 0 0), (3 3, 7 3, 7 7, 3 7, 3 3)), ((0 0, 20 0, 20 20, 0 20, 0 0), (6 6, 14 6, 14 14, 6 14, 6 6)))",
+      "MULTIPOLYGON (((0 0, 0 10, 10 10, 10 0, 0 0), (3 3, 7 3, 7 7, 3 7, 3 3)), ((0 0, 0 20, 20 20, 20 0, 0 0), (6 6, 14 6, 14 14, 6 14, 6 6)))");
+
+  // First polygon has CW shell and CW hole, second polygon has CCW
+  // shell and CCW hole -> first polygon hole and second polygon shell should be
+  // reoriented
+  testDegeneratePolygonsFunc(
+      "MULTIPOLYGON (((0 0, 0 10, 10 10, 10 0, 0 0), (3 3, 3 7, 7 7, 7 3, 3 3)), ((0 0, 20 0, 20 20, 0 20, 0 0), (6 6, 14 6, 14 14, 6 14, 6 6)))",
+      "MULTIPOLYGON (((0 0, 0 10, 10 10, 10 0, 0 0), (3 3, 7 3, 7 7, 3 7, 3 3)), ((0 0, 0 20, 20 20, 20 0, 0 0), (6 6, 14 6, 14 14, 6 14, 6 6)))");
+
+  // First polygon has CCW shell and CW hole, second polygon has CCW
+  // shell and CW hole -> both polygons should have shell and hole reoriented
+  testDegeneratePolygonsFunc(
+      "MULTIPOLYGON (((0 0, 10 0, 10 10, 0 10, 0 0), (3 3, 3 7, 7 7, 7 3, 3 3)), ((0 0, 20 0, 20 20, 0 20, 0 0), (6 6, 6 14, 14 14, 14 6, 6 6)))",
+      "MULTIPOLYGON (((0 0, 0 10, 10 10, 10 0, 0 0), (3 3, 7 3, 7 7, 3 7, 3 3)), ((0 0, 0 20, 20 20, 20 0, 0 0), (6 6, 14 6, 14 14, 6 14, 6 6)))");
+
+  // First polygon has CCW shell and CCW hole, second polygon has CCW
+  // shell and CCW hole -> both polygons should have shells reoriented
+  testDegeneratePolygonsFunc(
+      "MULTIPOLYGON (((0 0, 10 0, 10 10, 0 10, 0 0), (3 3, 7 3, 7 7, 3 7, 3 3)), ((0 0, 20 0, 20 20, 0 20, 0 0), (6 6, 14 6, 14 14, 6 14, 6 6)))",
+      "MULTIPOLYGON (((0 0, 0 10, 10 10, 10 0, 0 0), (3 3, 7 3, 7 7, 3 7, 3 3)), ((0 0, 0 20, 20 20, 20 0, 0 0), (6 6, 14 6, 14 14, 6 14, 6 6)))");
+
+  // First polygon has CW shell and CW hole, second polygon has CW
+  // shell and CW hole -> both polygons should have holes reoriented
+  testDegeneratePolygonsFunc(
+      "MULTIPOLYGON (((0 0, 0 10, 10 10, 10 0, 0 0), (3 3, 3 7, 7 7, 7 3, 3 3)), ((0 0, 0 20, 20 20, 20 0, 0 0), (6 6, 6 14, 14 14, 14 6, 6 6)))",
+      "MULTIPOLYGON (((0 0, 0 10, 10 10, 10 0, 0 0), (3 3, 7 3, 7 7, 3 7, 3 3)), ((0 0, 0 20, 20 20, 20 0, 0 0), (6 6, 14 6, 14 14, 6 14, 6 6)))");
+
+  // MultiPolygons with zero-area rings. These rings are considered CCW before
+  // and after rotation, and can cause deformed multipolygons. This is being
+  // included to reach bug parity with Java, but we should alter these tests
+  // once we are able to implement the correct behavior!
+
+  testDegeneratePolygonsFunc(
+      "MULTIPOLYGON (((1 1, 1 2, 1 3, 1 1)))",
+      "MULTIPOLYGON (((1 1, 1 3, 1 2, 1 1)))");
+
+  // First polygon has CW shell and CCW hole, second polygon has CW shell and
+  // zero-area hole
+  testDegeneratePolygonsFunc(
+      "MULTIPOLYGON (((0 0, 0 10, 10 10, 10 0, 0 0), (3 3, 7 3, 7 7, 3 7, 3 3)), ((0 0, 0 20, 20 20, 20 0, 0 0), (6 6, 9 9, 14 14, 6 6)))",
+      "MULTIPOLYGON (((0 0, 0 10, 10 10, 10 0, 0 0), (3 3, 7 3, 7 7, 3 7, 3 3)), ((0 0, 0 20, 20 20, 20 0, 0 0), (6 6, 9 9, 14 14, 6 6)))");
+
+  // First polygon has CW shell and CCW hole, second polygon has zero-area shell
+  // and CCW hole
+  testDegeneratePolygonsFunc(
+      "MULTIPOLYGON (((0 0, 0 10, 10 10, 10 0, 0 0), (3 3, 7 3, 7 7, 3 7, 3 3)), ((0 0, 0 20, 0 10, 0 0), (6 6, 14 6, 14 14, 6 14, 6 6)))",
+      "MULTIPOLYGON (((0 0, 0 10, 10 10, 10 0, 0 0), (3 3, 7 3, 7 7, 3 7, 3 3), (0 0, 0 10, 0 20, 0 0), (6 6, 14 6, 14 14, 6 14, 6 6)))");
+
+  // First polygon has CW shell and CCW hole, second polygon has CW shell
+  // and zero-area hole
+  testDegeneratePolygonsFunc(
+      "MULTIPOLYGON (((0 0, 0 10, 10 10, 10 0, 0 0), (3 3, 7 3, 7 7, 3 7, 3 3)), ((0 0, 0 20, 20 20, 20 0, 0 0), (6 6, 9 9, 14 14, 9 9, 6 6)))",
+      "MULTIPOLYGON (((0 0, 0 10, 10 10, 10 0, 0 0), (3 3, 7 3, 7 7, 3 7, 3 3)), ((0 0, 0 20, 20 20, 20 0, 0 0), (6 6, 9 9, 14 14, 9 9, 6 6)))");
+
+  // First polygon has CW shell and CCW hole, second polygon has zero-area shell
+  // and zero-area hole
+  testDegeneratePolygonsFunc(
+      "MULTIPOLYGON (((0 0, 0 10, 10 10, 10 0, 0 0), (3 3, 7 3, 7 7, 3 7, 3 3)), ((0 0, 0 20, 0 10, 0 0), (6 6, 9 9, 14 14, 6 6)))",
+      "MULTIPOLYGON (((0 0, 0 10, 10 10, 10 0, 0 0), (3 3, 7 3, 7 7, 3 7, 3 3), (0 0, 0 10, 0 20, 0 0), (6 6, 9 9, 14 14, 6 6)))");
+
+  // First polygon has zero-area shell and CCW hole, second polygon has CW shell
+  // and CCW hole
+  testDegeneratePolygonsFunc(
+      "MULTIPOLYGON (((0 0, 0 10, 0 15, 0 0), (3 3, 7 3, 7 7, 3 7, 3 3)), ((0 0, 0 20, 20 20, 20 0, 0 0), (6 6, 14 6, 14 14, 6 14, 6 6))))",
+      "MULTIPOLYGON (((0 0, 0 15, 0 10, 0 0), (3 3, 7 3, 7 7, 3 7, 3 3)), ((0 0, 0 20, 20 20, 20 0, 0 0), (6 6, 14 6, 14 14, 6 14, 6 6)))");
+
+  // First polygon has CW shell and zero-area hole, second polygon has CW shell
+  // and CCW hole-
+  testDegeneratePolygonsFunc(
+      "MULTIPOLYGON (((0 0, 0 10, 10 10, 10 0, 0 0), (3 3, 7 3, 9 3, 3 3)), ((0 0, 0 20, 20 20, 20 0, 0 0), (6 6, 14 6, 14 14, 6 14, 6 6)))",
+      "MULTIPOLYGON (((0 0, 0 10, 10 10, 10 0, 0 0), (3 3, 7 3, 9 3, 3 3)), ((0 0, 0 20, 20 20, 20 0, 0 0), (6 6, 14 6, 14 14, 6 14, 6 6)))");
+
+  // First polygon has zero-area shell and zero-area hole, second polygon has CW
+  // shell and CCW hole
+  testDegeneratePolygonsFunc(
+      "MULTIPOLYGON (((0 0, 0 10, 0 5, 0 10, 0 0), (3 3, 7 3, 9 3, 3 3)), ((0 0, 0 20, 20 20, 20 0, 0 0), (6 6, 14 6, 14 14, 6 14, 6 6)))",
+      "MULTIPOLYGON (((0 0, 0 10, 0 5, 0 10, 0 0), (3 3, 7 3, 9 3, 3 3)), ((0 0, 0 20, 20 20, 20 0, 0 0), (6 6, 14 6, 14 14, 6 14, 6 6)))");
+}
+
+TEST_F(GeometryFunctionsTest, testStSphericalArea) {
+  const auto testStSphericalAreaFunc =
+      [&](const std::optional<std::string>& wkt,
+          const std::optional<double>& expected) {
+        std::optional<double> result = evaluateOnce<double>(
+            "st_area(to_spherical_geography(ST_GeometryFromText(c0)))", wkt);
+
+        if (expected.has_value()) {
+          ASSERT_TRUE(aboutEquals(expected.value(), result.value()));
+        } else {
+          ASSERT_FALSE(result.has_value());
+        }
+      };
+
+  // Happy cases
+  testStSphericalAreaFunc("POLYGON((0 0, 0 1, 1 1, 1 0, 0 0))", 123.64E8);
+  testStSphericalAreaFunc(
+      "POLYGON((-122.150124 37.486095, -122.149201 37.486606, -122.145725 37.486580, -122.145923 37.483961, -122.149324 37.482480, -122.150837 37.483238,  -122.150901 37.485392, -122.150124 37.486095))",
+      163290.93943428437);
+
+  double angleOfOneKm = 0.008993201943349;
+  testStSphericalAreaFunc(
+      fmt::format(
+          "POLYGON((0 0, {} 0, {} {}, 0 {}, 0 0))",
+          angleOfOneKm,
+          angleOfOneKm,
+          angleOfOneKm,
+          angleOfOneKm),
+      1E6);
+
+  // 1/4th of an hemisphere, ie 1/8th of the planet, should be close to 4PiR2/8
+  // = 637.58E11
+  testStSphericalAreaFunc("POLYGON((90 0, 0 0, 0 90, 90 0))", 637.58E11);
+
+  // A Polygon with a large hole
+  testStSphericalAreaFunc(
+      "POLYGON((90 0, 0 0, 0 90, 90 0), (89 1, 1 1, 1 89, 89 1))", 348.04E10);
+
+  // Empty input should return null
+  testStSphericalAreaFunc("POLYGON EMPTY", std::nullopt);
+  testStSphericalAreaFunc("MULTIPOLYGON EMPTY", std::nullopt);
+  // Empty invalid types return null rather than throw in java, so we do the
+  // same here.
+  testStSphericalAreaFunc("POINT EMPTY", std::nullopt);
+
+  // Invalid data types
+  VELOX_ASSERT_USER_THROW(
+      testStSphericalAreaFunc("POINT (0 1)", std::nullopt),
+      "ST_Area[SphericalGeography] only applies to Polygon or MultiPolygon. Input type is: Point");
+  VELOX_ASSERT_USER_THROW(
+      testStSphericalAreaFunc("MULTIPOINT (1 2, 3 4)", std::nullopt),
+      "ST_Area[SphericalGeography] only applies to Polygon or MultiPolygon. Input type is: MultiPoint");
+  VELOX_ASSERT_USER_THROW(
+      testStSphericalAreaFunc("LINESTRING (1 2, 3 4)", std::nullopt),
+      "ST_Area[SphericalGeography] only applies to Polygon or MultiPolygon. Input type is: LineString");
+  VELOX_ASSERT_USER_THROW(
+      testStSphericalAreaFunc(
+          "MULTILINESTRING ((0 0, 1 1), (2 2, 3 3))", std::nullopt),
+      "ST_Area[SphericalGeography] only applies to Polygon or MultiPolygon. Input type is: MultiLineString");
+  VELOX_ASSERT_USER_THROW(
+      testStSphericalAreaFunc(
+          "GEOMETRYCOLLECTION (POINT (1 2), LINESTRING (3 4, 5 6))",
+          std::nullopt),
+      "ST_Area[SphericalGeography] only applies to Polygon or MultiPolygon. Input type is: GeometryCollection");
+
+  // Invalid Polygon (duplicated point)
+  VELOX_ASSERT_USER_THROW(
+      testStSphericalAreaFunc(
+          "POLYGON((0 0, 0 1, 1 1, 1 1, 1 0, 0 0))", std::nullopt),
+      "Polygon is not valid: it has two identical consecutive vertices");
+
+  // Test areas for all 50 US states
+  for (const auto& [stateName, area] :
+       facebook::velox::geometry_test_utils::usStateAreas) {
+    const auto& wkt =
+        facebook::velox::geometry_test_utils::usStateWkts.at(stateName);
+    testStSphericalAreaFunc(std::optional<std::string>(wkt), area);
+  }
+
+  testStSphericalAreaFunc(
+      "POLYGON((-135 85, -45 85, 45 85, 135 85, -135 85))", 619.00E9);
 }
