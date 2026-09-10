@@ -1,0 +1,24 @@
+# Staging Branch Manifest
+# This file describes how this staging branch was created
+
+metadata:
+  generated_at: "2026-09-10T04:40:46Z"
+  target_repository: "rapidsai/velox"
+  target_branch: "staging-test-new"
+  dated_branch: "staging-test-new_09-10-2026"
+
+base:
+  repository: "facebookincubator/velox"
+  branch: "main"
+  commit: "b5da06debbdd6fff983aa29eacb744d0286190ac"
+  url: "https://github.com/facebookincubator/velox/tree/b5da06debbdd6fff983aa29eacb744d0286190ac"
+
+additional_merge:
+  null  # No additional repository merged
+
+merged_prs:
+  - number: 18648
+    commit: "7af4177ba77381afb178ca73e786df257e782668"
+    author: "dan13bauer"
+    title: "feat(cudf): Let a kept operator be followed by GPU operators"
+    url: "https://github.com/facebookincubator/velox/pull/18648"
