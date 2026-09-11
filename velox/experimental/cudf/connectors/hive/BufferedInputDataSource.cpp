@@ -20,6 +20,7 @@
 
 #include "velox/dwio/common/BufferedInput.h"
 #include "velox/dwio/common/CacheInputStream.h"
+#include "velox/dwio/common/DirectBufferedInput.h"
 #include "velox/dwio/common/DirectInputStream.h"
 
 #include <cudf/detail/utilities/cuda_memcpy.hpp>
@@ -48,6 +49,7 @@ using facebook::velox::cudf_velox::connector::hive::PinnedStagingArena;
 using facebook::velox::dwio::common::BufferedInput;
 using facebook::velox::dwio::common::CachedRegion;
 using facebook::velox::dwio::common::CacheInputStream;
+using facebook::velox::dwio::common::DirectBufferedInput;
 using facebook::velox::dwio::common::DirectInputStream;
 using facebook::velox::dwio::common::RetainedBufferedRegion;
 
@@ -56,6 +58,8 @@ constexpr size_t kMinimumPinnedStagingBytes = 1ULL << 20;
 
 const std::string kDeviceReadBatches = "cudfBufferedDeviceReadBatches";
 const std::string kDeviceReadRequests = "cudfBufferedDeviceReadRequests";
+const std::string kDeviceReadPlannedRanges =
+    "cudfBufferedDeviceReadPlannedRanges";
 const std::string kDeviceReadBytes = "cudfBufferedDeviceReadBytes";
 const std::string kDeviceReadFragments = "cudfBufferedDeviceReadFragments";
 const std::string kCacheBackedSourceBytes = "cudfCacheBackedSourceBytes";
@@ -657,9 +661,14 @@ std::vector<size_t> executeDeviceReadBatch(
   addIoCounter(ioStats, kDeviceReadBatches, 1);
   addIoCounter(ioStats, kDeviceReadRequests, requests.size());
   std::vector<size_t> results(requests.size());
-  std::vector<
-      std::unique_ptr<facebook::velox::dwio::common::SeekableInputStream>>
-      inputStreams(requests.size());
+  struct PendingRead {
+    size_t offset;
+    size_t size;
+    uint8_t* dst;
+    std::unique_ptr<facebook::velox::dwio::common::SeekableInputStream> stream;
+  };
+  std::vector<PendingRead> pendingReads;
+  pendingReads.reserve(requests.size());
   HostToDeviceTransferPlan transfer(ioStats);
   std::optional<PinnedStagingArena::WindowSetLease> stagingWindows;
   size_t totalReadBytes = 0;
@@ -669,7 +678,17 @@ std::vector<size_t> executeDeviceReadBatch(
     // batches for the same input atomic while allowing unrelated files and
     // drivers to progress concurrently.
     std::lock_guard<std::mutex> lock(*inputMutex);
-    bool hasReads = false;
+    size_t maxReadSize = std::numeric_limits<size_t>::max();
+    if (auto* directInput = dynamic_cast<DirectBufferedInput*>(input.get());
+        directInput != nullptr && !directInput->preloaded()) {
+      // DirectBufferedInput normally prefetches only the first quantum of a
+      // large region: selective CPU readers may never consume its tail. cuDF
+      // needs every byte of each device read. Enqueue all required quanta so
+      // the existing coalescer and I/O executor can load them concurrently,
+      // rather than issuing synchronous tail reads while preparing H2D.
+      VELOX_CHECK_GT(directInput->loadQuantum(), 0);
+      maxReadSize = directInput->loadQuantum();
+    }
     for (size_t index = 0; index < requests.size(); ++index) {
       const auto& request = requests[index];
       // Deliberately avoid offset + size: the mathematical end can exceed
@@ -695,13 +714,26 @@ std::vector<size_t> executeDeviceReadBatch(
         transfer.addBufferedRegion(std::move(*retained), request.dst);
         continue;
       }
-      hasReads = true;
-      inputStreams[index] = input->enqueue({request.offset, readSize});
-      VELOX_CHECK_NOT_NULL(
-          inputStreams[index], "BufferedInput::enqueue returned null stream");
+      for (size_t consumed = 0; consumed < readSize;) {
+        const auto chunkSize = std::min(readSize - consumed, maxReadSize);
+        const auto offset = request.offset + consumed;
+        auto inputStream = input->enqueue({offset, chunkSize});
+        VELOX_CHECK_NOT_NULL(
+            inputStream, "BufferedInput::enqueue returned null stream");
+        pendingReads.push_back(
+            {offset,
+             chunkSize,
+             request.dst + consumed,
+             std::move(inputStream)});
+        consumed += chunkSize;
+      }
     }
 
-    if (hasReads) {
+    // Counts adapter-enqueued ranges, not storage requests: adjacent ranges
+    // can still coalesce into one I/O. Original cuDF request counts and result
+    // ordering are unchanged.
+    addIoCounter(ioStats, kDeviceReadPlannedRanges, pendingReads.size());
+    if (!pendingReads.empty()) {
       // CachedBufferedInput may schedule coalesced loads asynchronously, while
       // a singleton demand region may not be scheduled at all. The Next()/
       // readFully() materialization below is the authoritative completion
@@ -715,17 +747,12 @@ std::vector<size_t> executeDeviceReadBatch(
         totalReadBytes,
         RuntimeCounter::Unit::kBytes);
 
-    for (size_t index = 0; index < requests.size(); ++index) {
-      const auto readSize = results[index];
-      if (readSize == 0 || inputStreams[index] == nullptr) {
-        continue;
-      }
-
-      auto* cacheStream =
-          dynamic_cast<CacheInputStream*>(inputStreams[index].get());
+    for (const auto& read : pendingReads) {
+      const auto readSize = read.size;
+      auto* cacheStream = dynamic_cast<CacheInputStream*>(read.stream.get());
       if (cacheStream == nullptr) {
         if (auto* directStream =
-                dynamic_cast<DirectInputStream*>(inputStreams[index].get())) {
+                dynamic_cast<DirectInputStream*>(read.stream.get())) {
           size_t retainedBytes = 0;
           while (retainedBytes < readSize) {
             auto retained = directStream->nextRetained();
@@ -738,20 +765,20 @@ std::vector<size_t> executeDeviceReadBatch(
             VELOX_CHECK_GT(bytes, 0, "Direct input returned an empty run");
             VELOX_CHECK_LE(bytes, readSize - retainedBytes);
             transfer.addBufferedRegion(
-                std::move(*retained), requests[index].dst + retainedBytes);
+                std::move(*retained), read.dst + retainedBytes);
             retainedBytes += bytes;
           }
           continue;
         }
-        if (auto retained = input->retainedBufferedRegion(
-                requests[index].offset, readSize)) {
-          transfer.addBufferedRegion(std::move(*retained), requests[index].dst);
+        if (auto retained =
+                input->retainedBufferedRegion(read.offset, readSize)) {
+          transfer.addBufferedRegion(std::move(*retained), read.dst);
           continue;
         }
         std::vector<uint8_t> copied(readSize);
-        inputStreams[index]->readFully(
+        read.stream->readFully(
             reinterpret_cast<char*>(copied.data()), readSize);
-        transfer.addCopiedRegion(std::move(copied), requests[index].dst);
+        transfer.addCopiedRegion(std::move(copied), read.dst);
         continue;
       }
 
@@ -779,8 +806,7 @@ std::vector<size_t> executeDeviceReadBatch(
             retained.ranges().front().data(),
             data,
             "Retained cache region does not begin at the Next() result");
-        transfer.addCachedRegion(
-            std::move(retained), requests[index].dst + copiedBytes);
+        transfer.addCachedRegion(std::move(retained), read.dst + copiedBytes);
         copiedBytes += runSize;
       }
     }
@@ -790,7 +816,7 @@ std::vector<size_t> executeDeviceReadBatch(
     // the input streams and their original pins before H2D begins. Staged
     // transfers release each owner after its last fragment is packed; the
     // direct fallback retains the owners until its CUDA completion fence.
-    inputStreams.clear();
+    pendingReads.clear();
   }
 
   // Only reserve the bounded pinned arena after all storage work is complete

@@ -132,6 +132,43 @@ class StreamOnlyBufferedInput final : public BufferedInput {
   void load(dwio::common::LogType) override {}
 };
 
+// Hold storage reads open so the test can distinguish parallel read-ahead
+// from demand reads issued only after the preceding quantum completes.
+class GatedReadFile final : public InMemoryReadFile {
+ public:
+  using InMemoryReadFile::InMemoryReadFile;
+
+  uint64_t preadv(
+      uint64_t offset,
+      const std::vector<folly::Range<char*>>& buffers,
+      const FileIoContext& context = {}) const override {
+    {
+      std::unique_lock lock(mutex_);
+      ++startedReads_;
+      cv_.notify_all();
+      cv_.wait(lock, [&] { return released_; });
+    }
+    return InMemoryReadFile::preadv(offset, buffers, context);
+  }
+
+  bool waitForReads(size_t count) const {
+    std::unique_lock lock(mutex_);
+    return cv_.wait_for(lock, 5s, [&] { return startedReads_ >= count; });
+  }
+
+  void release() {
+    std::lock_guard lock(mutex_);
+    released_ = true;
+    cv_.notify_all();
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  mutable std::condition_variable cv_;
+  mutable size_t startedReads_{0};
+  bool released_{false};
+};
+
 struct PendingReadState {
   PendingReadState() : releaseFuture(release.get_future().share()) {}
 
@@ -517,10 +554,120 @@ TEST_F(CudfSplitReaderHelpersTest, directBufferedReadsRetainIoBuffers) {
           inputData.substr(71, kReadSize) + inputData.substr(0, 13) +
               inputData.substr(71, kReadSize));
       const auto metrics = ioStats->stats();
+      const auto chunksPerRead =
+          (kReadSize + input->loadQuantum() - 1) / input->loadQuantum();
+      EXPECT_EQ(
+          metrics.at("cudfBufferedDeviceReadPlannedRanges").sum,
+          preload ? 3 : 2 * chunksPerRead + 1);
       EXPECT_EQ(metrics.at("cudfBufferedRetainedSourceBytes").sum, kTotalSize);
       EXPECT_EQ(metrics.count("cudfCopiedSourceBytes"), 0);
       EXPECT_EQ(metrics.count("cudfCacheBackedSourceBytes"), 0);
     }
+  }
+}
+
+TEST_F(CudfSplitReaderHelpersTest, directBufferedReadsPrefetchEveryQuantum) {
+  constexpr size_t kQuantum = 64 << 10;
+  constexpr size_t kReadSize = 3 * kQuantum + 17;
+  constexpr size_t kOffset = 31;
+  std::string inputData(kOffset + kReadSize, '\0');
+  for (size_t i = 0; i < inputData.size(); ++i) {
+    inputData[i] = static_cast<char>(i % 251);
+  }
+  auto readFile = std::make_shared<GatedReadFile>(inputData);
+  folly::CPUThreadPoolExecutor executor(4);
+  io::ReaderOptions options(pool_.get());
+  options.setLoadQuantum(kQuantum);
+  // Keep the four pieces in separate storage calls for the concurrency check.
+  options.setMaxCoalesceBytes(1);
+  auto input = std::make_shared<DirectBufferedInput>(
+      readFile,
+      dwio::common::MetricsLog::voidLog(),
+      StringIdLease(fileIds(), "direct-buffered-prefetch-file"),
+      nullptr,
+      StringIdLease(fileIds(), "direct-buffered-prefetch-group"),
+      std::make_shared<dwio::common::IoStatistics>(),
+      nullptr,
+      &executor,
+      options);
+  auto ioStats = std::make_shared<facebook::velox::IoStats>();
+  BufferedInputDataSource dataSource(input, ioStats);
+  TestCudaStream stream;
+  rmm::device_buffer destination(
+      kReadSize, stream.view(), cudf::get_current_device_resource_ref());
+  auto future = dataSource.device_read_async(
+      kOffset,
+      kReadSize,
+      static_cast<uint8_t*>(destination.data()),
+      stream.view());
+
+  // All four chunks must begin before any storage read is allowed to finish.
+  // Release the gate before asserting so the old serialized path fails rather
+  // than hanging while its completion future is destroyed.
+  const bool allReadsStarted = readFile->waitForReads(4);
+  readFile->release();
+  EXPECT_TRUE(allReadsStarted);
+  EXPECT_EQ(future.get(), kReadSize);
+  std::string actual(kReadSize, '\0');
+  CUDF_CUDA_TRY(cudaMemcpy(
+      actual.data(),
+      destination.data(),
+      actual.size(),
+      cudaMemcpyDeviceToHost));
+  EXPECT_EQ(actual, inputData.substr(kOffset, kReadSize));
+  const auto metrics = ioStats->stats();
+  EXPECT_EQ(metrics.at("cudfBufferedDeviceReadRequests").sum, 1);
+  EXPECT_EQ(metrics.at("cudfBufferedDeviceReadPlannedRanges").sum, 4);
+  EXPECT_EQ(metrics.at("cudfBufferedRetainedSourceBytes").sum, kReadSize);
+  EXPECT_EQ(metrics.count("cudfCopiedSourceBytes"), 0);
+}
+
+TEST_F(
+    CudfSplitReaderHelpersTest,
+    directBufferedBatchPreservesRangeBoundaries) {
+  constexpr size_t kQuantum = 64 << 10;
+  const auto maxSize = std::numeric_limits<size_t>::max();
+  std::string inputData(3 * kQuantum + 31, '\0');
+  for (size_t i = 0; i < inputData.size(); ++i) {
+    inputData[i] = static_cast<char>(i % 251);
+  }
+  // Out-of-order and overlapping ranges, with a request clamped at EOF.
+  const std::string expected = inputData.substr(kQuantum + 7, kQuantum + 9) +
+      inputData.substr(37, 2 * kQuantum) + inputData.substr(3 * kQuantum - 5);
+  folly::CPUThreadPoolExecutor executor(1);
+  for (const bool async : {false, true}) {
+    SCOPED_TRACE(fmt::format("async={}", async));
+    auto input = makeDirectInput(inputData, async ? &executor : nullptr);
+    auto ioStats = std::make_shared<facebook::velox::IoStats>();
+    BufferedInputDataSource dataSource(input, ioStats);
+    TestCudaStream stream;
+    rmm::device_buffer destination(
+        expected.size(),
+        stream.view(),
+        cudf::get_current_device_resource_ref());
+    auto* dst = static_cast<uint8_t*>(destination.data());
+    const std::vector<cudf::io::datasource::device_read_request> requests{
+        {kQuantum + 7, kQuantum + 9, dst},
+        {0, 0, nullptr},
+        {37, 2 * kQuantum, dst + kQuantum + 9},
+        {3 * kQuantum - 5, maxSize, dst + 3 * kQuantum + 9},
+        {maxSize, maxSize, dst}};
+    EXPECT_EQ(
+        dataSource.device_read_batch_async(requests, stream.view()).get(),
+        (std::vector<size_t>{kQuantum + 9, 0, 2 * kQuantum, 36, 0}));
+    std::string actual(expected.size(), '\0');
+    CUDF_CUDA_TRY(cudaMemcpy(
+        actual.data(),
+        destination.data(),
+        actual.size(),
+        cudaMemcpyDeviceToHost));
+    EXPECT_EQ(actual, expected);
+    const auto metrics = ioStats->stats();
+    EXPECT_EQ(metrics.at("cudfBufferedDeviceReadRequests").sum, 5);
+    EXPECT_EQ(metrics.at("cudfBufferedDeviceReadPlannedRanges").sum, 5);
+    EXPECT_EQ(
+        metrics.at("cudfBufferedRetainedSourceBytes").sum, expected.size());
+    EXPECT_EQ(metrics.count("cudfCopiedSourceBytes"), 0);
   }
 }
 

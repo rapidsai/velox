@@ -204,6 +204,13 @@ class DirectBufferedInput : public BufferedInput {
     return pool_;
   }
 
+  /// Read-ahead quantum used to plan coalesced loads.
+  /// Consumers that need every byte can enqueue ranges no larger than this
+  /// quantum to avoid synchronous demand reads for the remaining bytes.
+  int32_t loadQuantum() const {
+    return options_.loadQuantum();
+  }
+
   /// Returns the contiguous byte range of preloaded data at 'offset' in the
   /// file, up to 'length' bytes. Caller must call preload() first and ensure
   /// 'offset' < file size.
