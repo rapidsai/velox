@@ -165,7 +165,6 @@ struct DeviceReadCompletion {
 
 struct CachingDataSource::State {
   std::unique_ptr<cudf::io::datasource> delegate;
-  folly::Executor* executor;
   cache::AsyncDataCache* cache;
   StringIdLease fileNum;
   std::shared_ptr<IoStats> ioStats;
@@ -173,11 +172,9 @@ struct CachingDataSource::State {
   State(
       std::unique_ptr<cudf::io::datasource> source,
       std::string_view path,
-      folly::Executor* ioExecutor,
       cache::AsyncDataCache* dataCache,
       std::shared_ptr<IoStats> stats)
       : delegate(std::move(source)),
-        executor(ioExecutor),
         cache(dataCache),
         fileNum(fileIds(), std::string(path)),
         ioStats(std::move(stats)) {
@@ -303,14 +300,12 @@ struct CachingDataSource::State {
 CachingDataSource::CachingDataSource(
     std::unique_ptr<cudf::io::datasource> delegate,
     std::string_view path,
-    folly::Executor* executor,
     cache::AsyncDataCache* cache,
     std::shared_ptr<IoStats> ioStats)
     : state_(
           std::make_shared<State>(
               std::move(delegate),
               path,
-              executor,
               cache,
               std::move(ioStats))) {}
 CachingDataSource::~CachingDataSource() = default;
@@ -360,10 +355,7 @@ std::future<size_t> CachingDataSource::device_read_async(
   }
   VELOX_CHECK_NOT_NULL(dst);
   const auto device = streamDevice(stream);
-  const cache::RawFileCacheKey key{state_->fileNum.id(), offset};
-  auto* executor = state_->executor && state_->cache->exists(key)
-      ? state_->executor
-      : remoteReadExecutor();
+  auto* executor = remoteReadExecutor();
   auto promise = std::make_shared<std::promise<size_t>>();
   auto submitted = promise->get_future();
   executor->add([state = state_, promise, offset, bytes, dst, stream, device] {
@@ -417,7 +409,6 @@ std::unique_ptr<cudf::io::datasource::buffer> CachingDataSource::device_read(
 std::unique_ptr<cudf::io::datasource> maybeCacheKvikioDataSource(
     std::unique_ptr<cudf::io::datasource> delegate,
     std::string_view path,
-    folly::Executor* executor,
     cache::AsyncDataCache* cache,
     bool cacheable,
     std::shared_ptr<IoStats> ioStats) {
@@ -425,7 +416,7 @@ std::unique_ptr<cudf::io::datasource> maybeCacheKvikioDataSource(
     return delegate;
   }
   return std::make_unique<CachingDataSource>(
-      std::move(delegate), path, executor, cache, std::move(ioStats));
+      std::move(delegate), path, cache, std::move(ioStats));
 }
 
 } // namespace facebook::velox::cudf_velox::connector::hive

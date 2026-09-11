@@ -83,7 +83,6 @@ class ScopedNvtxRange {
 
 std::unique_ptr<cudf::io::datasource> makeKvikioDataSource(
     std::string_view path,
-    folly::Executor* executor,
     bool cacheable,
     const std::shared_ptr<IoStats>& ioStats) {
   auto sources = cudf::io::make_datasources(
@@ -92,7 +91,6 @@ std::unique_ptr<cudf::io::datasource> makeKvikioDataSource(
   return maybeCacheKvikioDataSource(
       std::move(sources.front()),
       path,
-      executor,
       cache::AsyncDataCache::getInstance(),
       cacheable,
       ioStats);
@@ -423,8 +421,8 @@ void CudfSplitReader::setupCudfDataSource() {
   if (not useBufferedInput) {
     VLOG(1) << fmt::format(
         "Using KvikIO data source for file: {}", split_->filePath);
-    dataSource_ = makeKvikioDataSource(
-        split_->filePath, executor_, split_->cacheable, ioStats_);
+    dataSource_ =
+        makeKvikioDataSource(split_->filePath, split_->cacheable, ioStats_);
     return;
   }
 
@@ -452,8 +450,8 @@ void CudfSplitReader::setupCudfDataSource() {
     LOG(WARNING) << fmt::format(
         "Failed to generate file handle cache for file. Falling back to KvikIO. Path: {}",
         split_->filePath);
-    dataSource_ = makeKvikioDataSource(
-        split_->filePath, executor_, split_->cacheable, ioStats_);
+    dataSource_ =
+        makeKvikioDataSource(split_->filePath, split_->cacheable, ioStats_);
     return;
   }
 
@@ -485,8 +483,8 @@ void CudfSplitReader::setupCudfDataSource() {
     LOG(WARNING) << fmt::format(
         "Failed to create buffered input data source for file. Falling back to the KvikIO. Path: {}",
         split_->filePath);
-    dataSource_ = makeKvikioDataSource(
-        split_->filePath, executor_, split_->cacheable, ioStats_);
+    dataSource_ =
+        makeKvikioDataSource(split_->filePath, split_->cacheable, ioStats_);
     return;
   }
   dataSource_ = std::make_unique<BufferedInputDataSource>(

@@ -21,8 +21,6 @@
 
 #include <cudf/io/datasource.hpp>
 
-#include <folly/Executor.h>
-
 #include <future>
 #include <memory>
 #include <string_view>
@@ -36,13 +34,12 @@ namespace facebook::velox::cudf_velox::connector::hive {
 ///
 /// Cache keys are (file ID, request offset). An existing entry must cover the
 /// requested length; differently aligned ranges need not reuse cached bytes.
-/// The process-wide cache and the caller-owned executor must outlive reads.
+/// The process-wide cache must outlive reads.
 class CachingDataSource final : public cudf::io::datasource {
  public:
   CachingDataSource(
       std::unique_ptr<cudf::io::datasource> delegate,
       std::string_view path,
-      folly::Executor* executor,
       cache::AsyncDataCache* cache,
       std::shared_ptr<IoStats> ioStats = nullptr);
   ~CachingDataSource() override;
@@ -88,7 +85,6 @@ class CachingDataSource final : public cudf::io::datasource {
 std::unique_ptr<cudf::io::datasource> maybeCacheKvikioDataSource(
     std::unique_ptr<cudf::io::datasource> delegate,
     std::string_view path,
-    folly::Executor* executor,
     cache::AsyncDataCache* cache,
     bool cacheable,
     std::shared_ptr<IoStats> ioStats = nullptr);
