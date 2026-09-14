@@ -38,12 +38,20 @@ namespace facebook::velox::cache {
 using memory::MachinePageCount;
 using memory::MemoryAllocator;
 
+namespace {
+std::atomic<AsyncDataCache::AllocatorFactory> allocatorFactory{nullptr};
+} // namespace
+
 AsyncDataCacheEntry::AsyncDataCacheEntry(CacheShard* shard) : shard_(shard) {
   accessStats_.reset();
 }
 
 AsyncDataCacheEntry::~AsyncDataCacheEntry() {
   freeData();
+}
+
+AsyncDataCache* AsyncDataCacheEntry::cache() const {
+  return shard_->cache();
 }
 
 void AsyncDataCacheEntry::freeData() {
@@ -63,9 +71,14 @@ void AsyncDataCacheEntry::freeData() {
   if (contiguousData_ != nullptr) {
     VELOX_CHECK(
         tinyData_.empty(), "Entry cannot have both contiguous and tiny data");
-    cache->incrementCachedPages(-memory::AllocationTraits::numPages(size_));
+    cache->incrementCachedPages(-memory::AllocationTraits::numPages(
+        allocationOwner_ ? allocationOwner_->capacity() : size_));
     ClockTimer t(shard_->allocClocks());
-    cache->allocator()->freeBytes(contiguousData_, size_);
+    if (allocationOwner_) {
+      allocationOwner_.reset();
+    } else {
+      cache->allocator()->freeBytes(contiguousData_, size_);
+    }
     contiguousData_ = nullptr;
   }
   tinyData_.clear();
@@ -151,6 +164,20 @@ void AsyncDataCacheEntry::initialize(FileCacheKey key, bool contiguous) {
 
   tinyData_.clear();
   tinyData_.shrink_to_fit();
+  try {
+    allocationOwner_ = cache->allocateOwned(size_);
+  } catch (...) {
+    // No CachePin has been returned yet. Remove the exclusive placeholder and
+    // wake any waiters if optional backing allocation throws.
+    release();
+    throw;
+  }
+  if (allocationOwner_) {
+    contiguousData_ = allocationOwner_->data();
+    cache->incrementCachedPages(
+        memory::AllocationTraits::numPages(allocationOwner_->capacity()));
+    return;
+  }
   if (contiguous) {
     contiguousData_ = cache->allocator()->allocateBytes(size_);
     if (contiguousData_ != nullptr) {
@@ -201,6 +228,9 @@ std::vector<folly::Range<char*>> AsyncDataCacheEntry::dataRanges(
 }
 
 int64_t AsyncDataCacheEntry::dataCapacity() const {
+  if (allocationOwner_) {
+    return allocationOwner_->capacity();
+  }
   return tinyData_.capacity() + (contiguousData_ != nullptr ? size_ : 0) +
       nonContiguousData_.byteSize();
 }
@@ -215,6 +245,9 @@ void AsyncDataCacheEntry::updateDataStats(CacheStats& stats) const {
   } else if (contiguousData_ != nullptr) {
     VELOX_CHECK(nonContiguousData_.empty());
     stats.largeSize += size_;
+    if (allocationOwner_) {
+      stats.largePadding += allocationOwner_->capacity() - size_;
+    }
     ++stats.numLargeEntries;
   } else {
     stats.largeSize += size_;
@@ -503,8 +536,17 @@ void CacheShard::acquireEvictedData(
     AcquiredMemory& acquired,
     AcquiredMemory& toFree,
     int64_t& largeEvicted,
-    int64_t& tinyEvicted) {
-  if (entry->contiguousData_ != nullptr) {
+    int64_t& tinyEvicted,
+    uint64_t& pooledEvicted) {
+  if (entry->allocationOwner_) {
+    const auto bytes = entry->allocationOwner_->capacity();
+    largeEvicted += bytes;
+    pooledEvicted += bytes;
+    // Returning a slice never frees backing or calls a device API. Empty
+    // blocks are reclaimed outside shard locks by the pressure path.
+    entry->allocationOwner_.reset();
+    entry->contiguousData_ = nullptr;
+  } else if (entry->contiguousData_ != nullptr) {
     VELOX_CHECK(entry->tinyData_.empty());
     VELOX_CHECK(entry->nonContiguousData_.empty());
     const uint64_t bytes = entry->size_;
@@ -540,7 +582,8 @@ uint64_t CacheShard::evict(
     uint64_t bytesToFree,
     bool evictAllUnpinned,
     uint64_t bytesToAcquire,
-    AcquiredMemory& acquired) {
+    AcquiredMemory& acquired,
+    uint64_t* pooledEvictedBytes) {
   auto* ssdCache = cache_->ssdCache();
   const bool skipSsdSaveable =
       (ssdCache != nullptr) && ssdCache->writeInProgress();
@@ -548,6 +591,7 @@ uint64_t CacheShard::evict(
   AcquiredMemory toFree;
   int64_t tinyEvicted = 0;
   int64_t largeEvicted = 0;
+  uint64_t pooledEvicted = 0;
   int32_t evictSaveableSkipped = 0;
   {
     std::lock_guard<std::mutex> l(mutex_);
@@ -601,7 +645,8 @@ uint64_t CacheShard::evict(
             acquired,
             toFree,
             largeEvicted,
-            tinyEvicted);
+            tinyEvicted,
+            pooledEvicted);
 
         removeEntryLocked(candidate);
         emptySlots_.push_back(entryIndex);
@@ -634,6 +679,9 @@ uint64_t CacheShard::evict(
     }
   }
 
+  if (pooledEvictedBytes) {
+    *pooledEvictedBytes += pooledEvicted;
+  }
   return largeEvicted + tinyEvicted;
 }
 
@@ -772,7 +820,12 @@ bool CacheShard::removeFileEntries(
 
       ++numAgedOut_;
       ++numRemoved;
-      if (cacheEntry->contiguousData_ != nullptr) {
+      if (cacheEntry->allocationOwner_) {
+        pagesRemoved += memory::AllocationTraits::numPages(
+            cacheEntry->allocationOwner_->capacity());
+        cacheEntry->allocationOwner_.reset();
+        cacheEntry->contiguousData_ = nullptr;
+      } else if (cacheEntry->contiguousData_ != nullptr) {
         pagesRemoved += memory::AllocationTraits::numPages(cacheEntry->size_);
         toFree.byteAllocations.emplace_back(
             cacheEntry->contiguousData_, cacheEntry->size_);
@@ -847,7 +900,59 @@ AsyncDataCache::AsyncDataCache(
   }
 }
 
-AsyncDataCache::~AsyncDataCache() = default;
+AsyncDataCache::~AsyncDataCache() {
+  for (auto& shard : shards_) {
+    shard->shutdown();
+  }
+  shutdownBacking();
+}
+
+void AsyncDataCache::setAllocatorFactory(AllocatorFactory factory) {
+  allocatorFactory.store(factory);
+}
+
+std::shared_ptr<CacheAllocation> AsyncDataCache::allocateOwned(uint64_t bytes) {
+  const auto factory = allocatorFactory.load();
+  if (!factory) {
+    return nullptr;
+  }
+  std::shared_ptr<CacheAllocator> backing;
+  {
+    std::lock_guard lock(backingMutex_);
+    if (!backingAllocator_) {
+      backingAllocator_ = factory(this);
+      hasBackingAllocator_ = backingAllocator_ != nullptr;
+    }
+    backing = backingAllocator_;
+  }
+  // Allocation can invoke makeSpace recursively through the root allocator.
+  // Neither the backing-list mutex nor a shard mutex may be held here.
+  return backing ? backing->allocate(bytes) : nullptr;
+}
+
+uint64_t AsyncDataCache::reclaimBacking(uint64_t targetBytes) {
+  if (!hasBackingAllocator_) {
+    return 0;
+  }
+  std::shared_ptr<CacheAllocator> backing;
+  {
+    std::lock_guard lock(backingMutex_);
+    backing = backingAllocator_;
+  }
+  return backing ? backing->reclaim(targetBytes) : 0;
+}
+
+void AsyncDataCache::shutdownBacking() noexcept {
+  std::shared_ptr<CacheAllocator> backing;
+  {
+    std::lock_guard lock(backingMutex_);
+    backing.swap(backingAllocator_);
+    hasBackingAllocator_ = false;
+  }
+  if (backing) {
+    backing->shutdown();
+  }
+}
 
 // static
 std::shared_ptr<AsyncDataCache> AsyncDataCache::create(
@@ -883,6 +988,7 @@ void AsyncDataCache::shutdown() {
   for (auto& shard : shards_) {
     shard->shutdown();
   }
+  shutdownBacking();
 }
 
 void CacheShard::shutdown() {
@@ -984,6 +1090,11 @@ bool AsyncDataCache::makeSpace(
     isCounted = true;
   }
   for (auto nthAttempt = 0; nthAttempt < kMaxAttempts; ++nthAttempt) {
+    // Empty pool slabs are actual allocator capacity, not eviction collateral.
+    // Return them before checking whether an allocation can be attempted.
+    if (nthAttempt > 0 || !canTryAllocate(requestBytes, acquired)) {
+      reclaimBacking(requestBytes);
+    }
     if (canTryAllocate(requestBytes, acquired)) {
       if (allocate(acquired)) {
         VELOX_CHECK(acquired.empty());
@@ -1045,9 +1156,14 @@ uint64_t AsyncDataCache::shrink(uint64_t targetBytes) {
   uint64_t shrinkTimeUs{0};
   {
     MicrosecondWallTimer timer(&shrinkTimeUs);
+    evictedBytes += reclaimBacking(targetBytes);
     for (int shard = 0; shard < shards_.size(); ++shard) {
+      if (evictedBytes >= targetBytes) {
+        break;
+      }
       AcquiredMemory acquired;
-      evictedBytes += shards_[shardCounter_++ & shardMask_]->evict(
+      uint64_t pooledEvicted = 0;
+      const auto entriesEvicted = shards_[shardCounter_++ & shardMask_]->evict(
           std::max<uint64_t>(
               CacheShard::kMinBytesToEvict, targetBytes - evictedBytes),
           // Cache shrink is triggered when server is under low memory pressure
@@ -1055,7 +1171,11 @@ uint64_t AsyncDataCache::shrink(uint64_t targetBytes) {
           // triggering ssd save to accelerate the cache evictions.
           true,
           0,
-          acquired);
+          acquired,
+          &pooledEvicted);
+      // A slice returned to a partially live slab did not free root memory.
+      evictedBytes += entriesEvicted - pooledEvicted;
+      evictedBytes += reclaimBacking(targetBytes);
       VELOX_CHECK(acquired.empty());
       if (evictedBytes >= targetBytes) {
         break;

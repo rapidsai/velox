@@ -31,9 +31,20 @@ namespace facebook::velox::cudf_velox::connector::hive {
 /// staging buffer. Based on Velox PR #18941. This is separate from the
 /// BufferedInput/AWS SDK datasource; it does not change that reader's I/O or
 /// bounded staging policy.
+/// When cache host registration is enabled, both adapters can instead copy
+/// directly from registered cache ranges retained through CUDA completion.
+/// Host reads and the cache-off delegate are unchanged.
+/// Device-read cache misses use the delegate's asynchronous host API. Pending
+/// fills and exclusive-entry waits do not occupy remote executor threads.
+/// Admission is bounded before allocating cache entries, independently of
+/// driver/preload counts. The returned future still fences destination writes
+/// on both consumption and discard; failed/short fills are never published.
 ///
-/// Cache keys are (file ID, request offset). An existing entry must cover the
-/// requested length; differently aligned ranges need not reuse cached bytes.
+/// Cache keys are (file ID, request offset). Like BufferedInput, reads reuse
+/// smaller entries at successive offsets and fill only the remaining suffix.
+/// This is exact-offset fragment reuse, not an arbitrary interval lookup:
+/// differently aligned ranges need not reuse cached bytes. Every registered
+/// fragment remains owned until the logical device read's H2D fence completes.
 /// The process-wide cache must outlive reads.
 class CachingDataSource final : public cudf::io::datasource {
  public:

@@ -49,6 +49,10 @@ struct CudfConfig {
       "cudf.host_to_device_staging_pack_threads"};
   static constexpr const char* kCudfHostToDeviceStagingWindowSets{
       "cudf.host_to_device_staging_window_sets"};
+  static constexpr const char* kCudfCacheHostRegistrationEnabled{
+      "cudf.cache_host_registration_enabled"};
+  static constexpr const char* kCudfCacheHostRegistrationMaxBytes{
+      "cudf.cache_host_registration_max_bytes"};
   static constexpr const char* kCudfAllowCpuFallback{"cudf.allow_cpu_fallback"};
   static constexpr const char* kCudfLogFallback{"cudf.log_fallback"};
   static constexpr const char* kCudfBatchSizeMinThreshold{
@@ -228,6 +232,16 @@ struct CudfConfig {
   /// "s" (seconds), "ms" (milliseconds), "us" (microseconds), "ns"
   /// (nanoseconds).
   cudf::type_id timestampUnit = cudf::type_id::TIMESTAMP_NANOSECONDS;
+
+  /// Opt-in registered slab backing for AsyncDataCache in both GPU readers.
+  /// Cache entry eviction reuses slices; memory pressure frees empty slabs.
+  bool cacheHostRegistrationEnabled{false};
+
+  /// Process-wide limit on full registered slab capacity, including unused
+  /// slices and pending registrations. Admission failures use ordinary cache
+  /// memory and staging; root allocator accounting includes all slab backing.
+  /// This does not include other CUDA/UCX/staging host registrations.
+  uint64_t cacheHostRegistrationMaxBytes{32ULL << 30};
 };
 
 } // namespace facebook::velox::cudf_velox

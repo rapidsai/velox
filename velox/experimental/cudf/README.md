@@ -36,6 +36,137 @@ Velox-cuDF builds are included in Velox CI as part of the [adapters build](https
 
 Velox-cuDF provides several configuration properties to control GPU execution behavior, memory management, and debugging. These configurations are available when compiled with cuDF support and can be set via Velox's configuration system. For a complete list of cuDF-specific configuration properties and their descriptions, see the [Cudf-specific Configuration section](https://facebookincubator.github.io/velox/configs.html#cudf-specific-configuration-experimental) in the Velox configuration documentation.
 
+#### Asynchronous KvikIO cache fills
+
+The KvikIO read-through cache submits GPU scan cache misses through the cuDF
+datasource's `host_read_async` API. Executor threads perform lookup, submission,
+and H2D preparation, but do not wait for eager host-I/O futures or another
+reader's exclusive cache entry. A process-wide readiness thread checks pending
+futures, without blocking I/O or CUDA calls; cuDF's `std::future` interface does
+not expose completion callbacks. It sleeps when idle and checks outstanding
+reads at 100-microsecond intervals. Ready ranges can submit H2D independently
+of earlier pending ranges. A deferred-only delegate remains supported via the
+executor and is counted separately.
+
+The cache-read admission window uses a positive
+`KVIKIO_REMOTE_IO_MAX_CONCURRENT_REQUESTS`, or 64 when unset/zero. It bounds
+admitted logical reads **before cache allocation**, not the number of TCP GETs;
+KvikIO may split a large logical read into multiple transport requests. This
+is a count limit, not a new host-memory budget. Existing cache/pinned-pool
+budgets still apply. `KVIKIO_NTHREADS` sizes the executor, not the number of
+pending asynchronous cache fills. No driver count, split preload depth, GPU
+destination size, or worker placement is changed. This is not yet host-only
+split prefetch or H2D streaming from a partially filled cache entry.
+
+Use query-level runtime counters to verify dispatch:
+
+- `cudfKvikioCacheAsyncFillSubmitted`: logical asynchronous fill calls.
+- `cudfKvikioCacheAsyncFillInFlightSamples`: outstanding logical fills across
+  the worker process at submission; inspect `max`, not the sum of samples.
+- `cudfKvikioCacheAsyncReadQueueNanos`: admission/executor delay before lookup.
+- `cudfKvikioCacheAsyncFillReadNanos`: elapsed host-fill work, including
+  completion observation/scheduling; **not** pure network service time.
+- `cudfKvikioCacheExclusiveWaitNanos`: waiting for another cache fill.
+- `cudfKvikioCacheDeferredHostReads`: delegates that cannot start eagerly.
+- `cudfKvikioCacheAsyncReadSynchronousFallbacks`: uncached fallback reads
+  when a cache entry cannot be admitted (including oversized ranges).
+- `cudfKvikioCacheAsyncReadFailures`: failed asynchronous read operations.
+
+Time counters sum concurrent work and are not query critical-path durations.
+Cache-off KvikIO, synchronous host/device callers, and BufferedInput/AWS SDK
+dispatch are unchanged. Exclusive entries remain unpublished until a complete
+successful fill; failure paths drain outstanding writes before freeing storage.
+The device-read completion still fences H2D and retains cache ownership through
+completion, including when the caller discards its future.
+
+Both host and device reads reuse smaller cache entries with the same
+`kAllowSmaller` policy as BufferedInput. A larger read consumes the cached
+prefix, looks up the next offset, and fills only the remaining suffix rather
+than invalidating and fetching the prefix again. This includes non-contiguous
+cache entries. Synchronous callers retain inline dispatch; GPU scan misses
+retain asynchronous dispatch. Registered fragments remain pinned through H2D,
+including when a later suffix fails or the caller discards the read.
+
+This is exact-offset fragment reuse, not arbitrary interval lookup. A read
+starting inside an entry, or spanning a cached island beyond an uncached gap,
+can still fetch overlapping bytes. `cudfKvikioCacheReusedPrefixes` counts
+smaller cached entries consumed; `cudfKvikioCacheReusedPrefixBytes` counts the
+bytes served by those prefixes. Hit/miss counters record actual fragment bytes,
+not the full logical request for every fragment. Cache-off reads are unchanged.
+
+#### Experimental registered cache backing
+
+`cudf.cache_host_registration_enabled=true` enables a registered backing pool
+for AsyncDataCache in both the BufferedInput and KvikIO GPU readers. It is
+disabled by default; ordinary CPU and cache-off paths are unchanged. Cache
+entries suballocate page-aligned slices of stable slabs charged to the existing
+Velox allocator. A new slab is first-touched and registered once before its
+slices are filled. S3/SSD fills write directly into these slices and H2D reads
+the same storage: there is no additional cache-to-staging copy for admitted
+data, and no GPU-to-host cache population step.
+
+Regular slabs grow from 64 MiB to 128 MiB to 256 MiB, then remain at 256 MiB.
+This sizes backing blocks, **not individual entries**. Larger contiguous
+requests use dedicated page-rounded blocks. Existing allocations never move.
+Slab preparation inherits the allocating worker's CPU/memory policy and reuse
+is separated by CPU NUMA node; production workers should bind CPU and memory
+together. Root-allocator huge-page policy is unchanged. This does not migrate
+already resident malloc backing to another NUMA node.
+
+`cudf.cache_host_registration_max_bytes` limits full registered slab capacity
+across one worker **process**, including free space and pending registrations.
+The default is 34359738368 bytes (32 GiB), not a hardware limit; other CUDA/UCX
+registrations and staging buffers are outside this budget. All slab backing is
+also charged to Velox's root allocator. Tiny entries and admissions that exceed
+the budget, fail allocation, or encounter a recoverable CUDA registration error
+use ordinary cache storage and staging without refetching bytes. Existing
+pageable cache entries are not copied or registered individually. Empty slabs
+can be reclaimed to make room; this version does not evict cached data or unpin
+live slabs to admit a different working set.
+
+Idle registrations retain no cache pins. Eviction, file invalidation, and
+failed fills return slices to the pool; adjacent free slices can be reused as
+a larger range without copying live data. DMA leases independently hold shared
+cache pins and exclude unregister until the reader's completion fence. Under
+root-memory pressure, or explicit cache shrink, empty slabs are unregistered
+before their backing is freed. Partially live slabs cannot release root
+capacity, and shrink does not report their returned slices as freed memory.
+Cache shutdown/destruction frees all backing while CUDA and the root allocator
+are alive; readers must be quiescent. CUDA calls and root backing frees run
+outside cache shard and pool mutexes.
+
+Cache clear drops unpinned **data** but retains reusable prepared slabs. A
+data-cache-cold run with a prepared pool is therefore different from a fresh
+worker run, which also pays allocation, page faults, and registration. Report
+both separately when testing. Restart for registration on/off comparisons and
+keep the reader, native exchange, drivers, and split policy fixed. New slab
+preparation is synchronous; overlapping it with I/O is a separate experiment.
+
+`cudfCacheRegisteredH2DBytes` proves registered transfers occurred.
+`cudfCacheHostRegisterCalls`, `cudfCacheHostRegisteredBytes`,
+`cudfCacheHostPoolPrepareNanos`, and `cudfCacheHostRegisterNanos` report each slab's
+creation once, to its first GPU acquisition with query stats. This may be a
+different query than its preloader. Preparation includes backing allocation and
+first touch; registration time covers the CUDA API call. Repeated acquisitions
+should report zero new calls/time while their backing survives, including after
+entry eviction and reuse. `cudfCacheHostRegistrationFallbackBytes` records H2D
+bytes that instead use staging.
+
+Counters ending in `Samples` are process snapshots: use **max**, not sum, for
+footprint gauges, or successive per-worker differences for cumulative events.
+`cudfCacheHostPoolSlabsSamples`, `cudfCacheHostPoolUsedBytesSamples`, and
+`cudfCacheHostPoolFreeBytesSamples` expose pool occupancy.
+`cudfCacheHostRegistrationReservedBytesSamples` measures registered/pending
+capacity, and `cudfCacheHostRegistrationRetainedBytesSamples` measures backing
+capacity. `cudfCacheHostPoolRegisterCallsSamples` and
+`cudfCacheHostPoolUnregisterCallsSamples` are cumulative registration attempts
+and successful unregisters, including maintenance; `cudfCacheHostPoolBudgetFallbacksSamples`,
+`cudfCacheHostPoolAllocationFallbacksSamples`, and
+`cudfCacheHostPoolRegistrationFailuresSamples` distinguish admission failures.
+Query-stat owners are not retained by idle slabs. Submission/wait counters
+(`cudfCacheRegisteredH2DSubmitWaitNanos` and `cudfCacheRegisteredH2DWaitNanos`)
+measure host intervals, **not** CUDA-event elapsed time or query critical path.
+
 ### Testing Velox with cuDF
 
 Tests with Velox-cuDF can only be run on GPU-enabled hardware. The Velox-cuDF tests in [experimental/cudf/tests](https://github.com/facebookincubator/velox/blob/main/velox/experimental/cudf/tests) include several types of tests:

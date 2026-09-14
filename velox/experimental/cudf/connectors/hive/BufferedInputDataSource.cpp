@@ -16,6 +16,7 @@
 
 #include "velox/experimental/cudf/CudfNoDefaults.h"
 #include "velox/experimental/cudf/connectors/hive/BufferedInputDataSource.h"
+#include "velox/experimental/cudf/connectors/hive/CacheHostRegistration.h"
 #include "velox/experimental/cudf/connectors/hive/PinnedStagingArena.h"
 
 #include "velox/dwio/common/BufferedInput.h"
@@ -45,6 +46,8 @@ namespace {
 using DeviceReadRequest = cudf::io::datasource::device_read_request;
 using facebook::velox::IoStats;
 using facebook::velox::RuntimeCounter;
+using facebook::velox::cache::CachePin;
+using facebook::velox::cudf_velox::connector::hive::CacheHostRegistration;
 using facebook::velox::cudf_velox::connector::hive::PinnedStagingArena;
 using facebook::velox::dwio::common::BufferedInput;
 using facebook::velox::dwio::common::CachedRegion;
@@ -224,6 +227,162 @@ class CudaEvent {
   bool recorded_{false};
 };
 
+// Registered cache entries are already suitable DMA sources. Submit completed
+// entries while other loads run, without borrowing staging windows across I/O
+// waits. Leases retain both the cache pins and slab registrations until the
+// final event, including when a later read or submission fails.
+class RegisteredReadPipeline {
+ public:
+  RegisteredReadPipeline(
+      rmm::cuda_stream_view stream,
+      int device,
+      std::shared_ptr<IoStats> ioStats)
+      : stream_(stream), device_(device), ioStats_(std::move(ioStats)) {}
+
+  ~RegisteredReadPipeline() noexcept {
+    if (cudaWorkMayBePending_) {
+      try {
+        // A failed enqueue may have submitted work before the final event.
+        synchronizeStream(stream_, device_);
+      } catch (...) {
+        // synchronizeStream either fenced the work or terminated.
+      }
+    }
+  }
+
+  // These are adapter-observed readiness times, not network completion times.
+  // In particular, a cache hit is ready without any remote read.
+  void sourceReady() {
+    if (!enabled_) {
+      return;
+    }
+    lastSourceReady_ = std::chrono::steady_clock::now();
+    bytesBeforeLastSourceReady_ = submittedBytes_;
+  }
+
+  bool tryAdd(const CachedRegion& region, uint8_t* destination) {
+    if (!enabled_) {
+      return false;
+    }
+    auto lease = CacheHostRegistration::tryAcquire(
+        std::span<const CachePin>(&region.cachePin(), 1), ioStats_);
+    if (!lease) {
+      addIoCounter(
+          ioStats_,
+          "cudfCacheHostRegistrationFallbackBytes",
+          region.size(),
+          RuntimeCounter::Unit::kBytes);
+      return false;
+    }
+    // Establish ownership before any operation can enqueue a copy.
+    leases_.push_back(std::move(*lease));
+    for (const auto& range : region.ranges()) {
+      if (count_ == kMaximumCopiesPerBatch) {
+        flush();
+      }
+      destinations_[count_] = destination;
+      sources_[count_] = range.data();
+      sizes_[count_] = range.size();
+      ++count_;
+      pendingBytes_ += range.size();
+      destination += range.size();
+    }
+    return true;
+  }
+
+  void flush() {
+    if (count_ == 0) {
+      return;
+    }
+    const auto deviceScope =
+        rmm::cuda_set_device_raii{rmm::cuda_device_id{device_}};
+    if (!tailEvent_) {
+      tailEvent_ = std::make_unique<CudaEvent>();
+    }
+    const auto start = std::chrono::steady_clock::now();
+    if (submittedBytes_ == 0) {
+      firstSubmit_ = start;
+    }
+    cudaWorkMayBePending_ = true;
+    CUDF_CUDA_TRY(cudf::detail::memcpy_batch_async(
+        destinations_.data(), sources_.data(), sizes_.data(), count_, stream_));
+    submitNanos_ += elapsedNanos(start);
+    submittedBytes_ += pendingBytes_;
+    addIoCounter(ioStats_, "cudfBufferedReadyH2DBatches", 1);
+    addIoCounter(ioStats_, kDeviceReadFragments, count_);
+    addIoCounter(
+        ioStats_,
+        kCacheBackedSourceBytes,
+        pendingBytes_,
+        RuntimeCounter::Unit::kBytes);
+    addIoCounter(
+        ioStats_,
+        "cudfCacheRegisteredH2DBytes",
+        pendingBytes_,
+        RuntimeCounter::Unit::kBytes);
+    count_ = 0;
+    pendingBytes_ = 0;
+  }
+
+  void finish() {
+    flush();
+    if (!cudaWorkMayBePending_) {
+      return;
+    }
+    const auto deviceScope =
+        rmm::cuda_set_device_raii{rmm::cuda_device_id{device_}};
+    const auto waitStart = std::chrono::steady_clock::now();
+    tailEvent_->record(stream_);
+    tailEvent_->synchronize();
+    const auto waitNanos = elapsedNanos(waitStart);
+    cudaWorkMayBePending_ = false;
+    leases_.clear();
+    addIoCounter(
+        ioStats_,
+        "cudfBufferedReadyH2DTailWaitNanos",
+        waitNanos,
+        RuntimeCounter::Unit::kNanos);
+    addIoCounter(
+        ioStats_,
+        "cudfCacheRegisteredH2DSubmitWaitNanos",
+        submitNanos_ + waitNanos,
+        RuntimeCounter::Unit::kNanos);
+    addIoCounter(
+        ioStats_,
+        "cudfBufferedH2DBytesBeforeLastSourceReady",
+        bytesBeforeLastSourceReady_,
+        RuntimeCounter::Unit::kBytes);
+    addIoCounter(
+        ioStats_,
+        "cudfBufferedReadyH2DLeadNanos",
+        std::max<int64_t>(
+            0,
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                lastSourceReady_ - firstSubmit_)
+                .count()),
+        RuntimeCounter::Unit::kNanos);
+  }
+
+ private:
+  rmm::cuda_stream_view stream_;
+  int device_;
+  std::shared_ptr<IoStats> ioStats_;
+  const bool enabled_{CacheHostRegistration::enabled()};
+  std::vector<CacheHostRegistration::Lease> leases_;
+  std::unique_ptr<CudaEvent> tailEvent_;
+  std::array<void*, kMaximumCopiesPerBatch> destinations_{};
+  std::array<const void*, kMaximumCopiesPerBatch> sources_{};
+  std::array<size_t, kMaximumCopiesPerBatch> sizes_{};
+  size_t count_{0};
+  uint64_t pendingBytes_{0};
+  uint64_t submittedBytes_{0};
+  uint64_t bytesBeforeLastSourceReady_{0};
+  uint64_t submitNanos_{0};
+  std::chrono::steady_clock::time_point firstSubmit_{};
+  std::chrono::steady_clock::time_point lastSourceReady_{};
+  bool cudaWorkMayBePending_{false};
+};
+
 // Owns every host source referenced by a batch of H2D descriptors. Cache hits
 // retain cache pins directly; non-cache reads retain loaded allocations when
 // available, with copied pageable buffers as the generic fallback. The
@@ -234,6 +393,14 @@ class HostToDeviceTransferPlan {
  public:
   explicit HostToDeviceTransferPlan(std::shared_ptr<IoStats> ioStats)
       : ioStats_(std::move(ioStats)) {}
+
+  bool empty() const {
+    return destinations_.empty();
+  }
+
+  size_t size() const {
+    return totalBytes_;
+  }
 
   void addCachedRegion(CachedRegion region, uint8_t* destination) {
     VELOX_CHECK_LE(
@@ -379,13 +546,12 @@ class HostToDeviceTransferPlan {
       const auto count =
           std::min(kMaximumCopiesPerBatch, destinations_.size() - begin);
       try {
-        CUDF_CUDA_TRY(
-            cudf::detail::memcpy_batch_async(
-                destinations_.data() + begin,
-                sources_.data() + begin,
-                sizes_.data() + begin,
-                count,
-                stream));
+        CUDF_CUDA_TRY(cudf::detail::memcpy_batch_async(
+            destinations_.data() + begin,
+            sources_.data() + begin,
+            sizes_.data() + begin,
+            count,
+            stream));
       } catch (...) {
         scheduleError = std::current_exception();
         break;
@@ -524,13 +690,12 @@ class HostToDeviceTransferPlan {
         addIoCounter(ioStats_, kStagingNativeMemcpyBatchCopies, count);
       }
 #endif
-      CUDF_CUDA_TRY(
-          cudf::detail::memcpy_batch_async(
-              batch.destinations.data() + begin,
-              batch.sources.data() + begin,
-              batch.sizes.data() + begin,
-              count,
-              stream));
+      CUDF_CUDA_TRY(cudf::detail::memcpy_batch_async(
+          batch.destinations.data() + begin,
+          batch.sources.data() + begin,
+          batch.sizes.data() + begin,
+          count,
+          stream));
     }
     event.record(stream);
   }
@@ -670,6 +835,7 @@ std::vector<size_t> executeDeviceReadBatch(
   std::vector<PendingRead> pendingReads;
   pendingReads.reserve(requests.size());
   HostToDeviceTransferPlan transfer(ioStats);
+  RegisteredReadPipeline readyCopies(stream, device, ioStats);
   std::optional<PinnedStagingArena::WindowSetLease> stagingWindows;
   size_t totalReadBytes = 0;
 
@@ -711,6 +877,7 @@ std::vector<size_t> executeDeviceReadBatch(
       // to the previous load's buffers.
       if (auto retained =
               input->retainedBufferedRegion(request.offset, readSize)) {
+        readyCopies.sourceReady();
         transfer.addBufferedRegion(std::move(*retained), request.dst);
         continue;
       }
@@ -764,6 +931,7 @@ std::vector<size_t> executeDeviceReadBatch(
             const auto bytes = retained->size();
             VELOX_CHECK_GT(bytes, 0, "Direct input returned an empty run");
             VELOX_CHECK_LE(bytes, readSize - retainedBytes);
+            readyCopies.sourceReady();
             transfer.addBufferedRegion(
                 std::move(*retained), read.dst + retainedBytes);
             retainedBytes += bytes;
@@ -772,12 +940,14 @@ std::vector<size_t> executeDeviceReadBatch(
         }
         if (auto retained =
                 input->retainedBufferedRegion(read.offset, readSize)) {
+          readyCopies.sourceReady();
           transfer.addBufferedRegion(std::move(*retained), read.dst);
           continue;
         }
         std::vector<uint8_t> copied(readSize);
         read.stream->readFully(
             reinterpret_cast<char*>(copied.data()), readSize);
+        readyCopies.sourceReady();
         transfer.addCopiedRegion(std::move(copied), read.dst);
         continue;
       }
@@ -806,17 +976,33 @@ std::vector<size_t> executeDeviceReadBatch(
             retained.ranges().front().data(),
             data,
             "Retained cache region does not begin at the Next() result");
-        transfer.addCachedRegion(std::move(retained), read.dst + copiedBytes);
+        readyCopies.sourceReady();
+        const auto* entry = retained.cachePin().checkedEntry();
+        const auto offsetInEntry = read.offset + copiedBytes - entry->offset();
+        VELOX_CHECK_LE(offsetInEntry, entry->size());
+        const bool entryComplete = runSize == entry->size() - offsetInEntry;
+        if (!readyCopies.tryAdd(retained, read.dst + copiedBytes)) {
+          transfer.addCachedRegion(std::move(retained), read.dst + copiedBytes);
+        }
         copiedBytes += runSize;
+        // Batch physical runs within a ready entry, but submit before Next()
+        // can wait for another entry or the loop advances to another request.
+        if (entryComplete || copiedBytes == readSize) {
+          readyCopies.flush();
+        }
       }
     }
 
-    // The transfer plan now owns an independent pin for every cache fragment
-    // (or a retained allocation / owned copy for non-cache input). Release
-    // the input streams and their original pins before H2D begins. Staged
+    // Both transfer paths own independent pins. Registered copies may already
+    // be in flight; releasing streams cannot invalidate their sources. Staged
     // transfers release each owner after its last fragment is packed; the
     // direct fallback retains the owners until its CUDA completion fence.
     pendingReads.clear();
+  }
+
+  readyCopies.finish();
+  if (transfer.empty()) {
+    return results;
   }
 
   // Only reserve the bounded pinned arena after all storage work is complete
@@ -824,7 +1010,7 @@ std::vector<size_t> executeDeviceReadBatch(
   // AsyncDataCache entries can be exclusive, stale-sized, cancelled, or
   // evicted between a load barrier and Next(); preparing sources first closes
   // that residency gap and guarantees no remote I/O can hold both windows.
-  if (totalReadBytes >= kMinimumPinnedStagingBytes &&
+  if (transfer.size() >= kMinimumPinnedStagingBytes &&
       PinnedStagingArena::enabled()) {
     addIoCounter(ioStats, kStagingAttempts, 1);
     const auto acquireStart = std::chrono::steady_clock::now();
@@ -849,9 +1035,9 @@ std::vector<size_t> executeDeviceReadBatch(
         addIoCounter(ioStats, kStagingContendedAcquisitions, 1);
       }
     }
-  } else if (totalReadBytes >= kMinimumPinnedStagingBytes) {
+  } else if (transfer.size() >= kMinimumPinnedStagingBytes) {
     addIoCounter(ioStats, kStagingDisabledBypasses, 1);
-  } else if (totalReadBytes != 0) {
+  } else if (!transfer.empty()) {
     addIoCounter(ioStats, kStagingSmallReadBypasses, 1);
   }
 

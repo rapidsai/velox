@@ -15,6 +15,7 @@
  */
 
 #include "velox/experimental/cudf/CudfConfig.h"
+#include "velox/experimental/cudf/connectors/hive/CacheHostRegistration.h"
 #include "velox/experimental/cudf/connectors/hive/PinnedStagingArena.h"
 #include "velox/experimental/cudf/exec/CudfConversion.h"
 #include "velox/experimental/cudf/exec/CudfGroupby.h"
@@ -346,6 +347,9 @@ void registerCudf() {
       CudfConfig::getInstance().hostToDeviceStagingWindowBytes,
       CudfConfig::getInstance().hostToDeviceStagingPackThreads,
       CudfConfig::getInstance().hostToDeviceStagingWindowSets);
+  connector::hive::CacheHostRegistration::configure(
+      CudfConfig::getInstance().cacheHostRegistrationEnabled,
+      CudfConfig::getInstance().cacheHostRegistrationMaxBytes);
 
   const std::string mrMode = CudfConfig::getInstance().memoryResource;
   auto mr = cudf_velox::createMemoryResource(
@@ -441,6 +445,17 @@ void CudfConfig::initialize(
     hostToDeviceStagingWindowSets =
         folly::to<uint32_t>(config[kCudfHostToDeviceStagingWindowSets]);
   }
+  if (config.find(kCudfCacheHostRegistrationEnabled) != config.end()) {
+    cacheHostRegistrationEnabled =
+        folly::to<bool>(config[kCudfCacheHostRegistrationEnabled]);
+  }
+  if (config.find(kCudfCacheHostRegistrationMaxBytes) != config.end()) {
+    cacheHostRegistrationMaxBytes =
+        folly::to<uint64_t>(config[kCudfCacheHostRegistrationMaxBytes]);
+  }
+  VELOX_USER_CHECK(
+      !cacheHostRegistrationEnabled || cacheHostRegistrationMaxBytes > 0,
+      "Cache host registration requires a positive byte limit");
   if (config.find(kCudfBatchSizeMinThreshold) != config.end()) {
     batchSizeMinThreshold =
         folly::to<int32_t>(config[kCudfBatchSizeMinThreshold]);

@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "velox/experimental/cudf/connectors/hive/CacheHostRegistration.h"
 #include "velox/experimental/cudf/connectors/hive/CachingDataSource.h"
 
 #include "velox/common/caching/FileIds.h"
@@ -29,12 +30,20 @@
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <folly/executors/QueuedImmediateExecutor.h>
 #include <folly/executors/thread_factory/NamedThreadFactory.h>
+#include <folly/small_vector.h>
 #include <folly/system/HardwareConcurrency.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <limits>
+#include <list>
+#include <mutex>
+#include <thread>
 #include <unordered_map>
 
 namespace facebook::velox::cudf_velox::connector::hive {
@@ -54,6 +63,120 @@ folly::Executor* remoteReadExecutor() {
   }();
   return executor;
 }
+
+// cuDF exposes std::future, not a completion callback. Keep outstanding host
+// reads off the executor while their futures are pending. The single readiness
+// thread never performs I/O, CUDA work, or a blocking future get. Deferred
+// delegates are supported, but their get must still run on the executor.
+// Admission precedes cache allocation, so a large pass cannot allocate host
+// buffers for every queued request at once. This does not change GPU
+// preloading.
+class CacheReadScheduler {
+ public:
+  struct Read {
+    virtual ~Read() = default;
+    virtual bool ready() noexcept = 0;
+    virtual void run() noexcept = 0;
+    virtual void fail(std::exception_ptr error) noexcept = 0;
+  };
+
+  static CacheReadScheduler& instance() {
+    // Like remoteReadExecutor, outlive CUDA/static teardown. No buffers are
+    // retained once reads finish; callers must quiesce before cache shutdown.
+    static auto* scheduler = new CacheReadScheduler;
+    return *scheduler;
+  }
+
+  void add(std::shared_ptr<Read> read) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (admitted_ == limit_) {
+        queued_.push_back(std::move(read));
+        return;
+      }
+      ++admitted_;
+    }
+    dispatch(std::move(read));
+  }
+
+  void await(std::shared_ptr<Read> read) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      waiting_.push_back(std::move(read));
+    }
+    condition_.notify_one();
+  }
+
+  void finished() noexcept {
+    std::shared_ptr<Read> next;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (queued_.empty()) {
+        --admitted_;
+      } else {
+        next = std::move(queued_.front());
+        queued_.pop_front();
+      }
+    }
+    if (next) {
+      dispatch(std::move(next));
+    }
+  }
+
+ private:
+  CacheReadScheduler() : executor_(remoteReadExecutor()) {
+    // Reuse the existing remote-I/O window. "Unlimited" transport admission
+    // must not imply unbounded cache allocations; absent/zero uses 64 here.
+    if (const auto* value =
+            std::getenv("KVIKIO_REMOTE_IO_MAX_CONCURRENT_REQUESTS")) {
+      const auto configured = folly::to<size_t>(value);
+      if (configured != 0) {
+        limit_ = configured;
+      }
+    }
+    std::thread([this] { poll(); }).detach();
+  }
+
+  void dispatch(std::shared_ptr<Read> read) noexcept {
+    try {
+      executor_->add([read] { read->run(); });
+    } catch (...) {
+      read->fail(std::current_exception());
+    }
+  }
+
+  void poll() {
+    for (;;) {
+      std::list<std::shared_ptr<Read>> ready;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        condition_.wait(lock, [&] { return !waiting_.empty(); });
+        for (auto it = waiting_.begin(); it != waiting_.end();) {
+          auto current = it++;
+          if ((*current)->ready()) {
+            ready.splice(ready.end(), waiting_, current);
+          }
+        }
+        if (ready.empty()) {
+          condition_.wait_for(lock, std::chrono::microseconds(100));
+        }
+      }
+      for (auto& read : ready) {
+        dispatch(std::move(read));
+      }
+    }
+  }
+
+  folly::Executor* const executor_;
+  size_t limit_{64};
+  size_t admitted_{0};
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  std::deque<std::shared_ptr<Read>> queued_;
+  std::list<std::shared_ptr<Read>> waiting_;
+};
+
+std::atomic<int64_t> activeCacheFills{0};
 
 int streamDevice(rmm::cuda_stream_view stream) {
   int device{};
@@ -137,33 +260,76 @@ PinnedStagingSlot& stagingSlot(int device) {
 // consumed or discarded. The executor's future alone only marks H2D
 // submission, so the outer completion also fences the copy. Wait outside the
 // remote executor rather than occupying an I/O thread during H2D completion.
+struct SubmittedDeviceRead {
+  struct RegisteredSource {
+    // End the registration lease before releasing its cache pin.
+    cache::CachePin pin;
+    CacheHostRegistration::Lease registration;
+  };
+
+  size_t bytes{0};
+  // Keep the common one-entry read inline. A logical read may consume several
+  // smaller cached entries; each registered source must survive the final H2D
+  // fence, even while a later fragment is still being fetched.
+  folly::small_vector<RegisteredSource, 1> sources;
+};
+
 struct DeviceReadCompletion {
-  std::future<size_t> submitted;
+  std::future<SubmittedDeviceRead> submitted;
   rmm::cuda_stream_view stream;
   int device;
+  std::shared_ptr<IoStats> stats;
+  std::shared_ptr<std::atomic<bool>> published;
 
-  DeviceReadCompletion(std::future<size_t> f, rmm::cuda_stream_view s, int d)
-      : submitted(std::move(f)), stream(s), device(d) {}
+  DeviceReadCompletion(
+      std::future<SubmittedDeviceRead> f,
+      rmm::cuda_stream_view s,
+      int d,
+      std::shared_ptr<IoStats> ioStats,
+      std::shared_ptr<std::atomic<bool>> ioPublished)
+      : submitted(std::move(f)),
+        stream(s),
+        device(d),
+        stats(std::move(ioStats)),
+        published(std::move(ioPublished)) {}
   DeviceReadCompletion(DeviceReadCompletion&&) = default;
   DeviceReadCompletion(const DeviceReadCompletion&) = delete;
   ~DeviceReadCompletion() {
-    if (submitted.valid()) {
+    if (submitted.valid() && published->load()) {
       try {
         get();
       } catch (...) {
       }
     }
   }
-  size_t get() {
-    const auto bytes = submitted.get();
+  static size_t finish(
+      SubmittedDeviceRead result,
+      rmm::cuda_stream_view stream,
+      int device,
+      const std::shared_ptr<IoStats>& stats) {
+    const auto start = std::chrono::steady_clock::now();
     finishDeviceRead(stream, device);
-    return bytes;
+    if (!result.sources.empty() && stats) {
+      // Host completion wait, not GPU event elapsed time; work may already
+      // have completed before the caller consumes its future.
+      const auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::steady_clock::now() - start)
+                             .count();
+      stats->addCounter(
+          "cudfCacheRegisteredH2DWaitNanos",
+          RuntimeCounter(nanos, RuntimeCounter::Unit::kNanos));
+    }
+    return result.bytes;
+  }
+  size_t get() {
+    return finish(submitted.get(), stream, device, stats);
   }
 };
 
 } // namespace
 
 struct CachingDataSource::State {
+  struct AsyncRead;
   std::unique_ptr<cudf::io::datasource> delegate;
   cache::AsyncDataCache* cache;
   StringIdLease fileNum;
@@ -194,7 +360,39 @@ struct CachingDataSource::State {
     return offset < fileSize ? std::min(size, fileSize - offset) : 0;
   }
 
-  cache::CachePin pinRange(size_t offset, size_t size) {
+  void addCount(const std::string& name, int64_t value = 1) {
+    if (ioStats) {
+      ioStats->addCounter(name, RuntimeCounter(value));
+    }
+  }
+
+  void addTime(
+      const std::string& name,
+      std::chrono::steady_clock::time_point start) {
+    if (ioStats) {
+      const auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::steady_clock::now() - start)
+                             .count();
+      ioStats->addCounter(
+          name, RuntimeCounter(nanos, RuntimeCounter::Unit::kNanos));
+    }
+  }
+
+  static size_t fragmentSize(const cache::CachePin& pin, size_t requested) {
+    const auto size = pin.checkedEntry()->size();
+    VELOX_CHECK_GT(size, 0, "Cache fragments must make progress");
+    return std::min<size_t>(requested, size);
+  }
+
+  void recordHit(size_t bytes, size_t requested) {
+    addBytes("cudfKvikioCacheHitBytes", bytes);
+    if (bytes < requested) {
+      addCount("cudfKvikioCacheReusedPrefixes");
+      addBytes("cudfKvikioCacheReusedPrefixBytes", bytes);
+    }
+  }
+
+  cache::CachePin pinFragment(size_t offset, size_t size) {
     // AsyncDataCache stores entry lengths in an int32_t. Large individual
     // reads remain legal datasource requests, but must bypass that cache.
     if (size > std::numeric_limits<int32_t>::max()) {
@@ -205,7 +403,12 @@ struct CachingDataSource::State {
       folly::SemiFuture<bool> wait = folly::SemiFuture<bool>::makeEmpty();
       cache::CachePin pin;
       try {
-        pin = cache->findOrCreate(key, size, /*contiguous=*/true, &wait);
+        pin = cache->findOrCreate(
+            key,
+            size,
+            /*contiguous=*/true,
+            &wait,
+            cache::CacheEntrySizePolicy::kAllowSmaller);
       } catch (const VeloxRuntimeError& error) {
         if (error.errorCode() != error_code::kNoCacheSpace) {
           throw;
@@ -222,7 +425,7 @@ struct CachingDataSource::State {
       auto* entry = pin.checkedEntry();
       entry->getAndClearFirstUseFlag();
       if (!entry->isExclusive()) {
-        addBytes("cudfKvikioCacheHitBytes", size);
+        recordHit(fragmentSize(pin, size), size);
         return pin;
       }
       if (!entry->hasContiguousData()) {
@@ -246,16 +449,31 @@ struct CachingDataSource::State {
       return 0;
     }
     VELOX_CHECK_NOT_NULL(dst);
-    auto pin = pinRange(offset, bytes);
-    if (pin.empty()) {
-      const auto actual = delegate->host_read(offset, bytes, dst);
-      addBytes("cudfKvikioCacheBypassBytes", actual);
-      return actual;
+    size_t copied = 0;
+    while (copied < bytes) {
+      const auto remaining = bytes - copied;
+      auto pin = pinFragment(offset + copied, remaining);
+      if (pin.empty()) {
+        // Already consumed prefixes remain useful, even when the remaining
+        // suffix cannot be cached. Never bypass/refetch the whole request.
+        const auto actual =
+            delegate->host_read(offset + copied, remaining, dst + copied);
+        addBytes("cudfKvikioCacheBypassBytes", actual);
+        return copied + actual;
+      }
+      const auto fragmentBytes = fragmentSize(pin, remaining);
+      copyCached(pin, fragmentBytes, dst + copied);
+      copied += fragmentBytes;
     }
+    return copied;
+  }
+
+  static void
+  copyCached(const cache::CachePin& pin, size_t bytes, uint8_t* dst) {
     auto* entry = pin.checkedEntry();
     if (entry->hasContiguousData()) {
       std::memcpy(dst, entry->contiguousData(), bytes);
-      return bytes;
+      return;
     }
     // Another reader may have populated this key using page-run allocation.
     // contiguous=true controls new allocations, not the layout of cache hits.
@@ -263,7 +481,6 @@ struct CachingDataSource::State {
       std::memcpy(dst, range.data(), range.size());
       dst += range.size();
     }
-    return bytes;
   }
 
   std::unique_ptr<cudf::io::datasource::buffer> readHost(
@@ -274,26 +491,306 @@ struct CachingDataSource::State {
     return cudf::io::datasource::buffer::create(std::move(bytes));
   }
 
-  size_t submitDeviceRead(
+  SubmittedDeviceRead submitDeviceRead(
       size_t offset,
       size_t bytes,
       uint8_t* dst,
       rmm::cuda_stream_view stream,
       int device) {
     const rmm::cuda_set_device_raii scope{rmm::cuda_device_id{device}};
+    SubmittedDeviceRead result;
+    try {
+      while (result.bytes < bytes) {
+        const auto position = result.bytes;
+        const auto remaining = bytes - position;
+        auto pin = pinFragment(offset + position, remaining);
+        const auto fragmentBytes =
+            pin.empty() ? remaining : fragmentSize(pin, remaining);
+        const auto actual = submitReadyDeviceRead(
+            std::move(pin),
+            offset + position,
+            fragmentBytes,
+            dst + position,
+            stream,
+            device,
+            result);
+        if (actual < fragmentBytes) {
+          break;
+        }
+      }
+      return result;
+    } catch (...) {
+      // A later lookup/read can fail while an earlier prefix is still in
+      // flight. Fence before result releases any registered source.
+      finishDeviceRead(stream, device);
+      throw;
+    }
+  }
+
+  size_t submitReadyDeviceRead(
+      cache::CachePin pin,
+      size_t offset,
+      size_t bytes,
+      uint8_t* dst,
+      rmm::cuda_stream_view stream,
+      int device,
+      SubmittedDeviceRead& result) {
+    const rmm::cuda_set_device_raii scope{rmm::cuda_device_id{device}};
+    const bool registrationEnabled = CacheHostRegistration::enabled();
+    if (registrationEnabled) {
+      if (!pin.empty()) {
+        const auto ranges = pin.checkedEntry()->dataRanges(bytes);
+        auto lease = CacheHostRegistration::tryAcquire(
+            std::span<const cache::CachePin>(&pin, 1), ioStats);
+        if (lease) {
+          // Retain ownership before submitting any copy. If growing this
+          // list fails, no DMA references the new source yet; callers fence
+          // any previously submitted fragments before destroying result.
+          result.sources.push_back({std::move(pin), std::move(*lease)});
+          try {
+            size_t copied = 0;
+            for (const auto& range : ranges) {
+              CUDF_CUDA_TRY(cudaMemcpyAsync(
+                  dst + copied,
+                  range.data(),
+                  range.size(),
+                  cudaMemcpyHostToDevice,
+                  stream.value()));
+              copied += range.size();
+            }
+            result.bytes += copied;
+            addBytes("cudfCacheRegisteredH2DBytes", copied);
+            addBytes("cudfKvikioCacheHostToDeviceBytes", copied);
+          } catch (...) {
+            // A failed call may have submitted a prefix. Fence before result
+            // releases its registration and cache pin during unwinding.
+            finishDeviceRead(stream, device);
+            throw;
+          }
+          return bytes;
+        }
+        addBytes("cudfCacheHostRegistrationFallbackBytes", bytes);
+      }
+    }
     auto& slot = stagingSlot(device);
     auto* staging = slot.reserve(bytes);
-    const auto actual = readHost(offset, bytes, staging);
+    size_t actual;
+    if (!pin.empty()) {
+      // A registration fallback must not look up/refetch the range again.
+      copyCached(pin, bytes, staging);
+      actual = bytes;
+      pin.clear();
+    } else {
+      actual = delegate->host_read(offset, bytes, staging);
+      addBytes("cudfKvikioCacheBypassBytes", actual);
+    }
     try {
       CUDF_CUDA_TRY(cudaMemcpyAsync(
           dst, staging, actual, cudaMemcpyHostToDevice, stream.value()));
       slot.recordCopy(stream.value());
+      result.bytes += actual;
       addBytes("cudfKvikioCacheHostToDeviceBytes", actual);
     } catch (...) {
       finishDeviceRead(stream, device);
       throw;
     }
     return actual;
+  }
+};
+
+struct CachingDataSource::State::AsyncRead final
+    : CacheReadScheduler::Read,
+      std::enable_shared_from_this<AsyncRead> {
+  std::shared_ptr<State> state;
+  std::shared_ptr<std::promise<SubmittedDeviceRead>> promise;
+  size_t offset;
+  size_t bytes;
+  uint8_t* dst;
+  rmm::cuda_stream_view stream;
+  int device;
+  CacheReadScheduler& scheduler;
+  cache::CachePin pin;
+  SubmittedDeviceRead result;
+  size_t fragmentBytes{0};
+  folly::SemiFuture<bool> cacheWait = folly::SemiFuture<bool>::makeEmpty();
+  std::future<size_t> hostRead;
+  const std::chrono::steady_clock::time_point queued =
+      std::chrono::steady_clock::now();
+  std::chrono::steady_clock::time_point fillStart;
+  std::chrono::steady_clock::time_point cacheWaitStart;
+  int attempts{0};
+  bool activeFill{false};
+  bool started{false};
+
+  AsyncRead(
+      std::shared_ptr<State> s,
+      std::shared_ptr<std::promise<SubmittedDeviceRead>> p,
+      size_t o,
+      size_t b,
+      uint8_t* d,
+      rmm::cuda_stream_view st,
+      int dev,
+      CacheReadScheduler& sched)
+      : state(std::move(s)),
+        promise(std::move(p)),
+        offset(o),
+        bytes(b),
+        dst(d),
+        stream(st),
+        device(dev),
+        scheduler(sched) {}
+
+  bool ready() noexcept override {
+    if (cacheWait.valid()) {
+      return cacheWait.isReady();
+    }
+    return hostRead.wait_for(std::chrono::seconds(0)) !=
+        std::future_status::timeout;
+  }
+
+  void endFill() {
+    if (std::exchange(activeFill, false)) {
+      --activeCacheFills;
+      state->addTime("cudfKvikioCacheAsyncFillReadNanos", fillStart);
+    }
+  }
+
+  void fail(std::exception_ptr error) noexcept override {
+    // A std::future destructor need not wait for external writes. Even if
+    // scheduling/allocation fails after dispatch, drain before abandoning the
+    // exclusive cache allocation or allowing destination destruction.
+    if (hostRead.valid()) {
+      try {
+        hostRead.get();
+      } catch (...) {
+      }
+    }
+    if (result.bytes != 0) {
+      try {
+        finishDeviceRead(stream, device);
+      } catch (...) {
+      }
+    }
+    result.sources.clear();
+    try {
+      endFill();
+      state->addCount("cudfKvikioCacheAsyncReadFailures");
+    } catch (...) {
+    }
+    pin.clear();
+    promise->set_exception(error);
+    scheduler.finished();
+  }
+
+  void run() noexcept override {
+    try {
+      const rmm::cuda_set_device_raii scope{rmm::cuda_device_id{device}};
+      if (!std::exchange(started, true)) {
+        state->addTime("cudfKvikioCacheAsyncReadQueueNanos", queued);
+      }
+      if (hostRead.valid()) {
+        const auto actual = hostRead.get();
+        endFill();
+        VELOX_CHECK_EQ(
+            actual, fragmentBytes, "Short KvikIO read while filling cache");
+        pin.checkedEntry()->setExclusiveToShared();
+        state->addBytes("cudfKvikioCacheMissBytes", fragmentBytes);
+        copyFragment();
+      }
+      if (cacheWait.valid()) {
+        std::move(cacheWait).get();
+        cacheWait = folly::SemiFuture<bool>::makeEmpty();
+        state->addTime("cudfKvikioCacheExclusiveWaitNanos", cacheWaitStart);
+      }
+      while (result.bytes < bytes) {
+        const auto remaining = bytes - result.bytes;
+        if (++attempts > 32 ||
+            remaining > std::numeric_limits<int32_t>::max()) {
+          bypass();
+          return;
+        }
+        try {
+          pin = state->cache->findOrCreate(
+              {state->fileNum.id(), offset + result.bytes},
+              remaining,
+              true,
+              &cacheWait,
+              cache::CacheEntrySizePolicy::kAllowSmaller);
+        } catch (const VeloxRuntimeError& error) {
+          if (error.errorCode() != error_code::kNoCacheSpace) {
+            throw;
+          }
+          bypass();
+          return;
+        }
+        if (pin.empty()) {
+          if (cacheWait.valid()) {
+            cacheWaitStart = std::chrono::steady_clock::now();
+            scheduler.await(shared_from_this());
+          } else {
+            bypass();
+          }
+          return;
+        }
+        auto* entry = pin.checkedEntry();
+        entry->getAndClearFirstUseFlag();
+        fragmentBytes = State::fragmentSize(pin, remaining);
+        if (!entry->isExclusive()) {
+          state->recordHit(fragmentBytes, remaining);
+          copyFragment();
+          continue;
+        }
+        if (!entry->hasContiguousData()) {
+          pin.clear();
+          bypass();
+          return;
+        }
+        fillStart = std::chrono::steady_clock::now();
+        activeFill = true;
+        const auto active = ++activeCacheFills;
+        state->addCount("cudfKvikioCacheAsyncFillInFlightSamples", active);
+        hostRead = state->delegate->host_read_async(
+            offset + result.bytes,
+            fragmentBytes,
+            reinterpret_cast<uint8_t*>(entry->contiguousData()));
+        VELOX_CHECK(hostRead.valid(), "KvikIO returned an invalid read future");
+        state->addCount("cudfKvikioCacheAsyncFillSubmitted");
+        if (hostRead.wait_for(std::chrono::seconds(0)) ==
+            std::future_status::deferred) {
+          state->addCount("cudfKvikioCacheDeferredHostReads");
+        }
+        scheduler.await(shared_from_this());
+        return;
+      }
+      complete();
+    } catch (...) {
+      fail(std::current_exception());
+    }
+  }
+
+  void copyFragment() {
+    const auto position = result.bytes;
+    state->submitReadyDeviceRead(
+        std::move(pin),
+        offset + position,
+        fragmentBytes,
+        dst + position,
+        stream,
+        device,
+        result);
+    attempts = 0;
+  }
+
+  void bypass() {
+    state->addCount("cudfKvikioCacheAsyncReadSynchronousFallbacks");
+    fragmentBytes = bytes - result.bytes;
+    copyFragment();
+    complete();
+  }
+
+  void complete() {
+    promise->set_value(std::move(result));
+    scheduler.finished();
   }
 };
 
@@ -355,23 +852,29 @@ std::future<size_t> CachingDataSource::device_read_async(
   }
   VELOX_CHECK_NOT_NULL(dst);
   const auto device = streamDevice(stream);
-  auto* executor = remoteReadExecutor();
-  auto promise = std::make_shared<std::promise<size_t>>();
+  auto& scheduler = CacheReadScheduler::instance();
+  auto promise = std::make_shared<std::promise<SubmittedDeviceRead>>();
   auto submitted = promise->get_future();
-  executor->add([state = state_, promise, offset, bytes, dst, stream, device] {
-    try {
-      promise->set_value(
-          state->submitDeviceRead(offset, bytes, dst, stream, device));
-    } catch (...) {
-      promise->set_exception(std::current_exception());
-    }
-  });
-  return std::async(
+  auto read = std::make_shared<State::AsyncRead>(
+      state_, promise, offset, bytes, dst, stream, device, scheduler);
+  auto published = std::make_shared<std::atomic<bool>>(false);
+  // Construct the destination-lifetime fence before publishing any I/O.
+  auto completion = std::async(
       std::launch::deferred,
       [completion = DeviceReadCompletion(
-           std::move(submitted), stream, device)]() mutable {
-        return completion.get();
-      });
+           std::move(submitted),
+           stream,
+           device,
+           state_->ioStats,
+           published)]() mutable { return completion.get(); });
+  published->store(true);
+  try {
+    scheduler.add(std::move(read));
+  } catch (...) {
+    promise->set_exception(std::current_exception());
+    throw;
+  }
+  return completion;
 }
 size_t CachingDataSource::device_read(
     size_t offset,
@@ -388,10 +891,11 @@ size_t CachingDataSource::device_read(
   // the read back to that executor and waiting would deadlock when all its
   // threads are occupied by such callers. Keep scheduling in the async API;
   // perform synchronous reads inline, including the destination-lifetime fence.
-  const auto actual =
-      state_->submitDeviceRead(offset, bytes, dst, stream, device);
-  finishDeviceRead(stream, device);
-  return actual;
+  return DeviceReadCompletion::finish(
+      state_->submitDeviceRead(offset, bytes, dst, stream, device),
+      stream,
+      device,
+      state_->ioStats);
 }
 std::unique_ptr<cudf::io::datasource::buffer> CachingDataSource::device_read(
     size_t offset,

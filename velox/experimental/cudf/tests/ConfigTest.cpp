@@ -26,6 +26,8 @@ TEST(ConfigTest, defaults) {
   ASSERT_EQ(config.hostToDeviceStagingWindowBytes, 128ULL << 20);
   ASSERT_EQ(config.hostToDeviceStagingPackThreads, 4);
   ASSERT_EQ(config.hostToDeviceStagingWindowSets, 2);
+  ASSERT_FALSE(config.cacheHostRegistrationEnabled);
+  ASSERT_EQ(config.cacheHostRegistrationMaxBytes, 32ULL << 30);
 }
 
 TEST(ConfigTest, CudfConfig) {
@@ -38,6 +40,8 @@ TEST(ConfigTest, CudfConfig) {
       {CudfConfig::kCudfHostToDeviceStagingWindowBytes, "67108864"},
       {CudfConfig::kCudfHostToDeviceStagingPackThreads, "3"},
       {CudfConfig::kCudfHostToDeviceStagingWindowSets, "5"},
+      {CudfConfig::kCudfCacheHostRegistrationEnabled, "true"},
+      {CudfConfig::kCudfCacheHostRegistrationMaxBytes, "68719476736"},
       {CudfConfig::kCudfFunctionNamePrefix, "presto"},
       {CudfConfig::kCudfStreamingGroupbyApiEnabled, "true"},
       {CudfConfig::kCudfAllowCpuFallback, "false"},
@@ -64,6 +68,8 @@ TEST(ConfigTest, CudfConfig) {
   ASSERT_EQ(config.hostToDeviceStagingWindowBytes, 67'108'864);
   ASSERT_EQ(config.hostToDeviceStagingPackThreads, 3);
   ASSERT_EQ(config.hostToDeviceStagingWindowSets, 5);
+  ASSERT_TRUE(config.cacheHostRegistrationEnabled);
+  ASSERT_EQ(config.cacheHostRegistrationMaxBytes, 64ULL << 30);
   ASSERT_EQ(config.functionNamePrefix, "presto");
   ASSERT_EQ(config.streamingGroupbyApiEnabled, true);
   ASSERT_EQ(config.allowCpuFallback, false);

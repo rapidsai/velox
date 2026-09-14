@@ -16,12 +16,14 @@
 
 #include "velox/experimental/cudf/CudfNoDefaults.h"
 #include "velox/experimental/cudf/connectors/hive/BufferedInputDataSource.h"
+#include "velox/experimental/cudf/connectors/hive/CudfHiveConnectorSplit.h"
 #include "velox/experimental/cudf/connectors/hive/CudfSplitReaderIOHelpers.h"
 
 #include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/io/parquet_io_utils.hpp>
 
 #include <algorithm>
+#include <charconv>
 #include <functional>
 #include <future>
 #include <iterator>
@@ -123,6 +125,30 @@ class BufferedReadCompletion {
 } // namespace
 
 namespace facebook::velox::cudf_velox::connector::hive {
+
+std::optional<size_t> knownKvikioFileSize(const CudfHiveConnectorSplit& split) {
+  // Presto forwards HiveFileSplit.fileSize as this synthesized column. It is
+  // object metadata, not the byte range assigned to this particular split.
+  const auto it = split.infoColumns.find("$file_size");
+  if (it == split.infoColumns.end() || it->second.empty()) {
+    return std::nullopt;
+  }
+  const auto& text = it->second;
+  int64_t parsedSize;
+  const auto [end, error] =
+      std::from_chars(text.data(), text.data() + text.size(), parsedSize);
+  if (error != std::errc{} || end != text.data() + text.size() ||
+      parsedSize < 0) {
+    return std::nullopt;
+  }
+  const auto fileSize = static_cast<uint64_t>(parsedSize);
+  if (fileSize > std::numeric_limits<size_t>::max() || split.start > fileSize ||
+      (split.length != std::numeric_limits<uint64_t>::max() &&
+       split.length > fileSize - split.start)) {
+    return std::nullopt;
+  }
+  return static_cast<size_t>(fileSize);
+}
 
 void ByteRangeFetch::wait() {
   if (pending.valid()) {
