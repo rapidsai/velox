@@ -149,6 +149,33 @@ struct hash<::facebook::velox::cache::RawFileCacheKey> {
 
 namespace facebook::velox::cache {
 
+/// Optional cache backing with stable, allocator-owned storage. Destruction
+/// returns the slice to its owner; it must not free backing pages, wait for
+/// device work, or call into the cache (it can run under a shard lock).
+class CacheAllocation {
+ public:
+  virtual ~CacheAllocation() = default;
+  virtual char* data() const = 0;
+  virtual uint64_t capacity() const = 0;
+};
+
+/// An opt-in backing allocator, e.g. a pool whose large blocks have been
+/// registered with a device. All backing, including unused block capacity,
+/// must be charged to AsyncDataCache::allocator(). CPU caches use the ordinary
+/// allocator unless a factory is explicitly installed.
+class CacheAllocator {
+ public:
+  virtual ~CacheAllocator() = default;
+  /// Called outside shard locks. nullptr requests ordinary allocation.
+  virtual std::shared_ptr<CacheAllocation> allocate(uint64_t bytes) = 0;
+  /// Release empty backing blocks, outside shard locks. Returns actual freed
+  /// allocator capacity, not slice capacity or merely unregistered bytes.
+  virtual uint64_t reclaim(uint64_t targetBytes) = 0;
+  /// Called after entries are destroyed, with no readers or allocations in
+  /// flight. Release all backing while the allocator is still alive.
+  virtual void shutdown() noexcept = 0;
+};
+
 /// Represents a contiguous range of bytes cached from a file. This
 /// is the primary unit of access. These are typically owned via
 /// CachePin and can be in shared or exclusive mode. 'numPins_'
@@ -236,6 +263,12 @@ class AsyncDataCacheEntry {
   /// Returns the allocated capacity in bytes for this entry's data,
   /// including any padding from the allocator.
   int64_t dataCapacity() const;
+
+  AsyncDataCache* cache() const;
+
+  const std::shared_ptr<CacheAllocation>& allocationOwner() const {
+    return allocationOwner_;
+  }
 
   /// Updates the data-type-specific size and padding fields in 'stats'.
   void updateDataStats(CacheStats& stats) const;
@@ -352,6 +385,10 @@ class AsyncDataCacheEntry {
   // Contiguous bytes allocated via allocateBytes. Populated when the entry is
   // created with contiguous=true and size >= kTinyDataSize.
   void* contiguousData_{nullptr};
+
+  // If present, contiguousData_ is a slice of this owner's backing, not an
+  // independent allocateBytes allocation.
+  std::shared_ptr<CacheAllocation> allocationOwner_;
 
   // Contains the cached data if this is much smaller than a MemoryAllocator
   // page (kTinyDataSize).
@@ -693,7 +730,8 @@ class CacheShard {
       uint64_t bytesToFree,
       bool evictAllUnpinned,
       uint64_t bytesToAcquire,
-      AcquiredMemory& acquired);
+      AcquiredMemory& acquired,
+      uint64_t* pooledEvictedBytes = nullptr);
 
   /// Removes 'entry' from 'this'. Removes a possible promise from the entry
   /// inside the shard mutex and returns it so that it can be realized outside
@@ -767,7 +805,8 @@ class CacheShard {
       AcquiredMemory& acquired,
       AcquiredMemory& toFree,
       int64_t& largeEvicted,
-      int64_t& tinyEvicted);
+      int64_t& tinyEvicted,
+      uint64_t& pooledEvicted);
 
   AsyncDataCache* const cache_;
   const double maxWriteRatio_;
@@ -820,6 +859,12 @@ class CacheShard {
 class AsyncDataCache : public memory::Cache {
  public:
   static constexpr int32_t kDefaultNumShards = 4;
+
+  using AllocatorFactory = std::shared_ptr<CacheAllocator> (*)(AsyncDataCache*);
+  /// Startup/test configuration. Existing caches lazily create their optional
+  /// backing allocator on the first subsequent allocation. nullptr disables
+  /// new admissions, without invalidating existing allocations.
+  static void setAllocatorFactory(AllocatorFactory factory);
 
   struct Options {
     Options(
@@ -965,7 +1010,8 @@ class AsyncDataCache : public memory::Cache {
 #endif
   /// Returns snapshot of the aggregated stats from all shards and the stats of
   /// SSD cache if used.
-  virtual CacheStats refreshStats() const;
+  virtual CacheStats
+  refreshStats() const;
 
   /// If 'details' is true, returns the stats of the backing memory allocator
   /// and ssd cache. Otherwise, only returns the cache stats.
@@ -1043,12 +1089,17 @@ class AsyncDataCache : public memory::Cache {
       const folly::F14FastSet<uint64_t>& filesToRemove,
       folly::F14FastSet<uint64_t>& filesRetained);
 
-  /// Drops all unpinned entries. Pins stay valid.
+  /// Drops all unpinned entries. Pins stay valid. Optional backing pools may
+  /// retain empty prepared blocks; shrink() releases this capacity as well.
   ///
   /// NOTE: it is used by testing and Prestissimo server operation.
   void clear();
 
  private:
+  std::shared_ptr<CacheAllocation> allocateOwned(uint64_t bytes);
+  uint64_t reclaimBacking(uint64_t targetBytes);
+  void shutdownBacking() noexcept;
+
   // True if acquired bytes plus available allocator capacity is enough
   // for 'requestBytes'.
   bool canTryAllocate(uint64_t requestBytes, const AcquiredMemory& acquired)
@@ -1090,6 +1141,9 @@ class AsyncDataCache : public memory::Cache {
   CacheStats stats_;
 
   std::function<void(const AsyncDataCacheEntry&)> verifyHook_;
+  std::mutex backingMutex_;
+  std::shared_ptr<CacheAllocator> backingAllocator_;
+  std::atomic<bool> hasBackingAllocator_{false};
   // Count of skipped saves to 'ssdCache_' due to 'ssdCache_' being
   // busy with write.
   tsan_atomic<int32_t> numSkippedSaves_{0};

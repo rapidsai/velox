@@ -31,6 +31,9 @@ namespace facebook::velox::cudf_velox::connector::hive {
 /// staging buffer. Based on Velox PR #18941. This is separate from the
 /// BufferedInput/AWS SDK datasource; it does not change that reader's I/O or
 /// bounded staging policy.
+/// When cache host registration is enabled, both adapters can instead copy
+/// directly from registered cache ranges retained through CUDA completion.
+/// Host reads and the cache-off delegate are unchanged.
 ///
 /// Cache keys are (file ID, request offset). An existing entry must cover the
 /// requested length; differently aligned ranges need not reuse cached bytes.

@@ -36,6 +36,79 @@ Velox-cuDF builds are included in Velox CI as part of the [adapters build](https
 
 Velox-cuDF provides several configuration properties to control GPU execution behavior, memory management, and debugging. These configurations are available when compiled with cuDF support and can be set via Velox's configuration system. For a complete list of cuDF-specific configuration properties and their descriptions, see the [Cudf-specific Configuration section](https://facebookincubator.github.io/velox/configs.html#cudf-specific-configuration-experimental) in the Velox configuration documentation.
 
+#### Experimental registered cache backing
+
+`cudf.cache_host_registration_enabled=true` enables a registered backing pool
+for AsyncDataCache in both the BufferedInput and KvikIO GPU readers. It is
+disabled by default; ordinary CPU and cache-off paths are unchanged. Cache
+entries suballocate page-aligned slices of stable slabs charged to the existing
+Velox allocator. A new slab is first-touched and registered once before its
+slices are filled. S3/SSD fills write directly into these slices and H2D reads
+the same storage: there is no additional cache-to-staging copy for admitted
+data, and no GPU-to-host cache population step.
+
+Regular slabs grow from 64 MiB to 128 MiB to 256 MiB, then remain at 256 MiB.
+This sizes backing blocks, **not individual entries**. Larger contiguous
+requests use dedicated page-rounded blocks. Existing allocations never move.
+Slab preparation inherits the allocating worker's CPU/memory policy and reuse
+is separated by CPU NUMA node; production workers should bind CPU and memory
+together. Root-allocator huge-page policy is unchanged. This does not migrate
+already resident malloc backing to another NUMA node.
+
+`cudf.cache_host_registration_max_bytes` limits full registered slab capacity
+across one worker **process**, including free space and pending registrations.
+The default is 34359738368 bytes (32 GiB), not a hardware limit; other CUDA/UCX
+registrations and staging buffers are outside this budget. All slab backing is
+also charged to Velox's root allocator. Tiny entries and admissions that exceed
+the budget, fail allocation, or encounter a recoverable CUDA registration error
+use ordinary cache storage and staging without refetching bytes. Existing
+pageable cache entries are not copied or registered individually. Empty slabs
+can be reclaimed to make room; this version does not evict cached data or unpin
+live slabs to admit a different working set.
+
+Idle registrations retain no cache pins. Eviction, file invalidation, and
+failed fills return slices to the pool; adjacent free slices can be reused as
+a larger range without copying live data. DMA leases independently hold shared
+cache pins and exclude unregister until the reader's completion fence. Under
+root-memory pressure, or explicit cache shrink, empty slabs are unregistered
+before their backing is freed. Partially live slabs cannot release root
+capacity, and shrink does not report their returned slices as freed memory.
+Cache shutdown/destruction frees all backing while CUDA and the root allocator
+are alive; readers must be quiescent. CUDA calls and root backing frees run
+outside cache shard and pool mutexes.
+
+Cache clear drops unpinned **data** but retains reusable prepared slabs. A
+data-cache-cold run with a prepared pool is therefore different from a fresh
+worker run, which also pays allocation, page faults, and registration. Report
+both separately when testing. Restart for registration on/off comparisons and
+keep the reader, native exchange, drivers, and split policy fixed. New slab
+preparation is synchronous; overlapping it with I/O is a separate experiment.
+
+`cudfCacheRegisteredH2DBytes` proves registered transfers occurred.
+`cudfCacheHostRegisterCalls`, `cudfCacheHostRegisteredBytes`,
+`cudfCacheHostPoolPrepareNanos`, and `cudfCacheHostRegisterNanos` report each slab's
+creation once, to its first GPU acquisition with query stats. This may be a
+different query than its preloader. Preparation includes backing allocation and
+first touch; registration time covers the CUDA API call. Repeated acquisitions
+should report zero new calls/time while their backing survives, including after
+entry eviction and reuse. `cudfCacheHostRegistrationFallbackBytes` records H2D
+bytes that instead use staging.
+
+Counters ending in `Samples` are process snapshots: use **max**, not sum, for
+footprint gauges, or successive per-worker differences for cumulative events.
+`cudfCacheHostPoolSlabsSamples`, `cudfCacheHostPoolUsedBytesSamples`, and
+`cudfCacheHostPoolFreeBytesSamples` expose pool occupancy.
+`cudfCacheHostRegistrationReservedBytesSamples` measures registered/pending
+capacity, and `cudfCacheHostRegistrationRetainedBytesSamples` measures backing
+capacity. `cudfCacheHostPoolRegisterCallsSamples` and
+`cudfCacheHostPoolUnregisterCallsSamples` are cumulative registration attempts
+and successful unregisters, including maintenance; `cudfCacheHostPoolBudgetFallbacksSamples`,
+`cudfCacheHostPoolAllocationFallbacksSamples`, and
+`cudfCacheHostPoolRegistrationFailuresSamples` distinguish admission failures.
+Query-stat owners are not retained by idle slabs. Submission/wait counters
+(`cudfCacheRegisteredH2DSubmitWaitNanos` and `cudfCacheRegisteredH2DWaitNanos`)
+measure host intervals, **not** CUDA-event elapsed time or query critical path.
+
 ### Testing Velox with cuDF
 
 Tests with Velox-cuDF can only be run on GPU-enabled hardware. The Velox-cuDF tests in [experimental/cudf/tests](https://github.com/facebookincubator/velox/blob/main/velox/experimental/cudf/tests) include several types of tests:

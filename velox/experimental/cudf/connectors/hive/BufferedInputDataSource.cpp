@@ -16,6 +16,7 @@
 
 #include "velox/experimental/cudf/CudfNoDefaults.h"
 #include "velox/experimental/cudf/connectors/hive/BufferedInputDataSource.h"
+#include "velox/experimental/cudf/connectors/hive/CacheHostRegistration.h"
 #include "velox/experimental/cudf/connectors/hive/PinnedStagingArena.h"
 
 #include "velox/dwio/common/BufferedInput.h"
@@ -45,6 +46,8 @@ namespace {
 using DeviceReadRequest = cudf::io::datasource::device_read_request;
 using facebook::velox::IoStats;
 using facebook::velox::RuntimeCounter;
+using facebook::velox::cache::CachePin;
+using facebook::velox::cudf_velox::connector::hive::CacheHostRegistration;
 using facebook::velox::cudf_velox::connector::hive::PinnedStagingArena;
 using facebook::velox::dwio::common::BufferedInput;
 using facebook::velox::dwio::common::CachedRegion;
@@ -332,6 +335,22 @@ class HostToDeviceTransferPlan {
           bufferedSourceBytes_,
           RuntimeCounter::Unit::kBytes);
     }
+    if (registration_.has_value()) {
+      const auto start = std::chrono::steady_clock::now();
+      submitDirectAndWait(stream, device);
+      addIoCounter(
+          ioStats_,
+          "cudfCacheRegisteredH2DSubmitWaitNanos",
+          elapsedNanos(start),
+          RuntimeCounter::Unit::kNanos);
+      addIoCounter(
+          ioStats_,
+          "cudfCacheRegisteredH2DBytes",
+          totalBytes_,
+          RuntimeCounter::Unit::kBytes);
+      registration_.reset();
+      return;
+    }
     if (windows.has_value()) {
       addIoCounter(ioStats_, kStagingTransfers, 1);
       addIoCounter(
@@ -343,6 +362,30 @@ class HostToDeviceTransferPlan {
     addIoCounter(
         ioStats_, kDirectH2DBytes, totalBytes_, RuntimeCounter::Unit::kBytes);
     submitDirectAndWait(stream, device);
+  }
+
+  bool tryRegisterCacheSources() {
+    if (!CacheHostRegistration::enabled() || cachedSourceBytes_ == 0 ||
+        cachedSourceBytes_ != totalBytes_) {
+      return false;
+    }
+    std::vector<CachePin> pins;
+    pins.reserve(retainedRegions_.size());
+    for (const auto& region : retainedRegions_) {
+      VELOX_CHECK(region.has_value());
+      pins.push_back(region->cachePin());
+    }
+    auto lease = CacheHostRegistration::tryAcquire(pins, ioStats_);
+    if (!lease.has_value()) {
+      addIoCounter(
+          ioStats_,
+          "cudfCacheHostRegistrationFallbackBytes",
+          totalBytes_,
+          RuntimeCounter::Unit::kBytes);
+      return false;
+    }
+    registration_.emplace(std::move(*lease));
+    return true;
   }
 
  private:
@@ -648,6 +691,9 @@ class HostToDeviceTransferPlan {
   size_t bufferedSourceBytes_{0};
   size_t copiedSourceBytes_{0};
   size_t totalBytes_{0};
+  // End the active registration lease after the completion fence. The
+  // registry retains independent cache ownership while the entry is idle.
+  std::optional<CacheHostRegistration::Lease> registration_;
 };
 
 std::vector<size_t> executeDeviceReadBatch(
@@ -817,6 +863,13 @@ std::vector<size_t> executeDeviceReadBatch(
     // transfers release each owner after its last fragment is packed; the
     // direct fallback retains the owners until its CUDA completion fence.
     pendingReads.clear();
+  }
+
+  // Registration is only attempted on materialized, independently owned
+  // cache sources. No cache fill or executor wait holds an active DMA lease.
+  if (transfer.tryRegisterCacheSources()) {
+    transfer.submitAndWait(stream, device, std::nullopt);
+    return results;
   }
 
   // Only reserve the bounded pinned arena after all storage work is complete

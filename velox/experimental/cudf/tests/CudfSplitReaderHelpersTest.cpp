@@ -15,6 +15,7 @@
  */
 
 #include "velox/experimental/cudf/connectors/hive/BufferedInputDataSource.h"
+#include "velox/experimental/cudf/connectors/hive/CacheHostRegistration.h"
 #include "velox/experimental/cudf/connectors/hive/CudfSplitReaderIOHelpers.h"
 #include "velox/experimental/cudf/connectors/hive/PinnedStagingArena.h"
 
@@ -232,6 +233,9 @@ class CudfSplitReaderHelpersTest : public testing::Test {
 
   void TearDown() override {
     PinnedStagingArena::setAllocationFailureForTesting(false);
+    CacheHostRegistration::configure(false, 0);
+    EXPECT_EQ(CacheHostRegistration::testingReservedBytes(), 0);
+    CacheHostRegistration::setFailureAtForTesting(0);
   }
 
   std::shared_ptr<ExecutorBufferedInput> makeInput(
@@ -261,6 +265,181 @@ class CudfSplitReaderHelpersTest : public testing::Test {
   const std::shared_ptr<memory::MemoryPool> pool_ =
       memory::memoryManager()->addLeafPool();
 };
+
+class RegisteredBufferedInputTest : public CudfSplitReaderHelpersTest {
+ protected:
+  void SetUp() override {
+    CacheHostRegistration::configure(true, 32ULL << 20);
+    CacheHostRegistration::setBlockSizesForTesting(1 << 20, 2 << 20);
+    PinnedStagingArena::configure(true, 64 << 10, 1, 1);
+    data_.resize(2 << 20);
+    for (size_t i = 0; i < data_.size(); ++i) {
+      data_[i] = static_cast<char>(i % 251);
+    }
+  }
+  void TearDown() override {
+    cache_->shutdown();
+    CacheHostRegistration::setBlockSizesForTesting(64ULL << 20, 256ULL << 20);
+    CudfSplitReaderHelpersTest::TearDown();
+  }
+  std::shared_ptr<CachedBufferedInput> makeCachedInput() {
+    io::ReaderOptions options(pool_.get());
+    options.setLoadQuantum(64 << 10);
+    options.setCacheable(true);
+    return std::make_shared<CachedBufferedInput>(
+        std::make_shared<InMemoryReadFile>(data_),
+        dwio::common::MetricsLog::voidLog(),
+        StringIdLease(fileIds(), "registered-buffered-file"),
+        cache_.get(),
+        nullptr,
+        StringIdLease(fileIds(), "registered-buffered-group"),
+        std::make_shared<io::IoStatistics>(),
+        stats_,
+        nullptr,
+        options);
+  }
+  std::string data_;
+  std::shared_ptr<memory::MallocAllocator> allocator_ =
+      std::make_shared<memory::MallocAllocator>(
+          memory::MemoryAllocator::Options{
+              .capacity = 16 << 20,
+              .reservationByteLimit = 0});
+  std::shared_ptr<AsyncDataCache> cache_ =
+      AsyncDataCache::create(allocator_.get());
+  std::shared_ptr<IoStats> stats_ = std::make_shared<IoStats>();
+};
+
+TEST_F(RegisteredBufferedInputTest, coldAndHotBatchesAvoidStaging) {
+  BufferedInputDataSource source(makeCachedInput(), stats_);
+  TestCudaStream stream;
+  rmm::device_buffer destination(
+      data_.size(), stream.view(), cudf::get_current_device_resource_ref());
+  auto* dst = static_cast<uint8_t*>(destination.data());
+  const std::vector<cudf::io::datasource::device_read_request> requests{
+      {19, (1 << 20) - 19, dst}, {1 << 20, 1 << 20, dst + (1 << 20) - 19}};
+  for (int iteration = 0; iteration < 2; ++iteration) {
+    const auto sizes =
+        source.device_read_batch_async(requests, stream.view()).get();
+    EXPECT_EQ(sizes, (std::vector<size_t>{(1 << 20) - 19, 1 << 20}));
+    EXPECT_GT(CacheHostRegistration::testingReservedBytes(), 0);
+    std::string actual(data_.size() - 19, '\0');
+    CUDF_CUDA_TRY(
+        cudaMemcpy(actual.data(), dst, actual.size(), cudaMemcpyDeviceToHost));
+    EXPECT_EQ(actual, data_.substr(19));
+  }
+  const auto metrics = stats_->stats();
+  EXPECT_EQ(
+      metrics.at("cudfCacheRegisteredH2DBytes").sum, 2 * (data_.size() - 19));
+  EXPECT_EQ(metrics.count("cudfPinnedStagingBytes"), 0);
+  EXPECT_EQ(metrics.count("cudfCacheHostRegistrationFallbackBytes"), 0);
+  EXPECT_GT(metrics.at("cudfCacheHostRegistrationReusedBytes").sum, 0);
+  EXPECT_EQ(metrics.count("cudfCacheHostUnregisteredBytes"), 0);
+  EXPECT_GT(cache_->refreshStats().numEntries, 0);
+}
+
+TEST_F(RegisteredBufferedInputTest, budgetAndCudaFailureKeepStagingFallback) {
+  BufferedInputDataSource source(makeCachedInput(), stats_);
+  TestCudaStream stream;
+  for (const bool budgetFailure : {false, true}) {
+    CacheHostRegistration::configure(true, budgetFailure ? 1 : 32ULL << 20);
+    CacheHostRegistration::setFailureAtForTesting(budgetFailure ? 0 : 1);
+    auto result = source.device_read(0, data_.size(), stream.view());
+    std::string actual(result->size(), '\0');
+    CUDF_CUDA_TRY(cudaMemcpy(
+        actual.data(), result->data(), actual.size(), cudaMemcpyDeviceToHost));
+    EXPECT_EQ(actual, data_);
+    if (budgetFailure) {
+      EXPECT_EQ(CacheHostRegistration::testingReservedBytes(), 0);
+    }
+  }
+  const auto metrics = stats_->stats();
+  EXPECT_EQ(metrics.at("cudfPinnedStagingBytes").sum, 2 * data_.size());
+  EXPECT_EQ(
+      metrics.at("cudfCacheHostRegistrationFallbackBytes").sum,
+      2 * data_.size());
+}
+
+TEST_F(RegisteredBufferedInputTest, smallerReadsReuseCompleteOwner) {
+  BufferedInputDataSource source(makeCachedInput(), stats_);
+  TestCudaStream stream;
+  auto first = source.device_read(0, data_.size(), stream.view());
+  const auto calls = stats_->stats().at("cudfCacheHostRegisterCalls").sum;
+  CacheHostRegistration::setFailureAtForTesting(1);
+  auto slice = source.device_read(0, 4096, stream.view());
+  std::string actual(4096, '\0');
+  CUDF_CUDA_TRY(cudaMemcpy(
+      actual.data(), slice->data(), actual.size(), cudaMemcpyDeviceToHost));
+  EXPECT_EQ(actual, data_.substr(0, 4096));
+  EXPECT_EQ(stats_->stats().at("cudfCacheHostRegisterCalls").sum, calls);
+  EXPECT_GT(stats_->stats().at("cudfCacheHostRegistrationReusedBytes").sum, 0);
+  EXPECT_EQ(stats_->stats().count("cudfCacheHostRegistrationFallbackBytes"), 0);
+}
+
+TEST_F(RegisteredBufferedInputTest, uncachedInputDoesNotAttemptRegistration) {
+  BufferedInputDataSource source(makeDirectInput(data_), stats_);
+  TestCudaStream stream;
+  auto result = source.device_read(0, data_.size(), stream.view());
+  EXPECT_EQ(result->size(), data_.size());
+  EXPECT_EQ(stats_->stats().count("cudfCacheHostRegistrationAttempts"), 0);
+  EXPECT_EQ(stats_->stats().at("cudfPinnedStagingBytes").sum, data_.size());
+}
+
+TEST_F(
+    RegisteredBufferedInputTest,
+    discardRetainsRegistrationAndCachePinsUntilH2D) {
+  constexpr size_t kSize = 64 << 10;
+  auto input = makeCachedInput();
+  auto source = std::make_unique<BufferedInputDataSource>(input, stats_);
+  TestCudaStream stream;
+  auto initial = source->device_read(0, kSize, stream.view());
+  StringIdLease file(fileIds(), "registered-buffered-file");
+  auto pin = cache_->findOrCreate({file.id(), 0}, kSize, false);
+  auto registration = CacheHostRegistration::tryAcquire(
+      std::span<const cache::CachePin>(&pin, 1));
+  ASSERT_TRUE(registration);
+  rmm::device_buffer destination(
+      kSize, stream.view(), cudf::get_current_device_resource_ref());
+  StreamGate gate;
+  CUDF_CUDA_TRY(cudaLaunchHostFunc(stream.view().value(), waitForGate, &gate));
+  auto future = source->device_read_async(
+      0, kSize, static_cast<uint8_t*>(destination.data()), stream.view());
+  source.reset();
+  input.reset();
+  auto completion = std::async(
+      std::launch::async,
+      [future = std::move(future)]() mutable { future = {}; });
+  const auto shared = [&] {
+    const auto metrics = stats_->stats();
+    const auto found = metrics.find("cudfCacheHostRegistrationSharedBytes");
+    return found != metrics.end() && found->second.sum > 0;
+  };
+  const auto deadline = std::chrono::steady_clock::now() + 5s;
+  while (!shared() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(1ms);
+  }
+  const bool hasShared = shared();
+  if (hasShared) {
+    registration.reset();
+    pin.clear();
+    cache_->clear();
+    EXPECT_GT(cache_->refreshStats().numEntries, 0);
+    EXPECT_GT(CacheHostRegistration::testingReservedBytes(), 0);
+    EXPECT_EQ(completion.wait_for(0s), std::future_status::timeout);
+  }
+  releaseGate(gate);
+  completion.get();
+  EXPECT_TRUE(hasShared);
+  registration.reset();
+  pin.clear();
+  EXPECT_GT(CacheHostRegistration::testingReservedBytes(), 0);
+  std::string actual(kSize, '\0');
+  CUDF_CUDA_TRY(cudaMemcpy(
+      actual.data(), destination.data(), kSize, cudaMemcpyDeviceToHost));
+  EXPECT_EQ(actual, data_.substr(0, kSize));
+  cache_->clear();
+  EXPECT_EQ(cache_->refreshStats().numEntries, 0);
+  EXPECT_EQ(CacheHostRegistration::poolStats().usedBytes, 0);
+}
 
 TEST_F(CudfSplitReaderHelpersTest, normalizeKvikioS3Uri) {
   EXPECT_EQ(normalizeKvikioUri("s3://bucket/key"), "s3://bucket/key");

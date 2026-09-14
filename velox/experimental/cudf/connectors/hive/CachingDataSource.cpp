@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "velox/experimental/cudf/connectors/hive/CacheHostRegistration.h"
 #include "velox/experimental/cudf/connectors/hive/CachingDataSource.h"
 
 #include "velox/common/caching/FileIds.h"
@@ -32,6 +33,7 @@
 #include <folly/system/HardwareConcurrency.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -137,13 +139,29 @@ PinnedStagingSlot& stagingSlot(int device) {
 // consumed or discarded. The executor's future alone only marks H2D
 // submission, so the outer completion also fences the copy. Wait outside the
 // remote executor rather than occupying an I/O thread during H2D completion.
+struct SubmittedDeviceRead {
+  size_t bytes;
+  // End the active registration lease before releasing the transfer's pin.
+  // Idle registrations retain independent ownership in the registry.
+  cache::CachePin pin;
+  std::optional<CacheHostRegistration::Lease> registration;
+};
+
 struct DeviceReadCompletion {
-  std::future<size_t> submitted;
+  std::future<SubmittedDeviceRead> submitted;
   rmm::cuda_stream_view stream;
   int device;
+  std::shared_ptr<IoStats> stats;
 
-  DeviceReadCompletion(std::future<size_t> f, rmm::cuda_stream_view s, int d)
-      : submitted(std::move(f)), stream(s), device(d) {}
+  DeviceReadCompletion(
+      std::future<SubmittedDeviceRead> f,
+      rmm::cuda_stream_view s,
+      int d,
+      std::shared_ptr<IoStats> ioStats)
+      : submitted(std::move(f)),
+        stream(s),
+        device(d),
+        stats(std::move(ioStats)) {}
   DeviceReadCompletion(DeviceReadCompletion&&) = default;
   DeviceReadCompletion(const DeviceReadCompletion&) = delete;
   ~DeviceReadCompletion() {
@@ -154,10 +172,27 @@ struct DeviceReadCompletion {
       }
     }
   }
-  size_t get() {
-    const auto bytes = submitted.get();
+  static size_t finish(
+      SubmittedDeviceRead result,
+      rmm::cuda_stream_view stream,
+      int device,
+      const std::shared_ptr<IoStats>& stats) {
+    const auto start = std::chrono::steady_clock::now();
     finishDeviceRead(stream, device);
-    return bytes;
+    if (result.registration && stats) {
+      // Host completion wait, not GPU event elapsed time; work may already
+      // have completed before the caller consumes its future.
+      const auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::steady_clock::now() - start)
+                             .count();
+      stats->addCounter(
+          "cudfCacheRegisteredH2DWaitNanos",
+          RuntimeCounter(nanos, RuntimeCounter::Unit::kNanos));
+    }
+    return result.bytes;
+  }
+  size_t get() {
+    return finish(submitted.get(), stream, device, stats);
   }
 };
 
@@ -252,10 +287,16 @@ struct CachingDataSource::State {
       addBytes("cudfKvikioCacheBypassBytes", actual);
       return actual;
     }
+    copyCached(pin, bytes, dst);
+    return bytes;
+  }
+
+  static void
+  copyCached(const cache::CachePin& pin, size_t bytes, uint8_t* dst) {
     auto* entry = pin.checkedEntry();
     if (entry->hasContiguousData()) {
       std::memcpy(dst, entry->contiguousData(), bytes);
-      return bytes;
+      return;
     }
     // Another reader may have populated this key using page-run allocation.
     // contiguous=true controls new allocations, not the layout of cache hits.
@@ -263,7 +304,6 @@ struct CachingDataSource::State {
       std::memcpy(dst, range.data(), range.size());
       dst += range.size();
     }
-    return bytes;
   }
 
   std::unique_ptr<cudf::io::datasource::buffer> readHost(
@@ -274,26 +314,71 @@ struct CachingDataSource::State {
     return cudf::io::datasource::buffer::create(std::move(bytes));
   }
 
-  size_t submitDeviceRead(
+  SubmittedDeviceRead submitDeviceRead(
       size_t offset,
       size_t bytes,
       uint8_t* dst,
       rmm::cuda_stream_view stream,
       int device) {
     const rmm::cuda_set_device_raii scope{rmm::cuda_device_id{device}};
+    SubmittedDeviceRead result{0, {}, std::nullopt};
+    const bool registrationEnabled = CacheHostRegistration::enabled();
+    if (registrationEnabled) {
+      result.pin = pinRange(offset, bytes);
+      if (!result.pin.empty()) {
+        const auto ranges = result.pin.checkedEntry()->dataRanges(bytes);
+        auto lease = CacheHostRegistration::tryAcquire(
+            std::span<const cache::CachePin>(&result.pin, 1), ioStats);
+        if (lease) {
+          result.registration.emplace(std::move(*lease));
+          try {
+            size_t copied = 0;
+            for (const auto& range : ranges) {
+              CUDF_CUDA_TRY(cudaMemcpyAsync(
+                  dst + copied,
+                  range.data(),
+                  range.size(),
+                  cudaMemcpyHostToDevice,
+                  stream.value()));
+              copied += range.size();
+            }
+            result.bytes = copied;
+            addBytes("cudfCacheRegisteredH2DBytes", copied);
+            addBytes("cudfKvikioCacheHostToDeviceBytes", copied);
+          } catch (...) {
+            // A failed call may have submitted a prefix. Fence before result
+            // releases its registration and cache pin during unwinding.
+            finishDeviceRead(stream, device);
+            throw;
+          }
+          return result;
+        }
+        addBytes("cudfCacheHostRegistrationFallbackBytes", bytes);
+      }
+    }
     auto& slot = stagingSlot(device);
     auto* staging = slot.reserve(bytes);
-    const auto actual = readHost(offset, bytes, staging);
+    if (!registrationEnabled) {
+      result.bytes = readHost(offset, bytes, staging);
+    } else if (!result.pin.empty()) {
+      // A registration fallback must not look up/refetch the range again.
+      copyCached(result.pin, bytes, staging);
+      result.bytes = bytes;
+      result.pin.clear();
+    } else {
+      result.bytes = delegate->host_read(offset, bytes, staging);
+      addBytes("cudfKvikioCacheBypassBytes", result.bytes);
+    }
     try {
       CUDF_CUDA_TRY(cudaMemcpyAsync(
-          dst, staging, actual, cudaMemcpyHostToDevice, stream.value()));
+          dst, staging, result.bytes, cudaMemcpyHostToDevice, stream.value()));
       slot.recordCopy(stream.value());
-      addBytes("cudfKvikioCacheHostToDeviceBytes", actual);
+      addBytes("cudfKvikioCacheHostToDeviceBytes", result.bytes);
     } catch (...) {
       finishDeviceRead(stream, device);
       throw;
     }
-    return actual;
+    return result;
   }
 };
 
@@ -356,7 +441,7 @@ std::future<size_t> CachingDataSource::device_read_async(
   VELOX_CHECK_NOT_NULL(dst);
   const auto device = streamDevice(stream);
   auto* executor = remoteReadExecutor();
-  auto promise = std::make_shared<std::promise<size_t>>();
+  auto promise = std::make_shared<std::promise<SubmittedDeviceRead>>();
   auto submitted = promise->get_future();
   executor->add([state = state_, promise, offset, bytes, dst, stream, device] {
     try {
@@ -369,7 +454,7 @@ std::future<size_t> CachingDataSource::device_read_async(
   return std::async(
       std::launch::deferred,
       [completion = DeviceReadCompletion(
-           std::move(submitted), stream, device)]() mutable {
+           std::move(submitted), stream, device, state_->ioStats)]() mutable {
         return completion.get();
       });
 }
@@ -388,10 +473,11 @@ size_t CachingDataSource::device_read(
   // the read back to that executor and waiting would deadlock when all its
   // threads are occupied by such callers. Keep scheduling in the async API;
   // perform synchronous reads inline, including the destination-lifetime fence.
-  const auto actual =
-      state_->submitDeviceRead(offset, bytes, dst, stream, device);
-  finishDeviceRead(stream, device);
-  return actual;
+  return DeviceReadCompletion::finish(
+      state_->submitDeviceRead(offset, bytes, dst, stream, device),
+      stream,
+      device,
+      state_->ioStats);
 }
 std::unique_ptr<cudf::io::datasource::buffer> CachingDataSource::device_read(
     size_t offset,

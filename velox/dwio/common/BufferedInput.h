@@ -53,6 +53,13 @@ class CachedRegion {
     return ranges_;
   }
 
+  /// Shared ownership of the complete backing cache allocation, including
+  /// when this object is a slice. Consumers retaining DMA registrations must
+  /// retain this ownership, not only the addresses returned by ranges().
+  const cache::CachePin& cachePin() const {
+    return pin_;
+  }
+
   /// Returns an IOBuf chain wrapping the cached data ranges without copying.
   /// The returned IOBuf references memory owned by this CachedRegion, so
   /// the caller must not outlive this object.

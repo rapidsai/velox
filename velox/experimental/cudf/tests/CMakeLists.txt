@@ -121,7 +121,7 @@ velox_add_cudf_test(
 
 velox_add_cudf_test(
   NAME velox_cudf_caching_datasource_test
-  SOURCES Main.cpp CachingDataSourceTest.cpp
+  SOURCES Main.cpp CachingDataSourceTest.cpp CacheHostRegistrationTest.cpp
   LIBS ${CUDF_TEST_DEFAULT_LIBS} velox_cudf_hive_connector
 )
 
