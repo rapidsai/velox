@@ -27,13 +27,16 @@
 #include <rmm/cuda_stream.hpp>
 #include <rmm/device_buffer.hpp>
 
+#include <folly/ScopeGuard.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <gtest/gtest.h>
 
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <functional>
 #include <limits>
+#include <mutex>
 #include <thread>
 
 namespace facebook::velox::cudf_velox::connector::hive {
@@ -92,6 +95,108 @@ class MemorySource : public cudf::io::datasource {
   std::shared_ptr<ReadState> state_;
 };
 
+// External completion, like RemoteHandle::pread: no thread blocks on each
+// pending read, and destroying the std::future does not stop writes to dst.
+struct AsyncReadControl {
+  std::mutex mutex;
+  std::vector<std::function<void()>> pending;
+  bool open{false};
+  std::atomic<size_t> submitted{0};
+  std::atomic<size_t> synchronous{0};
+  std::atomic<bool> failSubmission{false};
+  std::atomic<bool> invalidFuture{false};
+
+  void add(std::function<void()> fill) {
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (!open) {
+        pending.push_back(std::move(fill));
+        ++submitted;
+        return;
+      }
+    }
+    ++submitted;
+    fill();
+  }
+
+  void completeNewest() {
+    std::function<void()> fill;
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (pending.empty()) {
+        return;
+      }
+      fill = std::move(pending.back());
+      pending.pop_back();
+    }
+    fill();
+  }
+
+  void releaseAll() {
+    std::vector<std::function<void()>> fills;
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      open = true;
+      fills.swap(pending);
+    }
+    for (auto& fill : fills) {
+      fill();
+    }
+  }
+};
+
+class AsyncMemorySource : public MemorySource {
+ public:
+  AsyncMemorySource(
+      std::shared_ptr<ReadState> state,
+      std::shared_ptr<AsyncReadControl> control)
+      : MemorySource(state), state_(state), control_(std::move(control)) {}
+
+  size_t host_read(size_t offset, size_t bytes, uint8_t* dst) override {
+    ++control_->synchronous;
+    return MemorySource::host_read(offset, bytes, dst);
+  }
+
+  std::future<size_t> host_read_async(size_t offset, size_t bytes, uint8_t* dst)
+      override {
+    VELOX_CHECK(
+        !control_->failSubmission.exchange(false),
+        "Injected submission failure");
+    if (control_->invalidFuture.exchange(false)) {
+      return {};
+    }
+    auto promise = std::make_shared<std::promise<size_t>>();
+    auto future = promise->get_future();
+    ++state_->reads;
+    control_->add([state = state_, offset, bytes, dst, promise]() mutable {
+      try {
+        VELOX_CHECK(
+            !state->failRead.exchange(false), "Injected remote failure");
+        if (state->shortRead.exchange(false) && bytes != 0) {
+          --bytes;
+        }
+        std::memcpy(dst, state->data.data() + offset, bytes);
+        promise->set_value(bytes);
+      } catch (...) {
+        promise->set_exception(std::current_exception());
+      }
+    });
+    return future;
+  }
+
+ private:
+  std::shared_ptr<ReadState> state_;
+  std::shared_ptr<AsyncReadControl> control_;
+};
+
+bool waitUntil(const std::function<bool()>& condition) {
+  const auto deadline = std::chrono::steady_clock::now() + 5s;
+  while (!condition() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(1ms);
+  }
+  return condition();
+}
+
 struct StreamGate {
   std::promise<void> entered;
   std::promise<void> release;
@@ -109,6 +214,7 @@ class CachingDataSourceTest : public testing::Test {
   static void SetUpTestSuite() {
     // This test executable owns its remote executor.
     setenv("KVIKIO_NTHREADS", "2", 1);
+    setenv("KVIKIO_REMOTE_IO_MAX_CONCURRENT_REQUESTS", "8", 1);
   }
 
   std::unique_ptr<cudf::io::datasource> source(bool cacheable = true) {
@@ -124,6 +230,56 @@ class CachingDataSourceTest : public testing::Test {
     CUDF_CUDA_TRY(
         cudaMemcpy(result.data(), device, bytes, cudaMemcpyDeviceToHost));
     return result;
+  }
+
+  std::unique_ptr<cudf::io::datasource> asyncSource(
+      const std::shared_ptr<AsyncReadControl>& control) {
+    return maybeCacheKvikioDataSource(
+        std::make_unique<AsyncMemorySource>(read_, control),
+        path_,
+        cache_.get(),
+        true,
+        stats_);
+  }
+
+  void checkAsyncWindow() {
+    constexpr size_t kRequests = 24;
+    constexpr size_t kBytes = 4096;
+    read_->data.resize(kRequests * kBytes);
+    for (size_t i = 0; i < read_->data.size(); ++i) {
+      read_->data[i] = static_cast<char>(i % 251);
+    }
+    auto control = std::make_shared<AsyncReadControl>();
+    auto input = asyncSource(control);
+    rmm::cuda_stream stream;
+    rmm::device_buffer destination(
+        read_->data.size(),
+        stream.view(),
+        cudf::get_current_device_resource_ref());
+    auto* dst = static_cast<uint8_t*>(destination.data());
+    std::vector<std::future<size_t>> reads;
+    // Release before the future destructors, including on an ASSERT failure.
+    auto release = folly::makeGuard([&] { control->releaseAll(); });
+    for (size_t i = 0; i < kRequests; ++i) {
+      reads.push_back(input->device_read_async(
+          i * kBytes, kBytes, dst + i * kBytes, stream.view()));
+    }
+    ASSERT_TRUE(waitUntil([&] { return control->submitted.load() >= 8; }));
+    std::this_thread::sleep_for(20ms);
+    EXPECT_EQ(control->submitted, 8)
+        << "The host-read window must exceed two executor threads but stay bounded";
+    EXPECT_EQ(control->synchronous, 0);
+    control->releaseAll();
+    for (auto& read : reads) {
+      EXPECT_EQ(read.get(), kBytes);
+    }
+    EXPECT_EQ(fromDevice(dst, read_->data.size()), read_->data);
+    EXPECT_EQ(read_->reads, kRequests);
+    const auto metrics = stats_->stats();
+    EXPECT_EQ(metrics.at("cudfKvikioCacheAsyncFillSubmitted").sum, kRequests);
+    EXPECT_EQ(metrics.at("cudfKvikioCacheAsyncFillInFlightSamples").max, 8);
+    EXPECT_EQ(metrics.count("cudfKvikioCacheDeferredHostReads"), 0);
+    EXPECT_EQ(metrics.count("cudfKvikioCacheAsyncReadFailures"), 0);
   }
 
   std::shared_ptr<memory::MallocAllocator> allocator_ =
@@ -156,6 +312,132 @@ class RegisteredCachingDataSourceTest : public CachingDataSourceTest {
     CacheHostRegistration::setFailureAtForTesting(0);
   }
 };
+
+TEST_F(CachingDataSourceTest, asyncFillsExceedExecutorThreadsAndStayBounded) {
+  checkAsyncWindow();
+}
+
+TEST_F(
+    RegisteredCachingDataSourceTest,
+    asyncFillsExceedExecutorThreadsAndStayBounded) {
+  checkAsyncWindow();
+  EXPECT_GT(stats_->stats().at("cudfCacheRegisteredH2DBytes").sum, 0);
+}
+
+TEST_F(CachingDataSourceTest, asyncSharedFillAndOutOfOrderCompletion) {
+  read_->data.assign(16384, 'a');
+  auto control = std::make_shared<AsyncReadControl>();
+  auto input = asyncSource(control);
+  rmm::cuda_stream stream;
+  rmm::device_buffer destination(
+      16384, stream.view(), cudf::get_current_device_resource_ref());
+  auto* dst = static_cast<uint8_t*>(destination.data());
+  std::vector<std::future<size_t>> reads;
+  auto release = folly::makeGuard([&] { control->releaseAll(); });
+  reads.push_back(input->device_read_async(0, 4096, dst, stream.view()));
+  ASSERT_TRUE(waitUntil([&] { return control->submitted.load() == 1; }));
+  // Two followers of the pending fill must not occupy the two executor
+  // threads and prevent a later, independent fill from being submitted.
+  reads.push_back(input->device_read_async(0, 4096, dst + 4096, stream.view()));
+  reads.push_back(input->device_read_async(0, 4096, dst + 8192, stream.view()));
+  reads.push_back(
+      input->device_read_async(4096, 4096, dst + 12288, stream.view()));
+  ASSERT_TRUE(waitUntil([&] { return control->submitted.load() == 2; }));
+  control->completeNewest();
+  ASSERT_TRUE(waitUntil([&] {
+    return stats_->stats().contains("cudfKvikioCacheHostToDeviceBytes");
+  })) << "A ready range must complete while the oldest range is still pending";
+  EXPECT_EQ(reads.back().get(), 4096);
+  EXPECT_EQ(fromDevice(dst + 12288, 4096), std::string(4096, 'a'));
+  control->releaseAll();
+  for (size_t i = 0; i < reads.size() - 1; ++i) {
+    EXPECT_EQ(reads[i].get(), 4096);
+  }
+  EXPECT_EQ(control->submitted, 2);
+  EXPECT_EQ(stats_->stats().at("cudfKvikioCacheHitBytes").sum, 8192);
+  EXPECT_EQ(fromDevice(dst, 16384), std::string(16384, 'a'));
+}
+
+TEST_F(CachingDataSourceTest, asyncFailedAndShortFillsAreNotPublished) {
+  auto control = std::make_shared<AsyncReadControl>();
+  control->releaseAll();
+  auto input = asyncSource(control);
+  rmm::cuda_stream stream;
+  rmm::device_buffer destination(
+      4096, stream.view(), cudf::get_current_device_resource_ref());
+  auto* dst = static_cast<uint8_t*>(destination.data());
+  read_->failRead = true;
+  EXPECT_THROW(
+      input->device_read_async(0, 4096, dst, stream.view()).get(),
+      VeloxRuntimeError);
+  read_->shortRead = true;
+  EXPECT_THROW(
+      input->device_read_async(0, 4096, dst, stream.view()).get(),
+      VeloxRuntimeError);
+  control->failSubmission = true;
+  EXPECT_THROW(
+      input->device_read_async(0, 4096, dst, stream.view()).get(),
+      VeloxRuntimeError);
+  control->invalidFuture = true;
+  EXPECT_THROW(
+      input->device_read_async(0, 4096, dst, stream.view()).get(),
+      VeloxRuntimeError);
+  EXPECT_EQ(input->device_read_async(0, 4096, dst, stream.view()).get(), 4096);
+  EXPECT_EQ(input->device_read_async(0, 4096, dst, stream.view()).get(), 4096);
+  EXPECT_EQ(control->submitted, 3);
+  EXPECT_EQ(stats_->stats().at("cudfKvikioCacheAsyncReadFailures").sum, 4);
+  EXPECT_EQ(fromDevice(dst, 4096), read_->data.substr(0, 4096));
+}
+
+TEST_F(
+    CachingDataSourceTest,
+    discardedAsyncReadDrainsBeforeReleasingCacheStorage) {
+  auto control = std::make_shared<AsyncReadControl>();
+  auto input = asyncSource(control);
+  rmm::cuda_stream stream;
+  rmm::device_buffer destination(
+      4096, stream.view(), cudf::get_current_device_resource_ref());
+  auto* dst = static_cast<uint8_t*>(destination.data());
+  auto read = input->device_read_async(0, 4096, dst, stream.view());
+  std::future<void> discard;
+  auto release = folly::makeGuard([&] { control->releaseAll(); });
+  ASSERT_TRUE(waitUntil([&] { return control->submitted.load() == 1; }));
+  input.reset();
+  discard = std::async(
+      std::launch::async, [read = std::move(read)]() mutable { read = {}; });
+  cache_->clear();
+  // numEntries counts published entries, not this still-exclusive fill.
+  EXPECT_EQ(cache_->refreshStats().numExclusive, 1);
+  EXPECT_FALSE(read_->destroyed);
+  EXPECT_EQ(discard.wait_for(20ms), std::future_status::timeout);
+  control->releaseAll();
+  discard.get();
+  EXPECT_EQ(fromDevice(dst, 4096), read_->data.substr(0, 4096));
+  cache_->clear();
+  EXPECT_EQ(cache_->refreshStats().numEntries, 0);
+}
+
+TEST_F(CachingDataSourceTest, asyncCapacityFailureUsesUncachedFallback) {
+  read_->data.assign(32 << 20, 'b');
+  auto control = std::make_shared<AsyncReadControl>();
+  auto input = asyncSource(control);
+  rmm::cuda_stream stream;
+  rmm::device_buffer destination(
+      read_->data.size(),
+      stream.view(),
+      cudf::get_current_device_resource_ref());
+  auto* dst = static_cast<uint8_t*>(destination.data());
+  EXPECT_EQ(
+      input->device_read_async(0, read_->data.size(), dst, stream.view()).get(),
+      read_->data.size());
+  EXPECT_EQ(control->submitted, 0);
+  EXPECT_EQ(control->synchronous, 1);
+  EXPECT_EQ(
+      stats_->stats().at("cudfKvikioCacheAsyncReadSynchronousFallbacks").sum,
+      1);
+  EXPECT_EQ(fromDevice(dst, read_->data.size()), read_->data);
+  EXPECT_EQ(cache_->refreshStats().numEntries, 0);
+}
 
 TEST_F(RegisteredCachingDataSourceTest, missesHitsAndSynchronousOverloads) {
   auto input = source();

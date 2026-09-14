@@ -34,6 +34,11 @@ namespace facebook::velox::cudf_velox::connector::hive {
 /// When cache host registration is enabled, both adapters can instead copy
 /// directly from registered cache ranges retained through CUDA completion.
 /// Host reads and the cache-off delegate are unchanged.
+/// Device-read cache misses use the delegate's asynchronous host API. Pending
+/// fills and exclusive-entry waits do not occupy remote executor threads.
+/// Admission is bounded before allocating cache entries, independently of
+/// driver/preload counts. The returned future still fences destination writes
+/// on both consumption and discard; failed/short fills are never published.
 ///
 /// Cache keys are (file ID, request offset). An existing entry must cover the
 /// requested length; differently aligned ranges need not reuse cached bytes.

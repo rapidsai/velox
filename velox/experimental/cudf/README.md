@@ -36,6 +36,49 @@ Velox-cuDF builds are included in Velox CI as part of the [adapters build](https
 
 Velox-cuDF provides several configuration properties to control GPU execution behavior, memory management, and debugging. These configurations are available when compiled with cuDF support and can be set via Velox's configuration system. For a complete list of cuDF-specific configuration properties and their descriptions, see the [Cudf-specific Configuration section](https://facebookincubator.github.io/velox/configs.html#cudf-specific-configuration-experimental) in the Velox configuration documentation.
 
+#### Asynchronous KvikIO cache fills
+
+The KvikIO read-through cache submits GPU scan cache misses through the cuDF
+datasource's `host_read_async` API. Executor threads perform lookup, submission,
+and H2D preparation, but do not wait for eager host-I/O futures or another
+reader's exclusive cache entry. A process-wide readiness thread checks pending
+futures, without blocking I/O or CUDA calls; cuDF's `std::future` interface does
+not expose completion callbacks. It sleeps when idle and checks outstanding
+reads at 100-microsecond intervals. Ready ranges can submit H2D independently
+of earlier pending ranges. A deferred-only delegate remains supported via the
+executor and is counted separately.
+
+The cache-read admission window uses a positive
+`KVIKIO_REMOTE_IO_MAX_CONCURRENT_REQUESTS`, or 64 when unset/zero. It bounds
+admitted logical reads **before cache allocation**, not the number of TCP GETs;
+KvikIO may split a large logical read into multiple transport requests. This
+is a count limit, not a new host-memory budget. Existing cache/pinned-pool
+budgets still apply. `KVIKIO_NTHREADS` sizes the executor, not the number of
+pending asynchronous cache fills. No driver count, split preload depth, GPU
+destination size, or worker placement is changed. This is not yet host-only
+split prefetch or subrange H2D before a logical host read completes.
+
+Use query-level runtime counters to verify dispatch:
+
+- `cudfKvikioCacheAsyncFillSubmitted`: logical asynchronous fill calls.
+- `cudfKvikioCacheAsyncFillInFlightSamples`: outstanding logical fills across
+  the worker process at submission; inspect `max`, not the sum of samples.
+- `cudfKvikioCacheAsyncReadQueueNanos`: admission/executor delay before lookup.
+- `cudfKvikioCacheAsyncFillReadNanos`: elapsed host-fill work, including
+  completion observation/scheduling; **not** pure network service time.
+- `cudfKvikioCacheExclusiveWaitNanos`: waiting for another cache fill.
+- `cudfKvikioCacheDeferredHostReads`: delegates that cannot start eagerly.
+- `cudfKvikioCacheAsyncReadSynchronousFallbacks`: uncached fallback reads
+  when a cache entry cannot be admitted (including oversized ranges).
+- `cudfKvikioCacheAsyncReadFailures`: failed asynchronous read operations.
+
+Time counters sum concurrent work and are not query critical-path durations.
+Cache-off KvikIO, synchronous host/device callers, and BufferedInput/AWS SDK
+dispatch are unchanged. Exclusive entries remain unpublished until a complete
+successful fill; failure paths drain outstanding writes before freeing storage.
+The device-read completion still fences H2D and retains cache ownership through
+completion, including when the caller discards its future.
+
 #### Experimental registered cache backing
 
 `cudf.cache_host_registration_enabled=true` enables a registered backing pool
