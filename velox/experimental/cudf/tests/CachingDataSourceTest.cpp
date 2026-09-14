@@ -44,12 +44,27 @@ namespace {
 using namespace std::chrono_literals;
 
 struct ReadState {
+  using Requests = std::vector<std::pair<size_t, size_t>>;
+
+  void recordRead(size_t offset, size_t bytes) {
+    std::lock_guard<std::mutex> lock(mutex);
+    requests.emplace_back(offset, bytes);
+    ++reads;
+  }
+
+  Requests recordedReads() {
+    std::lock_guard<std::mutex> lock(mutex);
+    return requests;
+  }
+
   std::string data = std::string(8192, 'x');
   std::atomic<size_t> reads{0};
   std::atomic<bool> shortRead{false};
   std::atomic<bool> failRead{false};
   std::atomic<bool> destroyed{false};
   std::shared_future<void> gate;
+  std::mutex mutex;
+  Requests requests;
 };
 
 class MemorySource : public cudf::io::datasource {
@@ -76,7 +91,7 @@ class MemorySource : public cudf::io::datasource {
     return datasource::buffer::create(std::move(result));
   }
   size_t host_read(size_t offset, size_t bytes, uint8_t* dst) override {
-    ++state_->reads;
+    state_->recordRead(offset, bytes);
     if (state_->gate.valid()) {
       state_->gate.wait();
     }
@@ -167,7 +182,7 @@ class AsyncMemorySource : public MemorySource {
     }
     auto promise = std::make_shared<std::promise<size_t>>();
     auto future = promise->get_future();
-    ++state_->reads;
+    state_->recordRead(offset, bytes);
     control_->add([state = state_, offset, bytes, dst, promise]() mutable {
       try {
         VELOX_CHECK(
@@ -282,6 +297,70 @@ class CachingDataSourceTest : public testing::Test {
     EXPECT_EQ(metrics.count("cudfKvikioCacheAsyncReadFailures"), 0);
   }
 
+  void checkDeviceFragments(bool nonContiguous = false) {
+    // More fragments than the per-key retry limit, with nonuniform data to
+    // catch incorrect source offsets or overwriting an earlier destination.
+    constexpr size_t kFragments = 40;
+    constexpr size_t kFragmentBytes = 4096;
+    constexpr size_t kTailBytes = 4096 + 731;
+    constexpr size_t kPrefixBytes = kFragments * kFragmentBytes;
+    constexpr size_t kBytes = kPrefixBytes + kTailBytes;
+    read_->data.resize(kBytes);
+    for (size_t i = 0; i < kBytes; ++i) {
+      read_->data[i] = static_cast<char>(i % 251);
+    }
+    const bool registrationEnabled = CacheHostRegistration::enabled();
+    if (nonContiguous && registrationEnabled) {
+      CacheHostRegistration::configure(false, 0);
+    }
+    StringIdLease file(fileIds(), path_);
+    for (size_t offset = 0; offset < kPrefixBytes; offset += kFragmentBytes) {
+      auto pin = cache_->findOrCreate(
+          {file.id(), offset}, kFragmentBytes, !nonContiguous);
+      auto* entry = pin.checkedEntry();
+      ASSERT_TRUE(entry->isExclusive());
+      ASSERT_EQ(entry->hasContiguousData(), !nonContiguous);
+      size_t copied = 0;
+      for (const auto& range : entry->dataRanges(kFragmentBytes)) {
+        std::memcpy(
+            range.data(), read_->data.data() + offset + copied, range.size());
+        copied += range.size();
+      }
+      entry->setExclusiveToShared();
+    }
+    if (nonContiguous && registrationEnabled) {
+      CacheHostRegistration::configure(true, 32ULL << 20);
+    }
+    auto control = std::make_shared<AsyncReadControl>();
+    control->releaseAll();
+    auto input = asyncSource(control);
+    rmm::cuda_stream stream;
+    rmm::device_buffer destination(
+        kBytes, stream.view(), cudf::get_current_device_resource_ref());
+    auto* dst = static_cast<uint8_t*>(destination.data());
+    EXPECT_EQ(
+        input->device_read_async(0, kBytes, dst, stream.view()).get(), kBytes);
+    EXPECT_EQ(fromDevice(dst, kBytes), read_->data);
+    EXPECT_EQ(
+        read_->recordedReads(),
+        (ReadState::Requests{{kPrefixBytes, kTailBytes}}));
+    EXPECT_EQ(control->synchronous, 0);
+    auto metrics = stats_->stats();
+    EXPECT_EQ(metrics.at("cudfKvikioCacheHitBytes").sum, kPrefixBytes);
+    EXPECT_EQ(metrics.at("cudfKvikioCacheMissBytes").sum, kTailBytes);
+    EXPECT_EQ(metrics.at("cudfKvikioCacheReusedPrefixes").sum, kFragments);
+    EXPECT_EQ(metrics.at("cudfKvikioCacheReusedPrefixBytes").sum, kPrefixBytes);
+    EXPECT_EQ(metrics.count("cudfKvikioCacheAsyncReadSynchronousFallbacks"), 0);
+
+    // Synchronous overloads and a smaller final fragment use the same chain.
+    EXPECT_EQ(
+        input->device_read(0, kBytes - 17, dst, stream.view()), kBytes - 17);
+    auto owned = input->device_read(0, kBytes, stream.view());
+    EXPECT_EQ(fromDevice(owned->data(), owned->size()), read_->data);
+    EXPECT_EQ(fromDevice(dst, kBytes - 17), read_->data.substr(0, kBytes - 17));
+    EXPECT_EQ(read_->reads, 1);
+  }
+
   std::shared_ptr<memory::MallocAllocator> allocator_ =
       std::make_shared<memory::MallocAllocator>(
           memory::MemoryAllocator::Options{
@@ -322,6 +401,161 @@ TEST_F(
     asyncFillsExceedExecutorThreadsAndStayBounded) {
   checkAsyncWindow();
   EXPECT_GT(stats_->stats().at("cudfCacheRegisteredH2DBytes").sum, 0);
+}
+
+TEST_F(CachingDataSourceTest, deviceReadsReuseCachedFragments) {
+  checkDeviceFragments();
+}
+
+TEST_F(CachingDataSourceTest, deviceReadsReuseNonContiguousFragments) {
+  checkDeviceFragments(true);
+}
+
+TEST_F(RegisteredCachingDataSourceTest, deviceReadsReuseRegisteredFragments) {
+  checkDeviceFragments();
+  EXPECT_GT(stats_->stats().at("cudfCacheRegisteredH2DBytes").sum, 0);
+  EXPECT_EQ(stats_->stats().count("cudfCacheHostRegistrationFallbackBytes"), 0);
+}
+
+TEST_F(RegisteredCachingDataSourceTest, deviceReadsReuseMixedBackingFragments) {
+  checkDeviceFragments(true);
+  EXPECT_GT(stats_->stats().at("cudfCacheRegisteredH2DBytes").sum, 0);
+  EXPECT_EQ(
+      stats_->stats().at("cudfCacheHostRegistrationFallbackBytes").sum,
+      3 * 40 * 4096);
+}
+
+TEST_F(
+    CachingDataSourceTest,
+    longerAsyncReadWaitsForPrefixThenFillsOnlySuffix) {
+  auto control = std::make_shared<AsyncReadControl>();
+  auto input = asyncSource(control);
+  rmm::cuda_stream stream;
+  rmm::device_buffer destination(
+      5120, stream.view(), cudf::get_current_device_resource_ref());
+  auto* dst = static_cast<uint8_t*>(destination.data());
+  std::vector<std::future<size_t>> reads;
+  auto release = folly::makeGuard([&] { control->releaseAll(); });
+  reads.push_back(input->device_read_async(0, 1024, dst, stream.view()));
+  ASSERT_TRUE(waitUntil([&] { return control->submitted.load() == 1; }));
+  reads.push_back(input->device_read_async(0, 4096, dst + 1024, stream.view()));
+  ASSERT_TRUE(
+      waitUntil([&] { return cache_->refreshStats().numWaitExclusive > 0; }));
+  control->completeNewest();
+  ASSERT_TRUE(waitUntil([&] { return control->submitted.load() == 2; }));
+  EXPECT_EQ(reads.front().get(), 1024);
+  EXPECT_EQ(
+      read_->recordedReads(), (ReadState::Requests{{0, 1024}, {1024, 3072}}));
+  control->releaseAll();
+  EXPECT_EQ(reads.back().get(), 4096);
+  EXPECT_EQ(fromDevice(dst, 5120), std::string(5120, 'x'));
+  EXPECT_EQ(stats_->stats().at("cudfKvikioCacheHitBytes").sum, 1024);
+  EXPECT_EQ(stats_->stats().at("cudfKvikioCacheMissBytes").sum, 4096);
+  EXPECT_EQ(control->synchronous, 0);
+}
+
+TEST_F(
+    RegisteredCachingDataSourceTest,
+    discardRetainsAllFragmentsUntilH2DCompletes) {
+  constexpr size_t kFragments = 9;
+  constexpr size_t kFragmentBytes = 4096;
+  constexpr size_t kBytes = kFragments * kFragmentBytes;
+  auto input = source();
+  for (size_t offset = 0; offset < kBytes; offset += kFragmentBytes) {
+    input->host_read(offset, kFragmentBytes);
+  }
+  rmm::cuda_stream stream;
+  rmm::device_buffer destination(
+      kBytes, stream.view(), cudf::get_current_device_resource_ref());
+  stream.synchronize();
+  auto* dst = static_cast<uint8_t*>(destination.data());
+  StreamGate gate;
+  std::future<size_t> read;
+  std::future<void> discard;
+  bool released = false;
+  auto release = folly::makeGuard([&] {
+    if (!released) {
+      gate.release.set_value();
+    }
+  });
+  CUDF_CUDA_TRY(cudaLaunchHostFunc(stream.value(), waitForStreamGate, &gate));
+  read = input->device_read_async(0, kBytes, dst, stream.view());
+  ASSERT_TRUE(waitUntil([&] {
+    auto metrics = stats_->stats();
+    auto it = metrics.find("cudfCacheRegisteredH2DBytes");
+    return it != metrics.end() && it->second.sum == kBytes;
+  }));
+  input.reset();
+  discard = std::async(
+      std::launch::async, [read = std::move(read)]() mutable { read = {}; });
+  cache_->clear();
+  EXPECT_EQ(cache_->refreshStats().numEntries, kFragments);
+  EXPECT_EQ(discard.wait_for(20ms), std::future_status::timeout);
+  gate.release.set_value();
+  released = true;
+  discard.get();
+  EXPECT_EQ(fromDevice(dst, kBytes), read_->data.substr(0, kBytes));
+  EXPECT_EQ(read_->reads, kFragments);
+  cache_->clear();
+  EXPECT_EQ(cache_->refreshStats().numEntries, 0);
+  EXPECT_EQ(CacheHostRegistration::poolStats().usedBytes, 0);
+}
+
+TEST_F(
+    RegisteredCachingDataSourceTest,
+    failingSuffixFencesPrefixAndDoesNotInvalidateIt) {
+  for (const bool shortRead : {false, true}) {
+    SCOPED_TRACE(shortRead);
+    cache_->clear();
+    auto control = std::make_shared<AsyncReadControl>();
+    auto input = asyncSource(control);
+    input->host_read(0, 4096);
+    const auto initialRequests = read_->recordedReads().size();
+    rmm::cuda_stream stream;
+    rmm::device_buffer destination(
+        8192, stream.view(), cudf::get_current_device_resource_ref());
+    stream.synchronize();
+    auto* dst = static_cast<uint8_t*>(destination.data());
+    StreamGate gate;
+    std::future<size_t> read;
+    std::future<void> completion;
+    bool released = false;
+    auto release = folly::makeGuard([&] {
+      control->releaseAll();
+      if (!released) {
+        gate.release.set_value();
+      }
+    });
+    CUDF_CUDA_TRY(cudaLaunchHostFunc(stream.value(), waitForStreamGate, &gate));
+    read = input->device_read_async(0, 8192, dst, stream.view());
+    ASSERT_TRUE(waitUntil([&] { return control->submitted.load() == 1; }));
+    EXPECT_EQ(
+        read_->recordedReads().back(), (std::pair<size_t, size_t>{4096, 4096}));
+    if (shortRead) {
+      read_->shortRead = true;
+    } else {
+      read_->failRead = true;
+    }
+    completion =
+        std::async(std::launch::async, [read = std::move(read)]() mutable {
+          EXPECT_THROW(read.get(), VeloxRuntimeError);
+        });
+    control->releaseAll();
+    cache_->clear();
+    EXPECT_GE(cache_->refreshStats().numEntries, 1);
+    EXPECT_EQ(completion.wait_for(20ms), std::future_status::timeout)
+        << "A failing suffix must not release a still-copying prefix";
+    gate.release.set_value();
+    released = true;
+    completion.get();
+    EXPECT_EQ(fromDevice(dst, 4096), read_->data.substr(0, 4096));
+    EXPECT_EQ(
+        input->device_read_async(0, 8192, dst, stream.view()).get(), 8192);
+    EXPECT_EQ(fromDevice(dst, 8192), read_->data.substr(0, 8192));
+    EXPECT_EQ(read_->recordedReads().size(), initialRequests + 2);
+    EXPECT_EQ(
+        read_->recordedReads().back(), (std::pair<size_t, size_t>{4096, 4096}));
+  }
 }
 
 TEST_F(CachingDataSourceTest, asyncSharedFillAndOutOfOrderCompletion) {
@@ -694,13 +928,99 @@ TEST_F(CachingDataSourceTest, emptyEofAndOverflowingEnd) {
   EXPECT_EQ(read_->reads, 1);
 }
 
-TEST_F(CachingDataSourceTest, longerRangeReplacesShortEntry) {
+TEST_F(CachingDataSourceTest, longerRangeReusesShortPrefix) {
   auto input = source();
   input->host_read(1, 100);
   EXPECT_EQ(input->host_read(1, 200)->size(), 200);
   EXPECT_EQ(read_->reads, 2);
   input->host_read(1, 50);
   EXPECT_EQ(read_->reads, 2);
+  EXPECT_EQ(
+      read_->recordedReads(), (ReadState::Requests{{1, 100}, {101, 100}}));
+  StringIdLease file(fileIds(), path_);
+  auto pin = cache_->findOrCreate({file.id(), 1}, 100, true);
+  EXPECT_EQ(pin.checkedEntry()->size(), 100);
+}
+
+TEST_F(
+    CachingDataSourceTest,
+    hostReadsReuseFragmentChainAndClampFinalFragment) {
+  for (size_t i = 0; i < read_->data.size(); ++i) {
+    read_->data[i] = static_cast<char>(i % 251);
+  }
+  auto input = source();
+  input->host_read(0, 1024);
+  input->host_read(1024, 512);
+  input->host_read(1536, 1024);
+  std::vector<uint8_t> dst(4096);
+  EXPECT_EQ(input->host_read(0, dst.size(), dst.data()), dst.size());
+  EXPECT_EQ(std::memcmp(dst.data(), read_->data.data(), dst.size()), 0);
+  EXPECT_EQ(
+      read_->recordedReads(),
+      (ReadState::Requests{
+          {0, 1024}, {1024, 512}, {1536, 1024}, {2560, 1536}}));
+  auto metrics = stats_->stats();
+  EXPECT_EQ(metrics.at("cudfKvikioCacheMissBytes").sum, 4096);
+  EXPECT_EQ(metrics.at("cudfKvikioCacheHitBytes").sum, 2560);
+  EXPECT_EQ(metrics.at("cudfKvikioCacheReusedPrefixes").sum, 3);
+  EXPECT_EQ(metrics.at("cudfKvikioCacheReusedPrefixBytes").sum, 2560);
+  auto owned = input->host_read_async(0, 1800).get();
+  EXPECT_EQ(owned->size(), 1800);
+  EXPECT_EQ(std::memcmp(owned->data(), read_->data.data(), 1800), 0);
+  EXPECT_EQ(
+      input->host_read_async(0, dst.size(), dst.data()).get(), dst.size());
+  EXPECT_EQ(std::memcmp(dst.data(), read_->data.data(), dst.size()), 0);
+  EXPECT_EQ(read_->reads, 4);
+}
+
+TEST_F(CachingDataSourceTest, failedHostSuffixPreservesCachedPrefix) {
+  auto input = source();
+  input->host_read(0, 1024);
+  read_->shortRead = true;
+  EXPECT_THROW(input->host_read(0, 4096), VeloxRuntimeError);
+  read_->failRead = true;
+  EXPECT_THROW(input->host_read(0, 4096), VeloxRuntimeError);
+  EXPECT_EQ(input->host_read(0, 4096)->size(), 4096);
+  EXPECT_EQ(
+      read_->recordedReads(),
+      (ReadState::Requests{
+          {0, 1024}, {1024, 3072}, {1024, 3072}, {1024, 3072}}));
+}
+
+TEST_F(CachingDataSourceTest, uncachedFallbackReadsOnlyMissingSuffix) {
+  read_->data.assign(32 << 20, 'b');
+  auto control = std::make_shared<AsyncReadControl>();
+  auto input = asyncSource(control);
+  input->host_read(0, 4096);
+  // Hold the prefix so an unsuccessful large cache allocation cannot evict it.
+  StringIdLease file(fileIds(), path_);
+  auto pin = cache_->findOrCreate({file.id(), 0}, 4096, true);
+  auto host = input->host_read(0, read_->data.size());
+  EXPECT_EQ(host->size(), read_->data.size());
+  EXPECT_EQ(std::memcmp(host->data(), read_->data.data(), host->size()), 0);
+  rmm::cuda_stream stream;
+  rmm::device_buffer destination(
+      read_->data.size(),
+      stream.view(),
+      cudf::get_current_device_resource_ref());
+  auto* dst = static_cast<uint8_t*>(destination.data());
+  EXPECT_EQ(
+      input->device_read_async(0, read_->data.size(), dst, stream.view()).get(),
+      read_->data.size());
+  EXPECT_EQ(fromDevice(dst, read_->data.size()), read_->data);
+  // Short uncached reads return the prefix plus the actual suffix length.
+  read_->shortRead = true;
+  EXPECT_EQ(
+      input->device_read(0, read_->data.size(), dst, stream.view()),
+      read_->data.size() - 1);
+  EXPECT_EQ(
+      read_->recordedReads(),
+      (ReadState::Requests{
+          {0, 4096},
+          {4096, read_->data.size() - 4096},
+          {4096, read_->data.size() - 4096},
+          {4096, read_->data.size() - 4096}}));
+  EXPECT_EQ(control->submitted, 0);
 }
 
 TEST_F(CachingDataSourceTest, cacheCapacityFailureFallsBackWithoutPublishing) {

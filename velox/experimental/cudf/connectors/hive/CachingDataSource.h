@@ -40,8 +40,11 @@ namespace facebook::velox::cudf_velox::connector::hive {
 /// driver/preload counts. The returned future still fences destination writes
 /// on both consumption and discard; failed/short fills are never published.
 ///
-/// Cache keys are (file ID, request offset). An existing entry must cover the
-/// requested length; differently aligned ranges need not reuse cached bytes.
+/// Cache keys are (file ID, request offset). Like BufferedInput, reads reuse
+/// smaller entries at successive offsets and fill only the remaining suffix.
+/// This is exact-offset fragment reuse, not an arbitrary interval lookup:
+/// differently aligned ranges need not reuse cached bytes. Every registered
+/// fragment remains owned until the logical device read's H2D fence completes.
 /// The process-wide cache must outlive reads.
 class CachingDataSource final : public cudf::io::datasource {
  public:

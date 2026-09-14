@@ -56,7 +56,7 @@ is a count limit, not a new host-memory budget. Existing cache/pinned-pool
 budgets still apply. `KVIKIO_NTHREADS` sizes the executor, not the number of
 pending asynchronous cache fills. No driver count, split preload depth, GPU
 destination size, or worker placement is changed. This is not yet host-only
-split prefetch or subrange H2D before a logical host read completes.
+split prefetch or H2D streaming from a partially filled cache entry.
 
 Use query-level runtime counters to verify dispatch:
 
@@ -78,6 +78,21 @@ dispatch are unchanged. Exclusive entries remain unpublished until a complete
 successful fill; failure paths drain outstanding writes before freeing storage.
 The device-read completion still fences H2D and retains cache ownership through
 completion, including when the caller discards its future.
+
+Both host and device reads reuse smaller cache entries with the same
+`kAllowSmaller` policy as BufferedInput. A larger read consumes the cached
+prefix, looks up the next offset, and fills only the remaining suffix rather
+than invalidating and fetching the prefix again. This includes non-contiguous
+cache entries. Synchronous callers retain inline dispatch; GPU scan misses
+retain asynchronous dispatch. Registered fragments remain pinned through H2D,
+including when a later suffix fails or the caller discards the read.
+
+This is exact-offset fragment reuse, not arbitrary interval lookup. A read
+starting inside an entry, or spanning a cached island beyond an uncached gap,
+can still fetch overlapping bytes. `cudfKvikioCacheReusedPrefixes` counts
+smaller cached entries consumed; `cudfKvikioCacheReusedPrefixBytes` counts the
+bytes served by those prefixes. Hit/miss counters record actual fragment bytes,
+not the full logical request for every fragment. Cache-off reads are unchanged.
 
 #### Experimental registered cache backing
 
