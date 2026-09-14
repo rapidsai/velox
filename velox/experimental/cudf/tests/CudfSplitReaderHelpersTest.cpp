@@ -36,6 +36,7 @@
 
 #include <cuda_runtime_api.h>
 
+#include <folly/ScopeGuard.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <gtest/gtest.h>
 
@@ -171,6 +172,58 @@ class GatedReadFile final : public InMemoryReadFile {
   bool released_{false};
 };
 
+// The first region can finish while a later, independent storage read stays
+// in flight. Also supports failure after an earlier H2D was submitted.
+class GatedTailReadFile final : public InMemoryReadFile {
+ public:
+  GatedTailReadFile(const std::string& data, uint64_t tailOffset)
+      : InMemoryReadFile(data), tailOffset_(tailOffset) {}
+
+  uint64_t preadv(
+      uint64_t offset,
+      const std::vector<folly::Range<char*>>& buffers,
+      const FileIoContext& context = {}) const override {
+    if (offset >= tailOffset_) {
+      std::unique_lock lock(mutex_);
+      entered_ = true;
+      cv_.notify_all();
+      cv_.wait(lock, [&] { return released_; });
+      if (fail_) {
+        ++failures_;
+        cv_.notify_all();
+        VELOX_FAIL("Injected tail read failure");
+      }
+    }
+    return InMemoryReadFile::preadv(offset, buffers, context);
+  }
+
+  bool waitForTail() const {
+    std::unique_lock lock(mutex_);
+    return cv_.wait_for(lock, 5s, [&] { return entered_; });
+  }
+
+  bool waitForFailures(size_t count) const {
+    std::unique_lock lock(mutex_);
+    return cv_.wait_for(lock, 5s, [&] { return failures_ >= count; });
+  }
+
+  void release(bool fail = false) {
+    std::lock_guard lock(mutex_);
+    fail_ = fail;
+    released_ = true;
+    cv_.notify_all();
+  }
+
+ private:
+  const uint64_t tailOffset_;
+  mutable std::mutex mutex_;
+  mutable std::condition_variable cv_;
+  mutable bool entered_{false};
+  mutable size_t failures_{0};
+  bool released_{false};
+  bool fail_{false};
+};
+
 struct PendingReadState {
   PendingReadState() : releaseFuture(release.get_future().share()) {}
 
@@ -283,12 +336,21 @@ class RegisteredBufferedInputTest : public CudfSplitReaderHelpersTest {
     CacheHostRegistration::setBlockSizesForTesting(64ULL << 20, 256ULL << 20);
     CudfSplitReaderHelpersTest::TearDown();
   }
-  std::shared_ptr<CachedBufferedInput> makeCachedInput() {
+  std::shared_ptr<CachedBufferedInput> makeCachedInput(
+      std::shared_ptr<ReadFile> readFile = nullptr,
+      folly::Executor* executor = nullptr) {
     io::ReaderOptions options(pool_.get());
     options.setLoadQuantum(64 << 10);
     options.setCacheable(true);
+    if (readFile) {
+      // Keep the gated test's two regions in separate coalesced loads.
+      options.setMaxCoalesceDistance(0);
+      options.setMaxCoalesceBytes(64 << 10);
+    } else {
+      readFile = std::make_shared<InMemoryReadFile>(data_);
+    }
     return std::make_shared<CachedBufferedInput>(
-        std::make_shared<InMemoryReadFile>(data_),
+        std::move(readFile),
         dwio::common::MetricsLog::voidLog(),
         StringIdLease(fileIds(), "registered-buffered-file"),
         cache_.get(),
@@ -296,8 +358,78 @@ class RegisteredBufferedInputTest : public CudfSplitReaderHelpersTest {
         StringIdLease(fileIds(), "registered-buffered-group"),
         std::make_shared<io::IoStatistics>(),
         stats_,
-        nullptr,
+        executor,
         options);
+  }
+
+  int64_t readyBatches() const {
+    const auto metrics = stats_->stats();
+    const auto it = metrics.find("cudfBufferedReadyH2DBatches");
+    return it == metrics.end() ? 0 : it->second.sum;
+  }
+
+  bool waitForReadyBatch(int64_t previous) const {
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (readyBatches() <= previous &&
+           std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(1ms);
+    }
+    return readyBatches() > previous;
+  }
+
+  void checkCopyBeforeTailCompletes(
+      bool cachedPrefix,
+      bool singleRequest = false) {
+    constexpr size_t kSize = 64 << 10;
+    const size_t tailOffset = singleRequest ? kSize : 1 << 20;
+    auto file = std::make_shared<GatedTailReadFile>(data_, tailOffset);
+    folly::CPUThreadPoolExecutor executor(2);
+    BufferedInputDataSource source(makeCachedInput(file, &executor), stats_);
+    TestCudaStream stream;
+    if (cachedPrefix) {
+      std::ignore = source.device_read(0, kSize, stream.view());
+    }
+    const auto previous = readyBatches();
+    rmm::device_buffer destination(
+        2 * kSize, stream.view(), cudf::get_current_device_resource_ref());
+    auto* dst = static_cast<uint8_t*>(destination.data());
+    CUDF_CUDA_TRY(cudaMemsetAsync(dst, 0xff, 2 * kSize, stream.view().value()));
+    const std::vector<cudf::io::datasource::device_read_request> requests =
+        singleRequest
+        ? std::vector<
+              cudf::io::datasource::device_read_request>{{0, 2 * kSize, dst}}
+        : std::vector<cudf::io::datasource::device_read_request>{
+              {0, kSize, dst}, {tailOffset, kSize, dst + kSize}};
+    auto completion = source.device_read_batch_async(requests, stream.view());
+    auto releaseTail = folly::makeGuard([&] { file->release(); });
+    const bool tailStarted = file->waitForTail();
+    const bool prefixSubmitted = waitForReadyBatch(previous);
+    if (tailStarted && prefixSubmitted) {
+      // The tail cannot submit a copy while its read is gated. Synchronizing
+      // the stream here proves the prefix really reached GPU memory, not
+      // merely that the final completion future was constructed early.
+      stream.view().synchronize();
+      std::string actual(kSize, '\0');
+      CUDF_CUDA_TRY(
+          cudaMemcpy(actual.data(), dst, kSize, cudaMemcpyDeviceToHost));
+      EXPECT_EQ(actual, data_.substr(0, kSize));
+    }
+    file->release();
+    EXPECT_EQ(
+        completion.get(),
+        singleRequest ? std::vector<size_t>{2 * kSize}
+                      : (std::vector<size_t>{kSize, kSize}));
+    EXPECT_TRUE(tailStarted);
+    EXPECT_TRUE(prefixSubmitted);
+    std::string actual(2 * kSize, '\0');
+    CUDF_CUDA_TRY(
+        cudaMemcpy(actual.data(), dst, actual.size(), cudaMemcpyDeviceToHost));
+    EXPECT_EQ(actual, data_.substr(0, kSize) + data_.substr(tailOffset, kSize));
+    const auto metrics = stats_->stats();
+    EXPECT_EQ(
+        metrics.at("cudfBufferedH2DBytesBeforeLastSourceReady").sum, kSize);
+    EXPECT_GT(metrics.at("cudfBufferedReadyH2DLeadNanos").sum, 0);
+    EXPECT_EQ(metrics.count("cudfPinnedStagingBytes"), 0);
   }
   std::string data_;
   std::shared_ptr<memory::MallocAllocator> allocator_ =
@@ -309,6 +441,69 @@ class RegisteredBufferedInputTest : public CudfSplitReaderHelpersTest {
       AsyncDataCache::create(allocator_.get());
   std::shared_ptr<IoStats> stats_ = std::make_shared<IoStats>();
 };
+
+TEST_F(RegisteredBufferedInputTest, coldPrefixCopiesBeforeTailCompletes) {
+  checkCopyBeforeTailCompletes(false);
+}
+
+TEST_F(RegisteredBufferedInputTest, cachedPrefixCopiesBeforeTailCompletes) {
+  checkCopyBeforeTailCompletes(true);
+}
+
+TEST_F(RegisteredBufferedInputTest, copiesBeforeNextEntryInSameRequest) {
+  checkCopyBeforeTailCompletes(false, true);
+}
+
+TEST_F(RegisteredBufferedInputTest, laterReadFailureDrainsEarlierH2D) {
+  constexpr size_t kSize = 64 << 10;
+  constexpr size_t kTailOffset = 1 << 20;
+  auto file = std::make_shared<GatedTailReadFile>(data_, kTailOffset);
+  folly::CPUThreadPoolExecutor executor(2);
+  auto source = std::make_unique<BufferedInputDataSource>(
+      makeCachedInput(file, &executor), stats_);
+  TestCudaStream stream;
+  rmm::device_buffer destination(
+      2 * kSize, stream.view(), cudf::get_current_device_resource_ref());
+  auto* dst = static_cast<uint8_t*>(destination.data());
+  StreamGate gate;
+  auto entered = gate.entered.get_future();
+  CUDF_CUDA_TRY(cudaLaunchHostFunc(stream.view().value(), waitForGate, &gate));
+  const std::vector<cudf::io::datasource::device_read_request> requests{
+      {0, kSize, dst}, {kTailOffset, kSize, dst + kSize}};
+  auto completion = source->device_read_batch_async(requests, stream.view());
+  source.reset();
+  auto result = std::async(
+      std::launch::async, [completion = std::move(completion)]() mutable {
+        return completion.get();
+      });
+  auto releaseReads = folly::makeGuard([&] {
+    file->release();
+    releaseGate(gate);
+  });
+  const bool streamBlocked = entered.wait_for(5s) == std::future_status::ready;
+  const bool tailStarted = file->waitForTail();
+  const bool prefixSubmitted = waitForReadyBatch(0);
+  file->release(true);
+  // Coalesced failure is retried once by CacheInputStream's demand read.
+  const bool tailFailed = file->waitForFailures(2);
+  if (streamBlocked && prefixSubmitted && tailFailed) {
+    EXPECT_EQ(result.wait_for(100ms), std::future_status::timeout);
+    cache_->clear();
+    EXPECT_GT(cache_->refreshStats().numEntries, 0);
+  }
+  releaseGate(gate);
+  EXPECT_THROW(result.get(), VeloxRuntimeError);
+  EXPECT_TRUE(streamBlocked);
+  EXPECT_TRUE(tailStarted);
+  EXPECT_TRUE(prefixSubmitted);
+  EXPECT_TRUE(tailFailed);
+  std::string actual(kSize, '\0');
+  CUDF_CUDA_TRY(cudaMemcpy(actual.data(), dst, kSize, cudaMemcpyDeviceToHost));
+  EXPECT_EQ(actual, data_.substr(0, kSize));
+  cache_->clear();
+  EXPECT_EQ(cache_->refreshStats().numEntries, 0);
+  EXPECT_EQ(CacheHostRegistration::poolStats().usedBytes, 0);
+}
 
 TEST_F(RegisteredBufferedInputTest, coldAndHotBatchesAvoidStaging) {
   BufferedInputDataSource source(makeCachedInput(), stats_);
@@ -338,26 +533,51 @@ TEST_F(RegisteredBufferedInputTest, coldAndHotBatchesAvoidStaging) {
   EXPECT_GT(cache_->refreshStats().numEntries, 0);
 }
 
-TEST_F(RegisteredBufferedInputTest, budgetAndCudaFailureKeepStagingFallback) {
+TEST_F(RegisteredBufferedInputTest, budgetFailureKeepsStagingFallback) {
+  CacheHostRegistration::configure(true, 1);
   BufferedInputDataSource source(makeCachedInput(), stats_);
   TestCudaStream stream;
-  for (const bool budgetFailure : {false, true}) {
-    CacheHostRegistration::configure(true, budgetFailure ? 1 : 32ULL << 20);
-    CacheHostRegistration::setFailureAtForTesting(budgetFailure ? 0 : 1);
+  for (int iteration = 0; iteration < 2; ++iteration) {
     auto result = source.device_read(0, data_.size(), stream.view());
     std::string actual(result->size(), '\0');
     CUDF_CUDA_TRY(cudaMemcpy(
         actual.data(), result->data(), actual.size(), cudaMemcpyDeviceToHost));
     EXPECT_EQ(actual, data_);
-    if (budgetFailure) {
-      EXPECT_EQ(CacheHostRegistration::testingReservedBytes(), 0);
-    }
+    EXPECT_EQ(CacheHostRegistration::testingReservedBytes(), 0);
   }
   const auto metrics = stats_->stats();
   EXPECT_EQ(metrics.at("cudfPinnedStagingBytes").sum, 2 * data_.size());
   EXPECT_EQ(
       metrics.at("cudfCacheHostRegistrationFallbackBytes").sum,
       2 * data_.size());
+}
+
+TEST_F(
+    RegisteredBufferedInputTest,
+    oneUnregisteredEntryDoesNotStageEntireBatch) {
+  CacheHostRegistration::setFailureAtForTesting(1);
+  BufferedInputDataSource source(makeCachedInput(), stats_);
+  TestCudaStream stream;
+  // The first 64-KiB entry uses pageable memory after the injected failure;
+  // subsequent allocations use the registered pool. Test both cold and hot.
+  for (int iteration = 0; iteration < 2; ++iteration) {
+    auto result = source.device_read(0, data_.size(), stream.view());
+    std::string actual(result->size(), '\0');
+    CUDF_CUDA_TRY(cudaMemcpy(
+        actual.data(), result->data(), actual.size(), cudaMemcpyDeviceToHost));
+    EXPECT_EQ(actual, data_);
+  }
+  constexpr size_t kPageableBytes = 64 << 10;
+  const auto metrics = stats_->stats();
+  EXPECT_EQ(
+      metrics.at("cudfCacheRegisteredH2DBytes").sum,
+      2 * (data_.size() - kPageableBytes));
+  EXPECT_EQ(
+      metrics.at("cudfCacheHostRegistrationFallbackBytes").sum,
+      2 * kPageableBytes);
+  EXPECT_EQ(metrics.at("cudfDirectHostToDeviceBytes").sum, 2 * kPageableBytes);
+  EXPECT_EQ(metrics.at("cudfCacheBackedSourceBytes").sum, 2 * data_.size());
+  EXPECT_EQ(metrics.count("cudfPinnedStagingBytes"), 0);
 }
 
 TEST_F(RegisteredBufferedInputTest, smallerReadsReuseCompleteOwner) {
