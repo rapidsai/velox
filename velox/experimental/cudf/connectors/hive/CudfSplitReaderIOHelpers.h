@@ -26,9 +26,16 @@
 
 #include <future>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace facebook::velox::cudf_velox::connector::hive {
+
+struct CudfHiveConnectorSplit;
+
+// Returns the coordinator's whole-file size when present and consistent with
+// the split range. A split's length alone never establishes the file size.
+std::optional<size_t> knownKvikioFileSize(const CudfHiveConnectorSplit& split);
 
 // Owns device buffers and tracks reads filling them.
 struct ByteRangeFetch {

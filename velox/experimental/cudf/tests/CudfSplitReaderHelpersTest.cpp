@@ -16,6 +16,7 @@
 
 #include "velox/experimental/cudf/connectors/hive/BufferedInputDataSource.h"
 #include "velox/experimental/cudf/connectors/hive/CacheHostRegistration.h"
+#include "velox/experimental/cudf/connectors/hive/CudfHiveConnectorSplit.h"
 #include "velox/experimental/cudf/connectors/hive/CudfSplitReaderIOHelpers.h"
 #include "velox/experimental/cudf/connectors/hive/PinnedStagingArena.h"
 
@@ -439,6 +440,68 @@ TEST_F(
   cache_->clear();
   EXPECT_EQ(cache_->refreshStats().numEntries, 0);
   EXPECT_EQ(CacheHostRegistration::poolStats().usedBytes, 0);
+}
+
+TEST_F(CudfSplitReaderHelpersTest, knownKvikioFileSizeUsesObjectMetadata) {
+  auto split = CudfHiveConnectorSplitBuilder("s3://bucket/file.parquet")
+                   .start(40)
+                   .length(50)
+                   .infoColumn("$file_size", "200")
+                   .build();
+  EXPECT_EQ(knownKvikioFileSize(*split), 200);
+
+  // Large objects and the unspecified-length sentinel are supported.
+  split = CudfHiveConnectorSplitBuilder("s3://bucket/file.parquet")
+              .infoColumn("$file_size", "5368709120")
+              .build();
+  EXPECT_EQ(knownKvikioFileSize(*split), 5368709120ULL);
+
+  split = CudfHiveConnectorSplitBuilder("s3://bucket/empty.parquet")
+              .length(0)
+              .infoColumn("$file_size", "0")
+              .build();
+  EXPECT_EQ(knownKvikioFileSize(*split), 0);
+}
+
+TEST_F(CudfSplitReaderHelpersTest, knownKvikioFileSizeNeverInfersFromRange) {
+  auto split = CudfHiveConnectorSplitBuilder("s3://bucket/file.parquet")
+                   .length(200)
+                   .build();
+  EXPECT_FALSE(knownKvikioFileSize(*split).has_value());
+
+  for (const auto* value :
+       {"",
+        "-1",
+        "+200",
+        " 200",
+        "200 ",
+        "200x",
+        "9223372036854775808",
+        "18446744073709551616"}) {
+    SCOPED_TRACE(value);
+    split->infoColumns["$file_size"] = value;
+    EXPECT_FALSE(knownKvikioFileSize(*split).has_value());
+  }
+}
+
+TEST_F(
+    CudfSplitReaderHelpersTest,
+    knownKvikioFileSizeRejectsInconsistentRange) {
+  const auto check = [](uint64_t start, uint64_t length) {
+    auto split = CudfHiveConnectorSplitBuilder("s3://bucket/file.parquet")
+                     .start(start)
+                     .length(length)
+                     .infoColumn("$file_size", "200")
+                     .build();
+    return knownKvikioFileSize(*split);
+  };
+  EXPECT_FALSE(check(201, 0).has_value());
+  EXPECT_FALSE(check(150, 51).has_value());
+  // Validate without overflowing start + length.
+  EXPECT_FALSE(
+      check(150, std::numeric_limits<uint64_t>::max() - 1).has_value());
+  EXPECT_EQ(check(150, 50), 200);
+  EXPECT_EQ(check(150, std::numeric_limits<uint64_t>::max()), 200);
 }
 
 TEST_F(CudfSplitReaderHelpersTest, normalizeKvikioS3Uri) {
