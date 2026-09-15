@@ -28,6 +28,15 @@
 namespace facebook::velox::ucx_exchange {
 namespace {
 
+TEST(UcxCompressionPolicyTest, endpointGate) {
+  for (bool allowCudaIpc : {false, true}) {
+    EXPECT_FALSE(compressionAllowedForEndpoint(std::nullopt, allowCudaIpc));
+    EXPECT_TRUE(compressionAllowedForEndpoint(false, allowCudaIpc));
+  }
+  EXPECT_FALSE(compressionAllowedForEndpoint(true, false));
+  EXPECT_TRUE(compressionAllowedForEndpoint(true, true));
+}
+
 // Uploads host bytes, round-trips through compress/decompress, checks
 // byte-exactness, and reports {ratio, encode GB/s, decode GB/s}.
 struct RoundTripResult {

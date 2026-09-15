@@ -22,6 +22,7 @@ namespace facebook::velox::cudf_velox::test {
 
 TEST(ConfigTest, defaults) {
   CudfConfig config;
+  ASSERT_FALSE(config.exchangeCompressionAllowCudaIpc);
   ASSERT_TRUE(config.hostToDeviceStagingEnabled);
   ASSERT_EQ(config.hostToDeviceStagingWindowBytes, 128ULL << 20);
   ASSERT_EQ(config.hostToDeviceStagingPackThreads, 4);
@@ -52,6 +53,7 @@ TEST(ConfigTest, CudfConfig) {
       {CudfConfig::kUcxExchangeLogLevel, "2"},
       {CudfConfig::kUcxPartitionedOutputBatchRows, "100000"},
       {CudfConfig::kUcxExchangeCompression, "column-adaptive-freq-pfor-min128"},
+      {CudfConfig::kUcxExchangeCompressionAllowCudaIpc, "true"},
       {CudfConfig::kUcxExchangeCompressionPipeline, "true"},
       {CudfConfig::kUcxExchangeCompressionPipelineThreads, "2"},
       {CudfConfig::kUcxExchangeCompressionMinBytes, "268435456"},
@@ -80,9 +82,23 @@ TEST(ConfigTest, CudfConfig) {
   ASSERT_EQ(config.exchangeLogLevel, 2);
   ASSERT_EQ(config.partitionedOutputBatchRows, 100000);
   ASSERT_EQ(config.exchangeCompression, "column-adaptive-freq-pfor-min128");
+  ASSERT_TRUE(config.exchangeCompressionAllowCudaIpc);
   ASSERT_TRUE(config.exchangeCompressionPipeline);
   ASSERT_EQ(config.exchangeCompressionPipelineThreads, 2);
   ASSERT_EQ(config.exchangeCompressionMinBytes, 268435456);
   ASSERT_DOUBLE_EQ(config.exchangeCompressionSafetyMargin, 1.5);
+}
+
+TEST(ConfigTest, exchangeCompressionCudaIpcOptIn) {
+  CudfConfig config;
+  config.initialize(
+      {{CudfConfig::kUcxExchangeCompressionAllowCudaIpc, "true"}});
+  EXPECT_TRUE(config.exchangeCompressionAllowCudaIpc);
+  config.initialize(
+      {{CudfConfig::kUcxExchangeCompressionAllowCudaIpc, "false"}});
+  EXPECT_FALSE(config.exchangeCompressionAllowCudaIpc);
+  EXPECT_ANY_THROW(config.initialize(
+      {{CudfConfig::kUcxExchangeCompressionAllowCudaIpc, "invalid"}}));
+  EXPECT_FALSE(config.exchangeCompressionAllowCudaIpc);
 }
 } // namespace facebook::velox::cudf_velox::test

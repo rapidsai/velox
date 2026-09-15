@@ -16,6 +16,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include <rmm/cuda_stream_view.hpp>
@@ -28,6 +29,16 @@
 /// per-segment sizes travel in the wire metadata (MetadataMsg
 /// remainingBytes), so decode needs no device-side header parsing.
 namespace facebook::velox::ucx_exchange {
+
+/// Endpoint transport lists describe available lanes, not the protocol chosen
+/// for a particular payload. Preserve the conservative veto on unknown
+/// endpoints; the opt-in only allows known IPC/mixed endpoints through to the
+/// ordinary codec size/gain/adaptive checks.
+inline bool compressionAllowedForEndpoint(
+    std::optional<bool> usesCudaIpc,
+    bool allowCudaIpc) {
+  return usesCudaIpc.has_value() && (!*usesCudaIpc || allowCudaIpc);
+}
 
 /// Codec identifiers carried on the wire.
 enum class ExchangeCodec : int64_t {

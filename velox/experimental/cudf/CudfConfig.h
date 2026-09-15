@@ -82,6 +82,8 @@ struct CudfConfig {
       "cudf.exchange_compression_min_bytes"};
   static constexpr const char* kUcxExchangeCompressionSafetyMargin{
       "cudf.exchange_compression_safety_margin"};
+  static constexpr const char* kUcxExchangeCompressionAllowCudaIpc{
+      "cudf.exchange_compression_allow_cuda_ipc"};
   /// Query session configs for the cuDF Operators.
   static constexpr const char* kCudfTopNBatchSize{"cudf.topk_batch_size"};
 
@@ -242,6 +244,11 @@ struct CudfConfig {
   /// memory and staging; root allocator accounting includes all slab backing.
   /// This does not include other CUDA/UCX/staging host registrations.
   uint64_t cacheHostRegistrationMaxBytes{32ULL << 30};
+
+  /// Allow the configured codec on endpoints with a CUDA IPC lane. This only
+  /// lifts the endpoint veto: size, gain, and adaptive cost checks still apply.
+  /// False preserves the existing veto on endpoints with a CUDA IPC lane.
+  bool exchangeCompressionAllowCudaIpc{false};
 };
 
 } // namespace facebook::velox::cudf_velox

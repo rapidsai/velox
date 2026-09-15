@@ -59,10 +59,13 @@ worker is the conservative starting point because one codec operation can
 already use much of the GPU.
 
 Compression is never used for the in-process same-worker path. UCP endpoint
-transport discovery also leaves CUDA IPC transfers raw. A known non-CUDA-IPC
-endpoint, such as a remote TCP or RDMA endpoint, is eligible. If UCP cannot
-report the endpoint transports, the implementation fails closed and sends raw
-data.
+transport discovery leaves endpoints with a CUDA IPC lane raw by default.
+`cudf.exchange_compression_allow_cuda_ipc=true` makes those endpoints eligible
+for the configured codec as well. This is an opt-in for controlled mixed
+SRD/IPC comparisons, not a force-compress switch: minimum-size, gain, and
+adaptive cost checks still apply. An endpoint's lane list is not the per-message
+protocol selection, so enabling IPC can otherwise change both transport and
+compression policy. Unknown endpoint transports still fail closed to raw data.
 
 ## Configuration
 
@@ -75,6 +78,7 @@ The worker's native configuration accepts these properties:
 | `cudf.exchange_compression_pipeline_threads` | `1` | Bounded codec executor size, clamped to 1 through 4. |
 | `cudf.exchange_compression_min_bytes` | `0` | Do not probe chunks smaller than this many bytes. |
 | `cudf.exchange_compression_safety_margin` | `1.10` | Required transfer-saving to codec-cost ratio in adaptive modes. |
+| `cudf.exchange_compression_allow_cuda_ipc` | `false` | Let known CUDA IPC/mixed endpoints pass the transport gate. |
 
 The main policies are:
 
@@ -124,7 +128,7 @@ Run the codec and cost-model tests on a CUDA-capable host:
 
 ```bash
 _build/release/velox/experimental/ucx-exchange/tests/ucx_exchange_test \
-  --gtest_filter='UcxCompressionTest.*:UcxCompressionCostModelTest.*'
+  --gtest_filter='UcxCompressionTest.*:UcxCompressionPolicyTest.*:UcxCompressionCostModelTest.*'
 ```
 
 The GPU tests cover skipped inputs, whole-buffer rANS round trips, descriptor
@@ -136,7 +140,7 @@ For an end-to-end deployment, additionally verify:
 
 1. The worker log shows UCX exchange rather than HTTP exchange.
 2. Every worker uses this wire format.
-3. The selected endpoint is reported as non-CUDA-IPC before compression occurs.
+3. The endpoint is known and either non-CUDA-IPC or explicitly opted in.
 4. Compressed and raw query runs return identical results.
 5. Logs report both lower wire bytes and a favorable end-to-end runtime or a
    justified traffic reduction.

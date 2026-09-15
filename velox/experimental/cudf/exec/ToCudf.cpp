@@ -515,6 +515,10 @@ void CudfConfig::initialize(
   if (config.find(kUcxExchangeCompression) != config.end()) {
     exchangeCompression = config[kUcxExchangeCompression];
   }
+  if (config.find(kUcxExchangeCompressionAllowCudaIpc) != config.end()) {
+    exchangeCompressionAllowCudaIpc =
+        folly::to<bool>(config[kUcxExchangeCompressionAllowCudaIpc]);
+  }
   if (config.find(kUcxExchangeCompressionPipeline) != config.end()) {
     exchangeCompressionPipeline =
         folly::to<bool>(config[kUcxExchangeCompressionPipeline]);

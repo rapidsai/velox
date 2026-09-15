@@ -444,11 +444,14 @@ bool UcxExchangeServer::endpointAllowsCompression() {
   if (!cudaIpcTransport_) {
     cudaIpcTransport_ = endpointRef_->usesTransport("cuda_ipc");
   }
-  const bool allowed = cudaIpcTransport_.has_value() && !*cudaIpcTransport_;
+  const bool allowCudaIpc =
+      cudf_velox::CudfConfig::getInstance().exchangeCompressionAllowCudaIpc;
+  const bool allowed =
+      compressionAllowedForEndpoint(cudaIpcTransport_, allowCudaIpc);
   VLOG(1) << "[UCX-COMPRESSION-TRANSPORT] cudaIpcKnown="
           << cudaIpcTransport_.has_value()
           << " cudaIpc=" << cudaIpcTransport_.value_or(true)
-          << " allowed=" << allowed;
+          << " allowCudaIpc=" << allowCudaIpc << " allowed=" << allowed;
   return allowed;
 }
 
