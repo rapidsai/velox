@@ -74,4 +74,10 @@ if(VELOX_ENABLE_UCX_EXCHANGE)
   target_compile_definitions(velox_cudf_exec PRIVATE VELOX_ENABLE_UCX_EXCHANGE)
 endif()
 
+# WXD/IBM ONLY — DO NOT UPSTREAM. Apply the KvikIO direct-receive defaults
+# only in builds containing the corresponding patched S3 implementation.
+if(VELOX_ENABLE_S3_DIRECT_RECEIVE)
+  target_compile_definitions(velox_cudf_exec PRIVATE VELOX_ENABLE_S3_DIRECT_RECEIVE)
+endif()
+
 target_compile_options(velox_cudf_exec PRIVATE -Wno-missing-field-initializers)

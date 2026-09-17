@@ -23,10 +23,11 @@
 # * INSTALL_PREREQUISITES="N": Skip installation of packages for build.
 # * PROMPT_ALWAYS_RESPOND="n": Automatically respond to interactive prompts.
 #     Use "n" to never wipe directories.
-# * VELOX_CUDA_VERSION="12.9": Which version of CUDA to install, will pick up
+# * VELOX_CUDA_VERSION="13.2": Which version of CUDA to install, will pick up
 #   CUDA_VERSION from the env
-# * VELOX_UCX_VERSION="1.20.1": Which version of ucx to install, will pick up
-#   UCX_VERSION from the env
+# * VELOX_UCX_VERSION: Defaults to the pinned WXD UCX 1.22 commit below
+#   (including openucx/ucx#11865). UCX_VERSION explicitly selects a release
+#   or master instead. Stock 1.22.0 lacks the Blackwell RTX bandwidth fix.
 # * VELOX_UCX_LOCAL_SOURCE="": Optional local UCX source tree to install
 #   instead of downloading UCX_VERSION. Picks up UCX_LOCAL_SOURCE from the env.
 #   Local sources are built with CUDA and EFA enabled; configuration fails when
@@ -36,8 +37,9 @@
 
 set -efx -o pipefail
 
-VELOX_CUDA_VERSION=${CUDA_VERSION:-"12.9"}
-VELOX_UCX_VERSION=${UCX_VERSION:-"1.20.1"}
+# WXD/IBM ONLY — DO NOT UPSTREAM. Match the tested mixed SRD/IPC dependency.
+VELOX_CUDA_VERSION=${CUDA_VERSION:-"13.2"}
+VELOX_UCX_VERSION=${UCX_VERSION:-"462c56777aaf268d7daf1b5d43e6f49e69b0207e"}
 VELOX_UCX_LOCAL_SOURCE=${UCX_LOCAL_SOURCE:-""}
 SCRIPT_DIR=$(dirname "${BASH_SOURCE[0]}")
 # shellcheck disable=SC1091
@@ -94,22 +96,29 @@ function install_ucx {
   dnf_install rdma-core-devel || return $?
   local UCX_REPO_NAME="openucx/ucx"
   local NEEDS_AUTOGEN=false
-  local IS_LOCAL_SOURCE=false
+  local REQUIRE_CUDA_EFA=false
 
   if [ -n "${VELOX_UCX_LOCAL_SOURCE}" ] && [ -f "${VELOX_UCX_LOCAL_SOURCE}/autogen.sh" ]; then
     rm -rf "${DEPENDENCY_DIR}"/ucx || return $?
     mkdir -p "${DEPENDENCY_DIR}"/ucx || return $?
     cp -a "${VELOX_UCX_LOCAL_SOURCE}"/. "${DEPENDENCY_DIR}"/ucx/ || return $?
     NEEDS_AUTOGEN=true
-    IS_LOCAL_SOURCE=true
+    REQUIRE_CUDA_EFA=true
   elif [ -n "${VELOX_UCX_LOCAL_SOURCE}" ] && [ ! -d "${VELOX_UCX_LOCAL_SOURCE}" ]; then
     echo "UCX_LOCAL_SOURCE does not exist or is not a directory: ${VELOX_UCX_LOCAL_SOURCE}" >&2
     return 1
+  elif [ "${VELOX_UCX_VERSION}" == "462c56777aaf268d7daf1b5d43e6f49e69b0207e" ]; then
+    # Reuse the exact-revision checkout helper: it refuses an existing,
+    # different or modified tree rather than silently building stale sources.
+    checkout_s3_direct_receive_dependency \
+      kjmph/ucx "${VELOX_UCX_VERSION}" ucx || return $?
+    NEEDS_AUTOGEN=true
+    REQUIRE_CUDA_EFA=true
   elif [ "${VELOX_UCX_VERSION}" == "master" ]; then
-    github_checkout "${UCX_REPO_NAME}" "${VELOX_UCX_VERSION}"
+    github_checkout "${UCX_REPO_NAME}" "${VELOX_UCX_VERSION}" || return $?
     NEEDS_AUTOGEN=true
   else
-    wget_and_untar https://github.com/openucx/ucx/releases/download/v"${VELOX_UCX_VERSION}"/ucx-"${VELOX_UCX_VERSION}".tar.gz ucx
+    wget_and_untar https://github.com/openucx/ucx/releases/download/v"${VELOX_UCX_VERSION}"/ucx-"${VELOX_UCX_VERSION}".tar.gz ucx || return $?
   fi
 
   (
@@ -119,9 +128,9 @@ function install_ucx {
     fi
 
     local -a ACCELERATOR_FLAGS=()
-    if [ "${IS_LOCAL_SOURCE}" = true ]; then
+    if [ "${REQUIRE_CUDA_EFA}" = true ]; then
       if [ ! -d "/usr/local/cuda" ]; then
-        echo "UCX_LOCAL_SOURCE requires the CUDA development tree at /usr/local/cuda" >&2
+        echo "The WXD/local UCX source requires the CUDA development tree at /usr/local/cuda" >&2
         exit 1
       fi
       # SRD is supplied by UCX's EFA transport, not by generic verbs support.
@@ -149,7 +158,7 @@ function install_ucx {
     make "-j${NPROC}" || exit $?
     make install || exit $?
 
-    if [ "${IS_LOCAL_SOURCE}" = true ]; then
+    if [ "${REQUIRE_CUDA_EFA}" = true ]; then
       verify_local_ucx_install "${INSTALL_PREFIX}" || exit $?
     fi
   )

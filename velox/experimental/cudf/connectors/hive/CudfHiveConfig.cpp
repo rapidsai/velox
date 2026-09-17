@@ -123,13 +123,15 @@ cudf::data_type CudfHiveConfig::timestampTypeSession(
 }
 
 bool CudfHiveConfig::useBufferedInput() const {
-  return config_->get<bool>(kUseBufferedInput, true);
+  // WXD/IBM ONLY — DO NOT UPSTREAM. Both readers use AsyncDataCache; KvikIO
+  // is the measured default. BufferedInput remains an explicit override.
+  return config_->get<bool>(kUseBufferedInput, false);
 }
 
 bool CudfHiveConfig::useBufferedInputSession(
     const config::ConfigBase* session) const {
   return session->get<bool>(
-      kUseBufferedInputSession, config_->get<bool>(kUseBufferedInput, true));
+      kUseBufferedInputSession, config_->get<bool>(kUseBufferedInput, false));
 }
 
 bool CudfHiveConfig::immutableFiles() const {

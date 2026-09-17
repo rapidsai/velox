@@ -15,20 +15,54 @@
  */
 
 #include "velox/experimental/cudf/CudfConfig.h"
+#include "velox/experimental/cudf/connectors/hive/CudfHiveConfig.h"
 
 #include <gtest/gtest.h>
 
 namespace facebook::velox::cudf_velox::test {
 
+TEST(ConfigTest, wxdReaderDefaultAndOverrides) {
+  using connector::hive::CudfHiveConfig;
+  auto properties = std::make_shared<config::ConfigBase>(
+      std::unordered_map<std::string, std::string>{});
+  CudfHiveConfig reader(properties);
+  EXPECT_FALSE(reader.useBufferedInput());
+  config::ConfigBase session(
+      std::unordered_map<std::string, std::string>{
+          {CudfHiveConfig::kUseBufferedInputSession, "true"}});
+  EXPECT_TRUE(reader.useBufferedInputSession(&session));
+  auto bufferedProperties = std::make_shared<config::ConfigBase>(
+      std::unordered_map<std::string, std::string>{
+          {CudfHiveConfig::kUseBufferedInput, "true"}});
+  CudfHiveConfig buffered(bufferedProperties);
+  EXPECT_TRUE(buffered.useBufferedInput());
+}
+
 TEST(ConfigTest, defaults) {
   CudfConfig config;
-  ASSERT_FALSE(config.exchangeCompressionAllowCudaIpc);
+  ASSERT_TRUE(config.exchangeCompressionAllowCudaIpc);
   ASSERT_TRUE(config.hostToDeviceStagingEnabled);
   ASSERT_EQ(config.hostToDeviceStagingWindowBytes, 128ULL << 20);
   ASSERT_EQ(config.hostToDeviceStagingPackThreads, 4);
   ASSERT_EQ(config.hostToDeviceStagingWindowSets, 2);
-  ASSERT_FALSE(config.cacheHostRegistrationEnabled);
+  ASSERT_TRUE(config.cacheHostRegistrationEnabled);
   ASSERT_EQ(config.cacheHostRegistrationMaxBytes, 32ULL << 30);
+  ASSERT_TRUE(config.exchange);
+  ASSERT_FALSE(config.ucxxErrorHandling);
+  ASSERT_FALSE(config.ucxxBlockingPolling);
+  ASSERT_TRUE(config.intraNodeExchange);
+  ASSERT_EQ(config.memoryResource, "async");
+  ASSERT_TRUE(config.outputMemoryResource.empty());
+  ASSERT_EQ(config.exchangeCompression, "column-adaptive-freq-pfor-min128");
+  ASSERT_TRUE(config.exchangeCompressionPipeline);
+  ASSERT_EQ(config.exchangeCompressionPipelineThreads, 1);
+  ASSERT_EQ(config.exchangeCompressionMinBytes, 16LL << 20);
+  ASSERT_DOUBLE_EQ(config.exchangeCompressionSafetyMargin, 1.5);
+  ASSERT_EQ(config.partitionedOutputBatchRows, 10'000'000);
+  ASSERT_TRUE(config.concatOptimizationEnabled);
+  ASSERT_EQ(config.batchSizeMinThreshold, 40'000'000);
+  ASSERT_TRUE(config.streamingGroupbyApiEnabled);
+  ASSERT_FALSE(config.jitExpressionEnabled);
 }
 
 TEST(ConfigTest, CudfConfig) {
@@ -60,7 +94,7 @@ TEST(ConfigTest, CudfConfig) {
       {CudfConfig::kUcxExchangeCompressionSafetyMargin, "1.5"}};
 
   CudfConfig config;
-  ASSERT_FALSE(config.streamingGroupbyApiEnabled);
+  ASSERT_TRUE(config.streamingGroupbyApiEnabled);
   config.initialize(std::move(options));
   ASSERT_EQ(config.enabled, false);
   ASSERT_EQ(config.debugEnabled, true);
@@ -100,5 +134,36 @@ TEST(ConfigTest, exchangeCompressionCudaIpcOptIn) {
   EXPECT_ANY_THROW(config.initialize(
       {{CudfConfig::kUcxExchangeCompressionAllowCudaIpc, "invalid"}}));
   EXPECT_FALSE(config.exchangeCompressionAllowCudaIpc);
+}
+
+TEST(ConfigTest, wxdDefaultsRemainOverridable) {
+  CudfConfig config;
+  config.initialize(
+      {{CudfConfig::kUcxExchange, "false"},
+       {CudfConfig::kUcxxErrorHandling, "true"},
+       {CudfConfig::kUcxxBlockingPolling, "true"},
+       {CudfConfig::kUcxIntraNodeExchange, "false"},
+       {CudfConfig::kUcxExchangeCompression, "none"},
+       {CudfConfig::kUcxExchangeCompressionAllowCudaIpc, "false"},
+       {CudfConfig::kUcxExchangeCompressionPipeline, "false"},
+       {CudfConfig::kCudfCacheHostRegistrationEnabled, "false"},
+       {CudfConfig::kCudfStreamingGroupbyApiEnabled, "false"},
+       {CudfConfig::kCudfConcatOptimizationEnabled, "false"},
+       {CudfConfig::kCudfJitExpressionEnabled, "true"},
+       {CudfConfig::kUcxPartitionedOutputBatchRows, "10000"},
+       {CudfConfig::kCudfBatchSizeMinThreshold, "100000"}});
+  EXPECT_FALSE(config.exchange);
+  EXPECT_TRUE(config.ucxxErrorHandling);
+  EXPECT_TRUE(config.ucxxBlockingPolling);
+  EXPECT_FALSE(config.intraNodeExchange);
+  EXPECT_EQ(config.exchangeCompression, "none");
+  EXPECT_FALSE(config.exchangeCompressionAllowCudaIpc);
+  EXPECT_FALSE(config.exchangeCompressionPipeline);
+  EXPECT_FALSE(config.cacheHostRegistrationEnabled);
+  EXPECT_FALSE(config.streamingGroupbyApiEnabled);
+  EXPECT_FALSE(config.concatOptimizationEnabled);
+  EXPECT_TRUE(config.jitExpressionEnabled);
+  EXPECT_EQ(config.partitionedOutputBatchRows, 10000);
+  EXPECT_EQ(config.batchSizeMinThreshold, 100000);
 }
 } // namespace facebook::velox::cudf_velox::test

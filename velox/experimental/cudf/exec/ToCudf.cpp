@@ -15,6 +15,7 @@
  */
 
 #include "velox/experimental/cudf/CudfConfig.h"
+#include "velox/experimental/cudf/WxdGpuDefaults.h"
 #include "velox/experimental/cudf/connectors/hive/CacheHostRegistration.h"
 #include "velox/experimental/cudf/connectors/hive/PinnedStagingArena.h"
 #include "velox/experimental/cudf/exec/CudfConversion.h"
@@ -321,6 +322,44 @@ void registerCudf() {
   if (cudfIsRegistered()) {
     return;
   }
+
+  // WXD/IBM branch defaults must also work without the velox-testing launcher.
+  applyWxdGpuEnvironmentDefaults(
+      CudfConfig::getInstance().exchange,
+#ifdef VELOX_ENABLE_S3_DIRECT_RECEIVE
+      true
+#else
+      false
+#endif
+  );
+
+  const auto environmentValue = [](const char* name) {
+    const char* value = std::getenv(name);
+    return value == nullptr ? "<unset>" : value;
+  };
+  const auto& config = CudfConfig::getInstance();
+  LOG(WARNING) << "WXD/IBM ONLY — DO NOT UPSTREAM: experimental GPU defaults; "
+               << "explicit properties and environment override the profile";
+  LOG(INFO) << "WXD GPU effective settings: exchange=" << config.exchange
+            << " compression=" << config.exchangeCompression
+            << " ipcCompression=" << config.exchangeCompressionAllowCudaIpc
+            << " memoryResource=" << config.memoryResource
+            << " registeredCache=" << config.cacheHostRegistrationEnabled
+            << " UCX_TLS=" << environmentValue("UCX_TLS")
+            << " UCX_MAX_RNDV_RAILS=" << environmentValue("UCX_MAX_RNDV_RAILS")
+            << " KVIKIO_REMOTE_IO_BACKEND="
+            << environmentValue("KVIKIO_REMOTE_IO_BACKEND")
+            << " KVIKIO_REMOTE_DIRECT_RECEIVE="
+            << environmentValue("KVIKIO_REMOTE_DIRECT_RECEIVE")
+            << " KVIKIO_NTHREADS=" << environmentValue("KVIKIO_NTHREADS")
+            << " KVIKIO_NUM_THREADS=" << environmentValue("KVIKIO_NUM_THREADS")
+            << " KVIKIO_TASK_SIZE=" << environmentValue("KVIKIO_TASK_SIZE")
+            << " KVIKIO_REMOTE_IO_MAX_CONCURRENT_REQUESTS="
+            << environmentValue("KVIKIO_REMOTE_IO_MAX_CONCURRENT_REQUESTS")
+            << " KVIKIO_REMOTE_IO_NUM_REACTORS="
+            << environmentValue("KVIKIO_REMOTE_IO_NUM_REACTORS")
+            << " KVIKIO_REMOTE_IO_REACTOR_DISPATCH="
+            << environmentValue("KVIKIO_REMOTE_IO_REACTOR_DISPATCH");
 
   // Register operator adapters
   registerAllOperatorAdapters();

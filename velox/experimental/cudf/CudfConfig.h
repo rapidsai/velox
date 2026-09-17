@@ -25,6 +25,9 @@
 namespace facebook::velox::cudf_velox {
 
 struct CudfConfig {
+  // WXD/IBM ONLY — DO NOT UPSTREAM / DO NOT OPEN AS AN UPSTREAM PR.
+  // AWS GPU research defaults; see WXD_IBM_DEFAULTS.md. Explicit properties
+  // still win. Experimental exportable exchange pools are deliberately absent.
   /// Keys used by the initialize() method.
   static constexpr const char* kCudfEnabled{"cudf.enabled"};
   static constexpr const char* kCudfDebugEnabled{"cudf.debug_enabled"};
@@ -105,16 +108,16 @@ struct CudfConfig {
   bool allowCpuFallback{true};
 
   /// Enable GPU exchange operators (UcxExchange / UcxPartitionedOutput).
-  bool exchange{false};
+  bool exchange{true};
 
   /// Whether to enable error handling in UCXX endpoints.
-  bool ucxxErrorHandling{true};
+  bool ucxxErrorHandling{false};
 
   /// Whether intra-node exchange optimization is enabled.
-  bool intraNodeExchange{false};
+  bool intraNodeExchange{true};
 
   /// Whether to use blocking polling in UCXX.
-  bool ucxxBlockingPolling{true};
+  bool ucxxBlockingPolling{false};
 
   /// VLOG level for ucx-exchange source files.
   int32_t exchangeLogLevel{0};
@@ -123,7 +126,7 @@ struct CudfConfig {
   /// flushing. Small inputs are buffered and concatenated when this threshold
   /// is reached, avoiding pathologically small exchange chunks. Set to 0 to
   /// disable accumulation.
-  int64_t partitionedOutputBatchRows{10'000};
+  int64_t partitionedOutputBatchRows{10'000'000};
 
   /// GPU codec for the UCX exchange payload. "column-adaptive" runs the same
   /// per-column codec as "column", but uses fused real encode/send/decode
@@ -132,12 +135,12 @@ struct CudfConfig {
   /// frequency-PFOR, and delta-frequency-PFOR candidates for numeric regions of
   /// at least 128 MiB. Non-adaptive and legacy policy names remain available
   /// for controlled comparisons.
-  std::string exchangeCompression{"none"};
+  std::string exchangeCompression{"column-adaptive-freq-pfor-min128"};
 
   /// Run exchange compression/decompression away from the single UCXX
   /// communicator thread so transport progress can overlap the GPU codec.
-  /// Disabled by default to preserve the synchronous baseline for A/B testing.
-  bool exchangeCompressionPipeline{false};
+  /// Enabled for the WXD/IBM measured baseline.
+  bool exchangeCompressionPipeline{true};
 
   /// Maximum number of codec tasks executing concurrently per worker process.
   /// Start with one because individual codec kernels already approach full-SM
@@ -147,12 +150,12 @@ struct CudfConfig {
   /// Send smaller exchange chunks without attempting the GPU codec. Zero
   /// preserves the existing behavior. This is an absolute-size complement to
   /// the codec's post-encode percentage-gain check.
-  int64_t exchangeCompressionMinBytes{0};
+  int64_t exchangeCompressionMinBytes{16LL << 20};
 
   /// Require estimated transfer savings to exceed measured codec cost by this
   /// factor before adaptive compression is selected. Values above one reserve
   /// headroom for the codec's opportunity cost on concurrent query kernels.
-  double exchangeCompressionSafetyMargin{1.10};
+  double exchangeCompressionSafetyMargin{1.50};
 
   /// Memory resource for cuDF.
   /// Possible values are (cuda, pool, async, arena, managed, managed_pool).
@@ -188,7 +191,7 @@ struct CudfConfig {
   bool astExpressionEnabled{true};
 
   /// Enable JIT in expression evaluation.
-  bool jitExpressionEnabled{true};
+  bool jitExpressionEnabled{false};
 
   /// Priority of AST expression. Expression with higher priority is chosen for
   /// a given root expression.
@@ -212,16 +215,15 @@ struct CudfConfig {
   /// of rows before concatenating and passing on to the next operator.
   /// This batch size is determined by batchSizeMinThreshold and
   /// batchSizeMaxThreshold
-  bool concatOptimizationEnabled{false};
+  bool concatOptimizationEnabled{true};
 
   /// Use libcudf's persistent streaming_groupby API for eligible final grouped
-  /// aggregations. This is opt-in while the API supports only a subset of the
-  /// aggregation combinations supported by the regular cuDF groupby path.
-  bool streamingGroupbyApiEnabled{false};
+  /// aggregations. Unsupported combinations retain the regular groupby path.
+  bool streamingGroupbyApiEnabled{true};
 
   /// Minimum rows to accumulate before GPU-side concatenation in
-  /// `CudfBatchConcat` (default 100k).
-  int32_t batchSizeMinThreshold{100000};
+  /// `CudfBatchConcat` (WXD/IBM default 40 million).
+  int32_t batchSizeMinThreshold{40'000'000};
 
   /// Maximum rows allowed in a concatenated batch (user configurable).
   /// When not set, cuDF's own `size_type::max()` is used.
@@ -235,9 +237,9 @@ struct CudfConfig {
   /// (nanoseconds).
   cudf::type_id timestampUnit = cudf::type_id::TIMESTAMP_NANOSECONDS;
 
-  /// Opt-in registered slab backing for AsyncDataCache in both GPU readers.
+  /// Registered slab backing for AsyncDataCache in both GPU readers.
   /// Cache entry eviction reuses slices; memory pressure frees empty slabs.
-  bool cacheHostRegistrationEnabled{false};
+  bool cacheHostRegistrationEnabled{true};
 
   /// Process-wide limit on full registered slab capacity, including unused
   /// slices and pending registrations. Admission failures use ordinary cache
@@ -248,7 +250,7 @@ struct CudfConfig {
   /// Allow the configured codec on endpoints with a CUDA IPC lane. This only
   /// lifts the endpoint veto: size, gain, and adaptive cost checks still apply.
   /// False preserves the existing veto on endpoints with a CUDA IPC lane.
-  bool exchangeCompressionAllowCudaIpc{false};
+  bool exchangeCompressionAllowCudaIpc{true};
 };
 
 } // namespace facebook::velox::cudf_velox

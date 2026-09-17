@@ -84,6 +84,21 @@ make() {
 }
 
 export VELOX_UCX_LOCAL_SOURCE=""
+# A failed pinned-source checkout must not fall through to an old dependency
+# tree, even when the caller disables Bash's implicit errexit with an AND-list.
+export VELOX_UCX_VERSION=462c56777aaf268d7daf1b5d43e6f49e69b0207e
+checkout_s3_direct_receive_dependency() {
+  [[ $1 == kjmph/ucx && $2 == "$VELOX_UCX_VERSION" && $3 == ucx ]] || return 76
+  return 75
+}
+masked_success=false
+install_ucx && masked_success=true
+status=$?
+if [[ $masked_success == true || $status -ne 75 ]]; then
+  echo "install_ucx did not propagate pinned-source checkout failure: ${status}" >&2
+  exit 1
+fi
+
 export VELOX_UCX_VERSION=test
 populate_valid_prefix "${INSTALL_PREFIX}" lib
 masked_success=false
