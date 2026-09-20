@@ -44,12 +44,14 @@ TEST(WxdGpuDefaultsTest, explicitEnvironmentWins) {
       {
         setenv("UCX_TLS", "tcp,cuda_copy", 1);
         setenv("KVIKIO_REMOTE_IO_BACKEND", "EASY_THREADPOOL", 1);
+        setenv("KVIKIO_REMOTE_ADAPTIVE_TCP_MSS", "OFF", 1);
         setenv("KVIKIO_REMOTE_IO_MAX_CONCURRENT_REQUESTS", "64", 1);
         setenv("KVIKIO_TASK_SIZE", "", 1);
         applyWxdGpuEnvironmentDefaults(true, true);
         const bool valid = std::string(getenv("UCX_TLS")) == "tcp,cuda_copy" &&
             std::string(getenv("KVIKIO_REMOTE_IO_BACKEND")) ==
                 "EASY_THREADPOOL" &&
+            std::string(getenv("KVIKIO_REMOTE_ADAPTIVE_TCP_MSS")) == "OFF" &&
             std::string(getenv("KVIKIO_REMOTE_IO_MAX_CONCURRENT_REQUESTS")) ==
                 "64" &&
             std::string(getenv("KVIKIO_TASK_SIZE")).empty();
@@ -78,6 +80,7 @@ TEST(WxdGpuDefaultsTest, gpuDefaultsWithoutLauncher) {
         unsetenv("KVIKIO_TASK_SIZE");
         unsetenv("KVIKIO_REMOTE_IO_BACKEND");
         unsetenv("KVIKIO_REMOTE_DIRECT_RECEIVE");
+        unsetenv("KVIKIO_REMOTE_ADAPTIVE_TCP_MSS");
         unsetenv("KVIKIO_REMOTE_IO_MAX_CONCURRENT_REQUESTS");
         unsetenv("KVIKIO_REMOTE_IO_NUM_REACTORS");
         unsetenv("KVIKIO_REMOTE_IO_REACTOR_DISPATCH");
@@ -99,6 +102,7 @@ TEST(WxdGpuDefaultsTest, gpuDefaultsWithoutLauncher) {
             std::string(getenv("KVIKIO_TASK_SIZE")) == "33554432" &&
             std::string(getenv("KVIKIO_REMOTE_IO_BACKEND")) == "MULTI_POLL" &&
             std::string(getenv("KVIKIO_REMOTE_DIRECT_RECEIVE")) == "REQUIRE" &&
+            std::string(getenv("KVIKIO_REMOTE_ADAPTIVE_TCP_MSS")) == "ON" &&
             std::string(getenv("KVIKIO_REMOTE_IO_MAX_CONCURRENT_REQUESTS")) ==
                 "128" &&
             std::string(getenv("KVIKIO_REMOTE_IO_NUM_REACTORS")) == "4" &&
@@ -130,15 +134,30 @@ TEST(WxdGpuDefaultsTest, explicitThreadCountAliasWins) {
       "");
 }
 
+TEST(WxdGpuDefaultsTest, emptyAdaptiveMssOverrideWins) {
+  ASSERT_EXIT(
+      {
+        setenv("KVIKIO_REMOTE_ADAPTIVE_TCP_MSS", "", 1);
+        applyWxdGpuEnvironmentDefaults(false, true);
+        _exit(
+            std::string(getenv("KVIKIO_REMOTE_ADAPTIVE_TCP_MSS")).empty() ? 0
+                                                                          : 1);
+      },
+      ::testing::ExitedWithCode(0),
+      "");
+}
+
 TEST(WxdGpuDefaultsTest, disabledPathsDoNotSetEnvironment) {
   ASSERT_EXIT(
       {
         unsetenv("UCX_TLS");
         unsetenv("KVIKIO_REMOTE_IO_BACKEND");
+        unsetenv("KVIKIO_REMOTE_ADAPTIVE_TCP_MSS");
         applyWxdGpuEnvironmentDefaults(false, false);
         _exit(
             getenv("UCX_TLS") == nullptr &&
-                    getenv("KVIKIO_REMOTE_IO_BACKEND") == nullptr
+                    getenv("KVIKIO_REMOTE_IO_BACKEND") == nullptr &&
+                    getenv("KVIKIO_REMOTE_ADAPTIVE_TCP_MSS") == nullptr
                 ? 0
                 : 1);
       },
@@ -151,11 +170,14 @@ TEST(WxdGpuDefaultsTest, directS3WithoutExchange) {
       {
         unsetenv("UCX_TLS");
         unsetenv("KVIKIO_REMOTE_IO_BACKEND");
+        unsetenv("KVIKIO_REMOTE_ADAPTIVE_TCP_MSS");
         applyWxdGpuEnvironmentDefaults(false, true);
         _exit(
             getenv("UCX_TLS") == nullptr &&
                     std::string(getenv("KVIKIO_REMOTE_IO_BACKEND")) ==
-                        "MULTI_POLL"
+                        "MULTI_POLL" &&
+                    std::string(getenv("KVIKIO_REMOTE_ADAPTIVE_TCP_MSS")) ==
+                        "ON"
                 ? 0
                 : 1);
       },
@@ -168,10 +190,12 @@ TEST(WxdGpuDefaultsTest, exchangeWithoutDirectS3) {
       {
         unsetenv("UCX_TLS");
         unsetenv("KVIKIO_REMOTE_IO_BACKEND");
+        unsetenv("KVIKIO_REMOTE_ADAPTIVE_TCP_MSS");
         applyWxdGpuEnvironmentDefaults(true, false);
         _exit(
             std::string(getenv("UCX_TLS")) == "tcp,srd,cuda_copy,cuda_ipc" &&
-                    getenv("KVIKIO_REMOTE_IO_BACKEND") == nullptr
+                    getenv("KVIKIO_REMOTE_IO_BACKEND") == nullptr &&
+                    getenv("KVIKIO_REMOTE_ADAPTIVE_TCP_MSS") == nullptr
                 ? 0
                 : 1);
       },

@@ -351,6 +351,8 @@ void registerCudf() {
             << environmentValue("KVIKIO_REMOTE_IO_BACKEND")
             << " KVIKIO_REMOTE_DIRECT_RECEIVE="
             << environmentValue("KVIKIO_REMOTE_DIRECT_RECEIVE")
+            << " KVIKIO_REMOTE_ADAPTIVE_TCP_MSS="
+            << environmentValue("KVIKIO_REMOTE_ADAPTIVE_TCP_MSS")
             << " KVIKIO_NTHREADS=" << environmentValue("KVIKIO_NTHREADS")
             << " KVIKIO_NUM_THREADS=" << environmentValue("KVIKIO_NUM_THREADS")
             << " KVIKIO_TASK_SIZE=" << environmentValue("KVIKIO_TASK_SIZE")

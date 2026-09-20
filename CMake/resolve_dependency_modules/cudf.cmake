@@ -40,15 +40,16 @@ set(
 set(VELOX_rmm_SOURCE_URL "https://github.com/rapidsai/rmm/archive/${VELOX_rmm_COMMIT}.tar.gz")
 velox_resolve_dependency_url(rmm)
 
-# Caller-owned S3 receive requires the KvikIO research implementation for
-# bounded pinned-host staging, event-fenced H2D copies, and strict path
-# accounting. Preserve Dev's network-monitor pin for ordinary cuDF builds.
+# Caller-owned S3 receive requires the KvikIO research implementation
+# for bounded pinned-host staging, event-fenced H2D copies, and strict
+# path accounting, and bounded adaptive TCP MSS reuse. Preserve
+# network-monitor pin for ordinary cuDF builds.
 if(VELOX_ENABLE_S3_DIRECT_RECEIVE)
   set(VELOX_kvikio_VERSION 26.10)
-  set(VELOX_kvikio_COMMIT 1db0457edde588e5d048d11b392802966913edce)
+  set(VELOX_kvikio_COMMIT 7bb1345a4078e47e1490031c7b5bd93042185b8d)
   set(
     VELOX_kvikio_BUILD_SHA256_CHECKSUM
-    22ee39ee354b171c315796e6f715dc97f12e57d90fdfd20af387c806fa90b061
+    617eafffccfdd6b3f1f404b87890469f46aec5a3e3813a5322bdebfe9b6c3c18
   )
   set(
     VELOX_kvikio_SOURCE_URL
@@ -93,12 +94,7 @@ find_path(UCX_INCLUDE_DIR NAMES ucp/api/ucp.h)
 unset(VELOX_UCX_CUDA_LIBRARY CACHE)
 if(UCX_LIBRARY)
   get_filename_component(UCX_LIBRARY_DIR "${UCX_LIBRARY}" DIRECTORY)
-  find_library(
-    VELOX_UCX_CUDA_LIBRARY
-    NAMES uct_cuda
-    PATHS "${UCX_LIBRARY_DIR}/ucx"
-    NO_DEFAULT_PATH
-  )
+  find_library(VELOX_UCX_CUDA_LIBRARY NAMES uct_cuda PATHS "${UCX_LIBRARY_DIR}/ucx" NO_DEFAULT_PATH)
 endif()
 if(UCX_LIBRARY AND UCX_INCLUDE_DIR AND VELOX_UCX_CUDA_LIBRARY)
   set(UCX_FOUND TRUE)

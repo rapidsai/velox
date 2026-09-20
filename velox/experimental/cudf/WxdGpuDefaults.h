@@ -67,6 +67,7 @@ inline void applyWxdGpuEnvironmentDefaults(bool exchange, bool directS3) {
     setDefault("KVIKIO_TASK_SIZE", "33554432");
     setDefault("KVIKIO_REMOTE_IO_BACKEND", "MULTI_POLL");
     setDefault("KVIKIO_REMOTE_DIRECT_RECEIVE", "REQUIRE");
+    setDefault("KVIKIO_REMOTE_ADAPTIVE_TCP_MSS", "ON");
     setDefault("KVIKIO_REMOTE_IO_MAX_CONCURRENT_REQUESTS", "128");
     setDefault("KVIKIO_REMOTE_IO_NUM_REACTORS", "4");
     setDefault("KVIKIO_REMOTE_IO_REACTOR_DISPATCH", "PER_CHUNK");
