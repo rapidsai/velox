@@ -1,0 +1,24 @@
+# Staging Branch Manifest
+# This file describes how this staging branch was created
+
+metadata:
+  generated_at: "2026-10-01T03:25:02Z"
+  target_repository: "rapidsai/velox"
+  target_branch: "staging"
+  dated_branch: "staging_10-01-2026"
+
+base:
+  repository: "facebookincubator/velox"
+  branch: "main"
+  commit: "7d3fdac1dfa349d34b2cdd9b3decc5e0e257f374"
+  url: "https://github.com/facebookincubator/velox/tree/7d3fdac1dfa349d34b2cdd9b3decc5e0e257f374"
+
+additional_merge:
+  null  # No additional repository merged
+
+merged_prs:
+  - number: 18500
+    commit: "a32c53fda8f69547cd4192a1a2392d8942f02a36"
+    author: "karthikeyann"
+    title: "feat(cudf): Add byte target for CudfBatchConcat"
+    url: "https://github.com/facebookincubator/velox/pull/18500"
