@@ -1,0 +1,29 @@
+# Staging Branch Manifest
+# This file describes how this staging branch was created
+
+metadata:
+  generated_at: "2026-10-02T03:21:33Z"
+  target_repository: "rapidsai/velox"
+  target_branch: "staging"
+  dated_branch: "staging_10-02-2026"
+
+base:
+  repository: "facebookincubator/velox"
+  branch: "main"
+  commit: "f1705c31955514e22e0e1e76550ac52c68f72961"
+  url: "https://github.com/facebookincubator/velox/tree/f1705c31955514e22e0e1e76550ac52c68f72961"
+
+additional_merge:
+  null  # No additional repository merged
+
+merged_prs:
+  - number: 18500
+    commit: "a32c53fda8f69547cd4192a1a2392d8942f02a36"
+    author: "karthikeyann"
+    title: "feat(cudf): Add byte target for CudfBatchConcat"
+    url: "https://github.com/facebookincubator/velox/pull/18500"
+  - number: 19256
+    commit: "9081bfeacc03dd1cfbcd0ffccd599885c898a6e0"
+    author: "bdice"
+    title: "feat(cudf): Update to cuDF 26.12 and adapt to cuda::device_buffer null masks"
+    url: "https://github.com/facebookincubator/velox/pull/19256"
