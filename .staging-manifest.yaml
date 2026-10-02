@@ -1,0 +1,24 @@
+# Staging Branch Manifest
+# This file describes how this staging branch was created
+
+metadata:
+  generated_at: "2026-10-02T05:27:13Z"
+  target_repository: "rapidsai/velox"
+  target_branch: "staging-test"
+  dated_branch: "staging-test_10-02-2026"
+
+base:
+  repository: "facebookincubator/velox"
+  branch: "main"
+  commit: "30f390826e01a1572a3ba24a87f515a1ad8c3f24"
+  url: "https://github.com/facebookincubator/velox/tree/30f390826e01a1572a3ba24a87f515a1ad8c3f24"
+
+additional_merge:
+  null  # No additional repository merged
+
+merged_prs:
+  - number: 19256
+    commit: "9081bfeacc03dd1cfbcd0ffccd599885c898a6e0"
+    author: "bdice"
+    title: "feat(cudf): Update to cuDF 26.12 and adapt to cuda::device_buffer null masks"
+    url: "https://github.com/facebookincubator/velox/pull/19256"
