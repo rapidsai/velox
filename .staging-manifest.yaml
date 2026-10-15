@@ -1,0 +1,24 @@
+# Staging Branch Manifest
+# This file describes how this staging branch was created
+
+metadata:
+  generated_at: "2026-10-15T07:47:55Z"
+  target_repository: "rapidsai/velox"
+  target_branch: "staging"
+  dated_branch: "staging_10-15-2026"
+
+base:
+  repository: "facebookincubator/velox"
+  branch: "main"
+  commit: "349e414fd8cd5a46d37bacb04267d4c62e1b5af1"
+  url: "https://github.com/facebookincubator/velox/tree/349e414fd8cd5a46d37bacb04267d4c62e1b5af1"
+
+additional_merge:
+  null  # No additional repository merged
+
+merged_prs:
+  - number: 19590
+    commit: "6c702140daabf9f1388a455723a020353fb9c1a0"
+    author: "karthikeyann"
+    title: "feat(cudf): Allowlist CPU operators in strict mode and record fallback per operator"
+    url: "https://github.com/facebookincubator/velox/pull/19590"
