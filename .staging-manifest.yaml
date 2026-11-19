@@ -1,0 +1,44 @@
+# Staging Branch Manifest
+# This file describes how this staging branch was created
+
+metadata:
+  generated_at: "2026-11-19T03:13:11Z"
+  target_repository: "rapidsai/velox"
+  target_branch: "staging"
+  dated_branch: "staging_11-19-2026"
+
+base:
+  repository: "facebookincubator/velox"
+  branch: "main"
+  commit: "dfa98de67973a882bd7b3a54c931d356962a75ac"
+  url: "https://github.com/facebookincubator/velox/tree/dfa98de67973a882bd7b3a54c931d356962a75ac"
+
+additional_merge:
+  null  # No additional repository merged
+
+merged_prs:
+  - number: 20174
+    commit: "d3234df596eb64f0733b83c2146b82eda2313ac8"
+    author: "galipremsagar"
+    title: "perf(cudf): Prune Parquet row groups on the host"
+    url: "https://github.com/facebookincubator/velox/pull/20174"
+  - number: 19952
+    commit: "d83ed78aac01fbe14c046b2bbc4af2dd5d9b4560"
+    author: "galipremsagar"
+    title: "feat(cudf): Serialize single-destination output pages on the GPU"
+    url: "https://github.com/facebookincubator/velox/pull/19952"
+  - number: 20101
+    commit: "1642bf79e6f2ea8b5394dcfcf15b749140ff99aa"
+    author: "galipremsagar"
+    title: "perf(cudf): Merge the sorted inputs of a merge exchange"
+    url: "https://github.com/facebookincubator/velox/pull/20101"
+  - number: 19928
+    commit: "fad891b2275253aab7ca80b6b9f54dbd451f4cac"
+    author: "maharshi-coding"
+    title: "perf(cudf): Avoid single-batch groupby copy and synchronization"
+    url: "https://github.com/facebookincubator/velox/pull/19928"
+  - number: 19236
+    commit: "c7697758b2aebc94d558559c42824a140a3ae62d"
+    author: "Avinash-Raj"
+    title: "fix(cudf): Evaluate and/or operands only on undecided rows"
+    url: "https://github.com/facebookincubator/velox/pull/19236"
