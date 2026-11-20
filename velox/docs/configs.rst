@@ -1166,7 +1166,7 @@ Parquet Options (prefix ``hive.parquet.``)
        Session: ``parquet_writer_max_target_file_size``.
 
        Row-group sizing is independent of this setting. The soft byte target is configured by
-       ``writer.row-group-size``, while the row count is capped at 1,048,576. When
+       ``writer.row-group-size``, and the row count by ``writer.row-group-rows``. When
        ``writer.max-target-file-size`` is set, the writer may flush the current row group early so
        the accumulated file size is visible and rotation can occur.
    * - ``writer.enable-dictionary``
@@ -1204,6 +1204,10 @@ Parquet Options (prefix ``hive.parquet.``)
      - Soft target for the serialized row group size. The estimate includes compressed bytes for
        encoded pages and estimated bytes for data that has not yet been serialized into pages, so a
        row group may slightly exceed the target. Session: ``parquet_writer_row_group_size``.
+   * - ``writer.row-group-rows``
+     - integer
+     - 1048576
+     - Maximum number of rows in a row group. Session: ``parquet_writer_row_group_rows``.
    * - ``writer.created-by``
      - string
      - parquet-cpp-velox version 0.0.0
@@ -1687,11 +1691,19 @@ Note: These configurations are experimental and subject to change.
    * - cudf.function_engine
      - string
      - presto
+     - Register the function for a specific engine. The optional values are presto or spark.
    * - cudf.timestamp_unit
      - string
      - ns
      - Timestamp precision unit for cuDF timestamp types. Valid values are: "s" (seconds), "ms" (milliseconds), "us" (microseconds), "ns" (nanoseconds). This controls the precision of timestamp data when converting between Velox and cuDF formats.
-     - Register the function for a specific engine. The optional values are presto or spark.
+   * - cudf.presto_output_enabled
+     - bool
+     - false
+     - If true, a task output with one destination buffer (a single, broadcast or arbitrary output without partition keys) that uses the Presto serde without compression is serialized into Presto pages on the GPU by CudfPrestoOutput. Otherwise the GPU batches are converted to Velox vectors and serialized by PartitionedOutput on the CPU. The pages carry a checksum when the output buffer manager has a Presto output stream listener, as the pages of PartitionedOutput do. Also a query config key.
+   * - cudf.presto_output_page_bytes
+     - integer
+     - 1048576
+     - Serialized bytes per Presto page built on the GPU, the page cap of PartitionedOutput by default; a page exceeds it by less than one row plus its headers and holds at most 1048576 rows. CudfPrestoOutput gathers input until it fills a page, unless the output flushes eagerly. Also a query config key.
 
 Cudf Hive Connector Configuration (Experimental)
 ------------------------------------------------
