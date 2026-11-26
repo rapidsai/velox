@@ -19,16 +19,11 @@
 #include <folly/Executor.h>
 #include <folly/container/F14Map.h>
 
-#include "velox/common/caching/FileHandle.h"
 #include "velox/common/config/Config.h"
 #include "velox/connectors/Connector.h"
-#include "velox/dwio/common/BufferedInput.h"
-#include "velox/dwio/common/Reader.h"
-
-namespace facebook::velox::exec {
-class Expr;
-class FieldReference;
-} // namespace facebook::velox::exec
+#include "velox/dwio/common/MetadataFilter.h"
+#include "velox/dwio/common/Options.h"
+#include "velox/dwio/common/ScanSpec.h"
 
 namespace facebook::velox::connector {
 
@@ -38,16 +33,6 @@ class FileTableHandle;
 using FileTableHandlePtr = std::shared_ptr<const FileTableHandle>;
 class FileConfig;
 struct FileConnectorSplit;
-
-struct FormatScopedConfigs {
-  config::ConfigBase connectorConfig;
-  config::ConfigBase sessionProperties;
-};
-
-FormatScopedConfigs makeFormatScopedConfigs(
-    const FileConfig& fileConfig,
-    const config::ConfigBase& sessionProperties,
-    dwio::common::FileFormat fileFormat);
 
 /// Configures reader options for reading a data file. This is the generic
 /// version that does not apply serde (serialization/deserialization) options.
@@ -82,40 +67,11 @@ void configureRowReaderOptions(
     folly::Executor* ioExecutor,
     dwio::common::RowReaderOptions& rowReaderOptions);
 
-/// Tests whether a file should be read based on partition key values and
-/// column statistics. Returns true if the file passes all filters, false
-/// if it can be skipped.
-bool testFilters(
-    const common::ScanSpec* scanSpec,
-    const dwio::common::Reader* reader,
-    const std::string& filePath,
-    const std::unordered_map<std::string, std::optional<std::string>>&
-        partitionKey,
-    const std::unordered_map<std::string, FileColumnHandlePtr>&
-        partitionKeysHandle,
-    bool asLocalTime);
-
-const std::string& getColumnName(const common::Subfield& subfield);
-
-void checkColumnNameLowerCase(const TypePtr& type);
-
-void checkColumnNameLowerCase(
-    const common::SubfieldFilters& filters,
-    const std::unordered_map<std::string, FileColumnHandlePtr>& infoColumns);
-
-void checkColumnNameLowerCase(const core::TypedExprPtr& typeExpr);
-
 struct SpecialColumnNames {
   std::optional<std::string> rowIndex;
   std::optional<std::string> rowId;
   std::optional<std::string> readRange;
 };
-
-/// Check that two FileColumnHandle instances are consistent in terms of
-/// column type, data type, and file type. Throw if inconsistent.
-void checkColumnHandleConsistent(
-    const FileColumnHandle& x,
-    const FileColumnHandle& y);
 
 /// Creates a ScanSpec for reading data from files.
 ///
@@ -173,103 +129,5 @@ std::shared_ptr<common::ScanSpec> makeScanSpec(
     const SpecialColumnNames& specialColumns,
     bool disableStatsBasedFilterReorder,
     memory::MemoryPool* pool);
-
-std::unique_ptr<dwio::common::BufferedInput> createBufferedInput(
-    const FileHandle& fileHandle,
-    const dwio::common::ReaderOptions& readerOpts,
-    const ConnectorQueryCtx* connectorQueryCtx,
-    std::shared_ptr<io::IoStatistics> ioStatistics,
-    std::shared_ptr<IoStats> ioStats,
-    folly::Executor* executor,
-    const folly::F14FastMap<std::string, std::string>& fileReadOps = {});
-
-/// Given a boolean expression, breaks it up into conjuncts and sorts these into
-/// single-column comparisons with constants (filters), rand() < sampleRate, and
-/// the rest (return value).
-///
-/// Multiple rand() < K conjuncts are combined into a single sampleRate by
-/// multiplying individual sample rates. rand() < 0.1 and rand() < 0.2 produces
-/// sampleRate = 0.02.
-///
-/// Multiple single-column comparisons with constants that reference the same
-/// column or subfield are combined into a single filter. Pre-existing entries
-/// in 'filters' are preserved and combined with the ones extracted from the
-/// 'expr'.
-///
-/// NOT(x OR y) is converted to (NOT x) AND (NOT y).
-///
-/// @param expr Boolean expression to break up.
-/// @param evaluator Expression evaluator to use.
-/// @param filters Mapping from a column or a subfield to comparison with
-/// constant.
-/// @param sampleRate Sample rate extracted from rand() < sampleRate conjuncts.
-/// @return Expression with filters and rand() < sampleRate conjuncts removed.
-///
-/// Examples:
-///   expr := a = 1 AND b > 0
-///   filters := {a: eq(1), b: gt(0)}
-//    sampleRate left unmodified
-//    return value is nullptr
-///
-///   expr: not (a > 0 or b > 10)
-///   filters := {a: le(0), b: le(10)}
-///   sampleRate left unmodified
-///   return value is nullptr
-///
-///   expr := a > 0 AND a < b AND rand() < 0.1
-///   filters := {a: gt(0)}
-///   sampleRate := 0.1
-///   return value is a < b
-///
-/// A null 'expr', a scan with no remaining filter, returns nullptr.
-core::TypedExprPtr extractFiltersFromRemainingFilter(
-    const core::TypedExprPtr& expr,
-    core::ExpressionEvaluator* evaluator,
-    common::SubfieldFilters& filters,
-    double& sampleRate);
-
-/// Determines whether a field referenced in the remaining filter should be
-/// eagerly materialized (loaded upfront) or can be lazily loaded.
-///
-/// Returns true (eager materialization needed) when:
-/// 1. The remaining filter is NOT an AND expression (e.g., OR), because row
-///    access patterns are unpredictable.
-/// 2. The field is used within a conditional sub-expression (IF, CASE, nested
-///    AND/OR) of an AND expression, because the conditional may access rows
-///    unpredictably.
-///
-/// Returns false (lazy loading OK) when the remaining filter is an AND
-/// expression and the field is only used in simple, non-conditional conjuncts.
-///
-/// @param remainingFilter The compiled remaining filter expression.
-/// @param field The field reference to check.
-/// @return true if the field should be eagerly materialized.
-bool shouldEagerlyMaterialize(
-    const exec::Expr& remainingFilter,
-    const exec::FieldReference& field);
-
-/// Creates a point lookup filter from a variant value.
-/// Null values are not allowed.
-/// Supports TINYINT, SMALLINT, INTEGER, BIGINT, REAL, DOUBLE, BOOLEAN,
-/// VARCHAR, and VARBINARY types.
-/// @param type The type of the value.
-/// @param value The filter value (must not be null).
-/// @return A filter for point lookup, or nullptr if type is not supported.
-std::unique_ptr<common::Filter> createPointFilter(
-    const TypePtr& type,
-    const variant& value);
-
-/// Creates a range filter from two variant values.
-/// Both lower and upper bounds are inclusive. Null values are not allowed.
-/// Supports TINYINT, SMALLINT, INTEGER, BIGINT, REAL, DOUBLE, VARCHAR,
-/// and VARBINARY types.
-/// @param type The type of the values.
-/// @param lower The lower bound value.
-/// @param upper The upper bound value.
-/// @return A filter for range lookup, or nullptr if type is not supported.
-std::unique_ptr<common::Filter> createRangeFilter(
-    const TypePtr& type,
-    const variant& lower,
-    const variant& upper);
 
 } // namespace facebook::velox::connector
