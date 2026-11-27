@@ -1166,7 +1166,7 @@ Parquet Options (prefix ``hive.parquet.``)
        Session: ``parquet_writer_max_target_file_size``.
 
        Row-group sizing is independent of this setting. The soft byte target is configured by
-       ``writer.row-group-size``, while the row count is capped at 1,048,576. When
+       ``writer.row-group-size``, and the row count by ``writer.row-group-rows``. When
        ``writer.max-target-file-size`` is set, the writer may flush the current row group early so
        the accumulated file size is visible and rotation can occur.
    * - ``writer.enable-dictionary``
@@ -1204,6 +1204,10 @@ Parquet Options (prefix ``hive.parquet.``)
      - Soft target for the serialized row group size. The estimate includes compressed bytes for
        encoded pages and estimated bytes for data that has not yet been serialized into pages, so a
        row group may slightly exceed the target. Session: ``parquet_writer_row_group_size``.
+   * - ``writer.row-group-rows``
+     - integer
+     - 1048576
+     - Maximum number of rows in a row group. Session: ``parquet_writer_row_group_rows``.
    * - ``writer.created-by``
      - string
      - parquet-cpp-velox version 0.0.0
@@ -1672,6 +1676,10 @@ Note: These configurations are experimental and subject to change.
      - bool
      - true
      - If true, allow falling back to Velox CPU execution when an operation is not supported in cuDF execution. If false, an error will be thrown if an operation is not supported in cuDF execution.
+   * - cudf.allowed_cpu_operators
+     - string
+     -
+     - Comma-separated Velox operator types (e.g. ``Exchange,MergeExchange``) that are allowed to run on the CPU even when ``cudf.allow_cpu_fallback`` is false, for operators a deployment intentionally keeps on the CPU. Names are case-sensitive and must exactly match the operator type named in the strict-mode error. A CPU operator is reported in its runtime stats as ``cudfCpuAllowlisted`` when listed and ``cudfCpuFallback`` otherwise. Empty by default, so every CPU operator counts as a fallback.
    * - cudf.debug_enabled
      - bool
      - false
