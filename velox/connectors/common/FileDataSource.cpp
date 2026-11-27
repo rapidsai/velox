@@ -26,6 +26,7 @@
 #include "velox/common/time/CpuWallTimer.h"
 #include "velox/connectors/common/ExtractionUtils.h"
 #include "velox/connectors/common/FileConfig.h"
+#include "velox/expression/ExprToSubfieldFilter.h"
 #include "velox/expression/FieldReference.h"
 
 using facebook::velox::common::testutil::TestValue;
@@ -110,7 +111,7 @@ FileDataSource::FileDataSource(
     if (!unique) {
       // This should not happen normally, but there are cases where we get
       // duplicate assignments for partitioning columns.
-      checkColumnHandleConsistent(*handle, *it->second);
+      handle->checkConsistentWith(*it->second);
       VELOX_CHECK_EQ(
           handle->columnType(),
           FileColumnHandle::ColumnType::kPartitionKey,
@@ -123,7 +124,7 @@ FileDataSource::FileDataSource(
   for (auto& handle : tableHandle_->filterColumnHandles()) {
     auto it = columnHandles.find(handle->name());
     if (it != columnHandles.end()) {
-      checkColumnHandleConsistent(*handle, *it->second);
+      handle->checkConsistentWith(*it->second);
       continue;
     }
     processColumnHandle(handle);
@@ -142,7 +143,7 @@ FileDataSource::FileDataSource(
     readColumnNames.push_back(handle->name());
     for (auto& subfield : handle->requiredSubfields()) {
       VELOX_USER_CHECK_EQ(
-          getColumnName(subfield),
+          subfield.baseName(),
           handle->name(),
           "Required subfield does not match column name");
       subfields_[handle->name()].push_back(&subfield);
@@ -152,16 +153,14 @@ FileDataSource::FileDataSource(
 
   if (fileConfig_->isFileColumnNamesReadAsLowerCase(
           connectorQueryCtx->sessionProperties())) {
-    checkColumnNameLowerCase(outputType_);
-    checkColumnNameLowerCase(tableHandle_->subfieldFilters(), infoColumns_);
-    checkColumnNameLowerCase(tableHandle_->remainingFilter());
+    tableHandle_->checkColumnNamesLowerCase(*outputType_);
   }
 
   for (const auto& [k, v] : tableHandle_->subfieldFilters()) {
     fileScanState_->filters.emplace(k.clone(), v);
   }
   double sampleRate = tableHandle_->sampleRate();
-  auto remainingFilter = extractFiltersFromRemainingFilter(
+  auto remainingFilter = exec::ExprToSubfieldFilterParser::extractFilters(
       tableHandle_->remainingFilter(),
       expressionEvaluator_,
       fileScanState_->filters,
@@ -181,11 +180,16 @@ FileDataSource::FileDataSource(
     // These columns must be loaded eagerly (not lazily) so the filter
     // can evaluate before lazy columns are accessed.
     folly::F14FastSet<std::string> remainingFilterColumns;
+    const auto fieldsReadForAllPassingRows =
+        remainingFilterExpr->fieldsReadForAllPassingRows();
     for (auto& input : remainingFilterExpr->distinctFields()) {
       remainingFilterColumns.insert(input->field());
       auto it = columnNames.find(input->field());
       if (it != columnNames.end()) {
-        if (shouldEagerlyMaterialize(*remainingFilterExpr, *input)) {
+        if (std::find(
+                fieldsReadForAllPassingRows.begin(),
+                fieldsReadForAllPassingRows.end(),
+                input) == fieldsReadForAllPassingRows.end()) {
           multiReferencedFields_.push_back(it->second);
         }
         continue;
@@ -204,7 +208,7 @@ FileDataSource::FileDataSource(
           fmt::join(remainingFilterSubfields_, ", "));
     }
     for (auto& subfield : remainingFilterSubfields_) {
-      const auto& name = getColumnName(subfield);
+      const auto& name = subfield.baseName();
       auto it = subfields_.find(name);
       if (it != subfields_.end()) {
         // Some subfields of the column are already projected out, we append the
