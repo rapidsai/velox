@@ -66,6 +66,7 @@ if(VELOX_ENABLE_ABFS)
       velox_file
       velox_exec
       velox_exec_test_lib
+      velox_hive_storage_adapters_server_startup
       velox_test_util
   )
   target_compile_options(velox_cudf_abfs_read_test PRIVATE -Wno-deprecated-declarations)
@@ -111,6 +112,12 @@ velox_add_cudf_test(
   NAME velox_cudf_gpu_capabilities_test
   SOURCES Main.cpp GpuCapabilitiesTest.cpp
   LIBS velox_cudf_exec Folly::folly
+)
+
+velox_add_cudf_test(
+  NAME velox_cudf_fallback_policy_test
+  SOURCES Main.cpp FallbackPolicyTest.cpp
+  LIBS ${CUDF_TEST_DEFAULT_LIBS}
 )
 
 velox_add_cudf_test(
@@ -276,6 +283,7 @@ if(VELOX_ENABLE_S3)
       velox_cudf_hive_connector
       velox_exec
       velox_exec_test_lib
+      velox_hive_storage_adapters_server_startup
       velox_file
       velox_s3fs
       velox_stats_reporter_utils
